@@ -1,0 +1,85 @@
+# ==============================================================
+#  claude-agent-web-demo · .gitignore
+#  原则：凡是「含真实凭证 / 个人信息 / 本机运行时状态 / 工具缓存」
+#  的文件一律不入库。配置方法见 docs/CONFIGURATION.md。
+#  注意：.gitignore 不支持行尾内联注释，注释必须独占一行。
+# ==============================================================
+
+# ---- 依赖 ----
+node_modules/
+
+# ---- 环境变量与密钥（含飞书 appSecret 等，务必忽略）----
+.env
+.env.*
+!.env.example
+
+# ---- 运行时敏感状态（真实凭证 / 手机号 / open_id / Anthropic token）----
+# settings.json  : 飞书 appId/appSecret + Anthropic OAuth token
+# bindings.json  : open_id ↔ 手机号 绑定
+# cleanup-log.json / user-vars.json : 手机号 / 邮箱等 PII
+settings.json
+bindings.json
+cleanup-log.json
+user-vars.json
+feishu-status.json
+saved-dirs.json
+
+# ---- 运行时数据（本机会话 / 事件 / 任务状态）----
+tasks.json
+requirements.json
+requirements/
+event-log.json
+event-log.jsonl
+review-log.jsonl
+# user-log.jsonl : 用户在执行台/飞书亲手打出的原文（记忆库数据采集层），属个人数据
+user-log.jsonl
+active-runs.json
+pending-resume.json
+conv-notify.json
+learned-keywords.json
+
+# ---- 动作配置（本地运维配置 + 执行脚本）----
+# scripts/ 内含 reset_onboarding.py 等，可能硬编码后台账密，切勿入库
+action-configs.json
+action-log.jsonl
+scripts/*
+# 仅允许 Tauri 构建脚本入库（无敏感信息）
+!scripts/build-win.sh
+!scripts/build-win.bat
+!scripts/build-mac.sh
+!scripts/prepare-sidecar.mjs
+
+# ---- 日志与临时文件 ----
+logs/
+*.log
+*.json.lock
+*.jsonl.lock
+*.tmp
+
+# ---- 上传目录 ----
+.uploads/
+
+# ---- 本地工具产物（Serena 缓存 / spec-workflow 状态）----
+.serena/
+.spec-workflow/
+
+# ---- 操作系统 / 编辑器 ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Git worktrees
+.worktrees/
+unattended.json
+
+# 临时调试脚本与截图（tmp-p.mjs / tmp-*.png 等）
+# 加这条规则之前已经误提交过 22 个，务必保留，否则 `git add -A` 会再次带入
+tmp-*
+
+# 视觉伴侣 brainstorm 会话产物
+.superpowers/
+
+# memory-bank.json : 提炼出的个人偏好条目 + 对话原话摘录，属个人数据
+memory-bank.json

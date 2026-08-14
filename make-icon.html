@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>图标生成器</title>
+<style>
+  body { background: #111; display: flex; flex-direction: column; align-items: center; gap: 20px; padding: 40px; font-family: sans-serif; color: #ccc; }
+  canvas { border-radius: 12px; }
+  .row { display: flex; gap: 20px; align-items: flex-start; }
+  .col { display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 13px; }
+  button { background: #d97757; color: #fff; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  button:hover { background: #e88f6f; }
+</style>
+</head>
+<body>
+<h3 style="color:#d97757;margin:0">Vibe Coding — 图标生成</h3>
+
+<div class="row">
+  <div class="col">
+    <canvas id="c256" width="256" height="256"></canvas>
+    <span>256×256</span>
+    <button onclick="save('c256','icon-256.png')">保存 256px</button>
+  </div>
+  <div class="col">
+    <canvas id="c128" width="128" height="128"></canvas>
+    <span>128×128</span>
+    <button onclick="save('c128','icon-128.png')">保存 128px</button>
+  </div>
+  <div class="col">
+    <canvas id="c64" width="64" height="64"></canvas>
+    <span>64×64</span>
+    <button onclick="save('c64','icon-64.png')">保存 64px</button>
+  </div>
+  <div class="col">
+    <canvas id="c32" width="32" height="32"></canvas>
+    <span>32×32（托盘用）</span>
+    <button onclick="save('c32','icon-32.png')">保存 32px</button>
+  </div>
+</div>
+
+<script>
+// 画六芒星（两个等边三角形叠加）
+function drawIcon(canvas) {
+  const s = canvas.width;
+  const ctx = canvas.getContext('2d');
+  const cx = s / 2, cy = s / 2;
+  const r = s * 0.38;          // 外接圆半径
+  const pad = s * 0.10;        // 留边
+
+  // ── 黑色圆角背景 ──
+  const rr = s * 0.18;         // 圆角半径
+  ctx.clearRect(0, 0, s, s);
+  ctx.beginPath();
+  ctx.roundRect(0, 0, s, s, rr);
+  ctx.fillStyle = '#0e0f13';
+  ctx.fill();
+
+  // ── 绘制两个叠加三角形（六芒星）──
+  // 描边风格：与项目 SVG 一致
+  const stroke1 = '#d97757';   // 橙色（正三角）
+  const stroke2 = '#e88f6f';   // 浅橙（倒三角）
+  const fill2   = 'rgba(217,119,87,0.18)';
+  const lw = Math.max(1, s * 0.018);
+
+  function triangle(cx, cy, r, angle, fillColor, strokeColor) {
+    ctx.beginPath();
+    for (let i = 0; i < 3; i++) {
+      const a = (i * 120 + angle) * Math.PI / 180;
+      const x = cx + r * Math.sin(a);
+      const y = cy - r * Math.cos(a);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    if (fillColor) { ctx.fillStyle = fillColor; ctx.fill(); }
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = lw;
+    ctx.stroke();
+  }
+
+  // 正三角（顶点向上）
+  triangle(cx, cy, r, 0, null, stroke1);
+  // 倒三角（顶点向下）+ 半透明填充
+  triangle(cx, cy, r, 180, fill2, stroke2);
+}
+
+const sizes = [256, 128, 64, 32];
+sizes.forEach(s => drawIcon(document.getElementById('c' + s)));
+
+function save(id, name) {
+  const a = document.createElement('a');
+  a.href = document.getElementById(id).toDataURL('image/png');
+  a.download = name;
+  a.click();
+}
+</script>
+</body>
+</html>

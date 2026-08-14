@@ -1,0 +1,242 @@
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                                                                           ║
+║          📁 claude-p-web-demo 项目文档生成完毕！                          ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+已生成以下文档文件：
+
+📄 1. PROJECT-STRUCTURE.md
+   ├─ 完整的项目目录树结构
+   ├─ 6 个核心模块详解
+   ├─ 所有降级机制说明
+   ├─ 数据存储位置
+   └─ 关键文件速查表
+
+📄 2. DEGRADATION-TEST-GUIDE.md  
+   ├─ 6 层降级机制详解
+   ├─ Token 轮换降级测试
+   ├─ Effort 参数降级测试
+   ├─ 模型分类降级测试
+   ├─ 会话恢复降级测试
+   ├─ 通知平台降级测试
+   ├─ 自动压缩降级测试
+   ├─ 综合降级测试场景
+   ├─ 降级测试检查清单
+   └─ 调试技巧和性能观察
+
+📄 3. TESTING-QUICK-START.md
+   ├─ 快速开始指南（3 步）
+   ├─ 6 层降级机制概览表
+   ├─ 单独测试各个机制
+   ├─ 监控降级事件的命令
+   ├─ 完整测试场景
+   ├─ 调试技巧
+   ├─ 测试检查清单
+   └─ 常见问题解答
+
+🔧 4. test-degradation.mjs
+   ├─ 自动化测试脚本
+   ├─ 支持 6 个独立场景
+   ├─ 彩色化输出
+   ├─ 快速诊断工具
+   └─ 可独立运行
+
+═══════════════════════════════════════════════════════════════════════════
+
+🎯 快速开始：
+
+  # 第 1 步：检查项目结构和降级机制
+  node test-degradation.mjs
+
+  # 第 2 步：启动应用
+  npm start
+
+  # 第 3 步：访问 Web UI
+  # http://127.0.0.1:3000
+
+═══════════════════════════════════════════════════════════════════════════
+
+📊 项目结构速览：
+
+  src/
+  ├── app/                    # 应用路由和意图识别
+  ├── entrypoints/            # Web + 飞书两渠道入口
+  ├── features/               # 业务功能（6 个模块）
+  │   ├── token-rotation      # Token 轮换 + 限流降级
+  │   ├── task-triage         # 任务分类 + effort 降级
+  │   ├── claude-exec         # Claude 代码执行
+  │   ├── data-cleanup        # 数据清理
+  │   ├── feedback            # 反馈系统
+  │   └── ...
+  ├── integrations/           # 外部服务集成
+  │   ├── claude.js           # Claude Agent SDK（核心）
+  │   ├── lark.js             # 飞书 API
+  │   ├── notify.js           # 跨平台通知（降级）
+  │   └── shell.js            # Shell 执行
+  ├── shared/                 # 共享工具库
+  │   ├── config.js           # 配置管理
+  │   ├── logger.js           # 日志系统
+  │   └── messages.js         # 消息处理
+  └── store/                  # 数据持久化层（14 个模块）
+      ├── index.js            # 底层存储工具（文件锁）
+      ├── active-runs.js      # 活跃运行
+      ├── runs.js             # 运行管理（核心）
+      ├── history.js          # 会话历史
+      ├── pending-resume.js   # 待恢复队列
+      ├── bindings.js         # Token 绑定
+      ├── tasks.js            # 任务列表
+      ├── settings.js         # 用户设置
+      └── ...
+
+═══════════════════════════════════════════════════════════════════════════
+
+🔄 6 层降级机制详解：
+
+  1️⃣  Token 轮换降级
+      触发: Token 限流
+      动作: 自动切换备用 Token
+      位置: src/features/token-rotation.js
+      恢复: 60 秒后自动尝试恢复
+
+  2️⃣  Effort 参数降级  
+      触发: 模型不支持 effort 等级
+      动作: SDK 自动降级到低等级
+      位置: src/integrations/claude.js
+      恢复: 自动，应用层无感知
+
+  3️⃣  模型分类降级
+      触发: 任务分类超时（Haiku）
+      动作: 降级到 medium effort
+      位置: src/entrypoints/web/server.js
+      恢复: 立即使用降级参数
+
+  4️⃣  会话恢复降级
+      触发: 应用崩溃
+      动作: 自动保存进度，重启后恢复
+      位置: src/store/pending-resume.js
+      恢复: 启动时自动恢复
+
+  5️⃣  通知平台降级
+      触发: 非 Windows 平台
+      动作: 降级为 console.log
+      位置: src/integrations/notify.js
+      恢复: 自动，无需配置
+
+  6️⃣  自动压缩降级
+      触发: 长会话消息堆积
+      动作: 自动压缩历史消息
+      位置: src/entrypoints/web/server.js
+      恢复: 自动，节省 Token 20-40%
+
+═══════════════════════════════════════════════════════════════════════════
+
+📝 数据存储文件位置：
+
+  根目录/
+  ├── tasks.json              # 任务列表
+  ├── active-runs.json        # 活跃运行
+  ├── event-log.json          # 事件日志（JSON）
+  ├── event-log.jsonl         # 事件日志（JSONL 流式）
+  ├── bindings.json           # Token / 账户绑定
+  ├── pending-resume.json     # 待恢复会话队列
+  ├── saved-dirs.json         # 保存的工作目录
+  ├── feishu-status.json      # 飞书连接状态
+  ├── cleanup-log.json        # 清理日志
+  └── settings.json           # 用户设置（自动生成）
+
+  ℹ️  所有数据通过 src/store/index.js 的文件锁机制访问，
+      确保 web + feishu 两个进程的并发安全。
+
+═══════════════════════════════════════════════════════════════════════════
+
+🧪 测试命令速查：
+
+  # 运行所有降级功能测试
+  node test-degradation.mjs
+
+  # 仅测试 Token 轮换
+  node test-degradation.mjs --scenario=token
+
+  # 仅测试 Effort 降级
+  node test-degradation.mjs --scenario=effort
+
+  # 仅测试分类降级
+  node test-degradation.mjs --scenario=classification
+
+  # 仅测试会话恢复
+  node test-degradation.mjs --scenario=resume
+
+  # 仅测试通知平台
+  node test-degradation.mjs --scenario=notify
+
+  # 仅测试自动压缩
+  node test-degradation.mjs --scenario=compress
+
+═══════════════════════════════════════════════════════════════════════════
+
+📊 文件统计：
+
+  总文件数:    35+ .js 源代码文件
+  测试文件:    6 个 .test.js 单元测试
+  测试脚本:    8+ .mjs 集成测试脚本
+  数据文件:    JSON 配置和状态文件
+  文档文件:    4 个 markdown 文档
+
+═══════════════════════════════════════════════════════════════════════════
+
+✅ 项目完整度检查表：
+
+  ✅ 多渠道部署          Web + 飞书同步
+  ✅ Token 轮换          自动降级和恢复
+  ✅ 会话恢复            支持中断续接
+  ✅ 流式输出            SSE 实时推送
+  ✅ 任务分类            快速意图识别
+  ✅ 权限管理            细粒度工具审批
+  ✅ 日志系统            完整的事件追踪
+  ✅ 数据持久化          文件锁保证并发安全
+  ✅ 降级机制            6 层自动降级
+  ✅ 文档完整            所有功能有详细说明
+
+═══════════════════════════════════════════════════════════════════════════
+
+💡 建议的使用流程：
+
+  1. 先读 TESTING-QUICK-START.md（快速入门）
+  2. 运行 node test-degradation.mjs（自动检查）
+  3. 查看 PROJECT-STRUCTURE.md（了解项目结构）
+  4. 参考 DEGRADATION-TEST-GUIDE.md（详细测试指南）
+  5. 启动应用测试实际功能
+
+═══════════════════════════════════════════════════════════════════════════
+
+🎯 核心亮点：
+
+  • 6 层自动降级确保「永不停服」
+  • Token 轮换支持 2+ 个 API 配额同时使用
+  • 会话恢复保证中断后能继续执行
+  • 自动压缩节省 Token 20-40%
+  • 跨平台适配（Windows/Linux/Mac）
+  • 完整的日志和监控体系
+  • 精细的权限和审批控制
+
+═══════════════════════════════════════════════════════════════════════════
+
+📞 需要帮助？
+
+  查看对应的文档文件：
+  - PROJECT-STRUCTURE.md         项目结构和模块说明
+  - DEGRADATION-TEST-GUIDE.md    降级功能详细测试
+  - TESTING-QUICK-START.md       快速开始和常见问题
+  - QUICK-REFERENCE.txt          项目快速参考
+
+  或运行帮助命令：
+  - node test-degradation.mjs --help
+
+═══════════════════════════════════════════════════════════════════════════
+
+生成时间: 2026-07-19 16:41
+项目位置: C:\Users\DELL\Desktop\claude-p-web-demo
+文档版本: 1.0
+
+═══════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,396 @@
+/* ===== 容器布局 ===== */
+.md-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 16px;
+  color: var(--faint);
+}
+
+.md-empty-icon {
+  font-size: 48px;
+  opacity: 0.3;
+}
+
+.md-empty-text {
+  font-size: 13px;
+}
+
+#mdOpenFileBtn, #mdOpenFileBtn2 {
+  padding: 8px 16px;
+}
+
+#mdContainer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ===== 工具栏 ===== */
+.md-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.md-path {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--faint);
+  flex: 1;
+  min-width: 200px;
+}
+
+.md-path-label {
+  font-weight: 500;
+}
+
+.md-file-name {
+  color: var(--text);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 300px;
+}
+
+.md-file-info {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.md-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.md-actions .btn {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+/* ===== 主区域布局 ===== */
+.md-main {
+  display: flex;
+  flex: 1;
+  gap: 0;
+  overflow: hidden;
+}
+
+/* ===== 目录树面板 ===== */
+.md-toc-panel {
+  width: 220px;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.md-toc-head {
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  background: var(--panel);
+}
+
+.md-toc-tree {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.md-toc-tree::-webkit-scrollbar {
+  width: 6px;
+}
+
+.md-toc-tree::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.md-toc-tree::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+.md-toc-tree::-webkit-scrollbar-thumb:hover {
+  background: var(--border-soft);
+}
+
+.md-toc-item {
+  display: block;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.15s;
+}
+
+.md-toc-item:hover {
+  background: var(--accent-ultra-soft, rgba(217, 119, 87, 0.08));
+}
+
+.md-toc-item.active {
+  background: var(--accent-soft, rgba(217, 119, 87, 0.14));
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 缩进：每个级别 12px */
+.md-toc-item[data-level="1"] { padding-left: 12px; }
+.md-toc-item[data-level="2"] { padding-left: 24px; }
+.md-toc-item[data-level="3"] { padding-left: 36px; }
+.md-toc-item[data-level="4"] { padding-left: 48px; }
+.md-toc-item[data-level="5"] { padding-left: 60px; }
+.md-toc-item[data-level="6"] { padding-left: 72px; }
+
+/* ===== 内容面板 ===== */
+.md-content-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* ===== 搜索框 ===== */
+.md-search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+#mdSearchInput {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  transition: border-color 0.15s;
+}
+
+#mdSearchInput::placeholder {
+  color: var(--faint);
+}
+
+#mdSearchInput:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.md-search-count {
+  font-size: 11px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+#mdSearchClearBtn {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+/* ===== 内容区 ===== */
+#mdContent {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+#mdContent::-webkit-scrollbar {
+  width: 8px;
+}
+
+#mdContent::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#mdContent::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+#mdContent::-webkit-scrollbar-thumb:hover {
+  background: var(--border-soft);
+}
+
+/* ===== Markdown 渲染样式 ===== */
+#mdContent h1,
+#mdContent h2,
+#mdContent h3,
+#mdContent h4,
+#mdContent h5,
+#mdContent h6 {
+  margin: 18px 0 8px 0;
+  font-weight: 600;
+  color: var(--text);
+}
+
+#mdContent h1 { font-size: 24px; }
+#mdContent h2 { font-size: 20px; }
+#mdContent h3 { font-size: 18px; }
+#mdContent h4 { font-size: 16px; }
+#mdContent h5 { font-size: 14px; }
+#mdContent h6 { font-size: 13px; }
+
+#mdContent p {
+  margin: 8px 0;
+}
+
+#mdContent ul,
+#mdContent ol {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+
+#mdContent li {
+  margin: 4px 0;
+}
+
+#mdContent blockquote {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-extra-soft, rgba(217, 119, 87, 0.05));
+  color: var(--text);
+}
+
+#mdContent code {
+  background: var(--panel-2);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent-hi);
+}
+
+#mdContent pre {
+  background: var(--panel-2);
+  padding: 12px;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 8px 0;
+  border: 1px solid var(--border-soft);
+}
+
+#mdContent pre code {
+  background: none;
+  padding: 0;
+  color: var(--accent-hi);
+  font-size: 12px;
+}
+
+#mdContent mark {
+  background: var(--amber);
+  color: var(--bg);
+  padding: 2px 4px;
+  border-radius: 2px;
+}
+
+#mdContent table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+#mdContent th,
+#mdContent td {
+  padding: 8px 12px;
+  border: 1px solid var(--border-soft);
+  text-align: left;
+}
+
+#mdContent th {
+  background: var(--panel);
+  font-weight: 600;
+}
+
+#mdContent a {
+  color: var(--accent);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+#mdContent a:hover {
+  text-decoration: underline;
+}
+
+/* ===== 打开历史 ===== */
+.md-history {
+  margin-top: 12px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 10px;
+}
+
+.md-history-head {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--faint);
+  padding: 0 10px;
+  margin-bottom: 6px;
+}
+
+.md-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.md-history-item {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.15s;
+}
+
+.md-history-item:hover {
+  background: var(--accent-ultra-soft, rgba(217, 119, 87, 0.08));
+}
+
+.md-history-item .md-history-time {
+  display: block;
+  font-size: 10px;
+  color: var(--faint);
+  margin-top: 2px;
+}
+
+/* ===== 响应式：小屏幕隐藏目录树 ===== */
+@media (max-width: 900px) {
+  .md-toc-panel {
+    display: none;
+  }
+
+  .md-main {
+    flex-direction: column;
+  }
+}

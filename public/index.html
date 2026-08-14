@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VIBE CODING</title>
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/css/markdown-tool.css" />
+  </head>
+  <body>
+    <!-- 启动罩：后端冷启动期间盖住整个 UI（boot-gate.js 探到 /api/ping 通即撤）。
+         写在静态 HTML 里而非 JS 生成，保证页面第一帧就是罩子，不会闪出一个点不动的界面。 -->
+    <div class="boot-overlay" id="bootOverlay">
+      <svg class="boot-star" id="bootStar" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <g id="btri1">
+          <polygon points="100,25 165,140 35,140" stroke="#d97757" stroke-width="1.5"/>
+        </g>
+        <g id="btri2">
+          <polygon points="100,175 165,60 35,60" stroke="#e88f6f" stroke-width="1.5" fill="rgba(217,119,87,0.14)"/>
+        </g>
+      </svg>
+      <div class="vibe-title">VIBE CODING</div>
+      <div class="boot-text" id="bootText">正在启动服务…</div>
+      <button class="boot-skip" id="bootSkip" hidden>仍然进入</button>
+    </div>
+    <div class="shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-head">
+          <span id="sidebarTitle">对话</span>
+          <div class="sidebar-head-actions">
+            <button class="icon-btn" id="toolsToggle" title="工具">
+              <svg viewBox="0 0 1024 1024" width="16" height="16" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <path d="M544 552.32v247.68a32 32 0 0 1-32 32 31.36 31.36 0 0 1-32-32V552.32L256 423.04a32 32 0 0 1-11.52-43.52 31.36 31.36 0 0 1 43.52-11.52l224 128 222.08-128a31.36 31.36 0 0 1 43.52 11.52 32 32 0 0 1-11.52 43.52l-222.08 128z"/>
+                <path d="M64 256v512l448 256 448-256V256L512 0z m832 480L512 960l-384-224v-448L512 64l384 224z"/>
+              </svg>
+            </button>
+            <button class="btn" id="sidebarNew">＋ 新对话</button>
+            <button class="btn" id="sidebarNewReq">＋ 新需求</button>
+          </div>
+        </div>
+        <!-- 需求列表（评审/开发/测试中的需求；已归档折叠）-->
+        <div class="req-list" id="reqList" hidden></div>
+        <!-- 会话列表 -->
+        <div class="conv-list" id="convList"></div>
+        <!-- 工具列表（点击工具图标切换显示）-->
+        <div class="tools-list" id="toolsList" hidden>
+          <button class="tool-item" id="toolJson" data-tool="json">
+            <span class="tool-item-icon">{ }</span>
+            <span class="tool-item-body">
+              <span class="tool-item-title">JSON 美化工具</span>
+              <span class="tool-item-desc">格式化 · 折叠查看 JSON</span>
+            </span>
+          </button>
+          <button class="tool-item" id="toolMemory" data-tool="memory">
+            <span class="tool-item-icon">🧠</span>
+            <span class="tool-item-body">
+              <span class="tool-item-title">记忆库<span class="badge-dot" id="memBadge" hidden></span></span>
+              <span class="tool-item-desc">我的偏好 · 待确认与已生效</span>
+            </span>
+          </button>
+          <button class="tool-item" id="toolMarkdown" data-tool="markdown">
+            <span class="tool-item-icon">📄</span>
+            <span class="tool-item-body">
+              <span class="tool-item-title">Markdown 查看工具</span>
+              <span class="tool-item-desc">预览 · 搜索 · 导出</span>
+            </span>
+          </button>
+        </div>
+        <!-- Markdown 工具的打开历史 -->
+        <div class="md-history" id="mdHistory" hidden>
+          <div class="md-history-head">打开历史</div>
+          <div id="mdHistoryList" class="md-history-list"></div>
+          <button class="btn block" id="mdOpenFileBtn2">📄 打开...</button>
+        </div>
+      </aside>
+      <div class="app">
+      <!-- topbar 自身背景（按钮间空隙）+ 纯展示元素（额度/待续跑徽标）都是拖拽区：
+           data-tauri-drag-region 按事件 target 精确匹配，按钮等可交互子元素不受影响 -->
+      <header class="topbar" data-tauri-drag-region>
+        <button class="sidebar-toggle-btn" id="sidebarToggleBtn" title="切换侧边栏">☰</button>
+        <button class="dir-selector" id="dirBtn" title="选择工作目录">
+          <span class="folder">📁</span>
+          <span class="dir-label" id="dirLabel">服务目录</span>
+          <span class="caret">▾</span>
+        </button>
+        <div class="spacer" id="topbarDragArea" data-tauri-drag-region></div>
+        <div class="ratelimit" id="ratelimit" data-tauri-drag-region hidden></div>
+        <span class="pending-chip" id="pendingChip" data-tauri-drag-region hidden></span>
+        <span class="ask-chip" id="askChip" role="button" aria-label="待确认审批" data-tauri-drag-region hidden></span>
+        <button class="btn" id="taskBtn">需求/故障<span class="badge-dot" id="taskBadge" hidden></span></button>
+        <button class="btn" id="logBtn">访问日志</button>
+        <button class="btn" id="settingsBtn" title="设置">⚙<span class="badge-dot" id="settingsBadge" hidden></span></button>
+        <!-- 自定义窗口控制按钮（仅 Tauri 桌面环境显示） -->
+        <div class="win-controls" id="winControls" hidden>
+          <button class="wc-btn wc-min" id="winMin" title="最小化">
+            <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+          </button>
+          <button class="wc-btn wc-max" id="winMax" title="最大化/还原">
+            <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><rect x="0.5" y="0.5" width="8" height="8" stroke="currentColor"/></svg>
+          </button>
+          <button class="wc-btn wc-close" id="winClose" title="关闭到托盘">
+            <svg width="10" height="10" viewBox="0 0 10 10"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.2"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.2"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="pending-banner" id="pendingBanner" hidden></div>
+      <div class="token-banner" id="tokenBanner" hidden></div>
+      <!-- 需求横幅（Task 10）：开发/测试期打开需求会话时由 req-chat.js 挂载 -->
+      <div class="req-banner" id="reqBanner" hidden></div>
+
+      <main class="messages" id="messages">
+        <div class="empty" id="empty">
+          <svg class="vibe-svg" id="vibeSvg" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <!-- 六芒星：两个反向三角形，快速旋转后在此非重叠角度暂停 -->
+            <g id="vtri1">
+              <polygon points="100,25 165,140 35,140" stroke="#d97757" stroke-width="1.5"/>
+            </g>
+            <g id="vtri2">
+              <polygon points="100,175 165,60 35,60" stroke="#e88f6f" stroke-width="1.5" fill="rgba(217,119,87,0.14)"/>
+            </g>
+          </svg>
+          <div class="vibe-title" id="vibeTitle">VIBE CODING</div>
+        </div>
+      </main>
+
+      <!-- 嵌入式面板视图：设置 / 需求故障 / 访问日志（替代原弹层） -->
+      <!-- 需求右栏（Task 10）：fixed 定位悬于消息区右侧，开启时 .app.req-rail-open 给消息区让边距 -->
+      <aside class="req-rail" id="reqRail" hidden></aside>
+
+      <section class="panel-view" id="panelView" hidden>
+        <div class="panel-page" data-view="settings" hidden>
+          <div class="panel-head">
+            <h3>设置</h3>
+            <button class="panel-close" title="返回对话">✕</button>
+          </div>
+          <div class="panel-tabs" id="settingsTabs">
+            <button data-tab="basic" class="active">基础设置</button>
+            <button data-tab="providers">模型</button>
+            <button data-tab="mcp">MCP 服务器</button>
+            <button data-tab="actions">托管配置</button>
+            <button data-tab="desktop" id="desktopTab" hidden>桌面</button>
+          </div>
+          <div class="set-tab" data-tab="basic">
+  <!-- 开机自启动（非 Tauri 时通过 JS 隐藏） -->
+  <div class="set-sec" id="basicAutostartSec" style="display:none">
+    <div class="set-sec-head">
+      <span class="sec-label">系统</span>
+    </div>
+    <label class="set-field" style="display:inline-flex;align-items:center;gap:9px;cursor:pointer;margin-top:2px;white-space:nowrap;">
+      <span style="color:var(--text);white-space:nowrap;">开机自启动</span>
+      <input type="checkbox" id="autostartToggle" class="pretty-check" />
+    </label>
+    <div style="font-size:11px;color:var(--faint);margin-top:2px;padding:0 2px;">
+      启动系统后自动打开 Claude Agent（需 Tauri 桌面模式）
+    </div>
+  </div>
+
+  <!-- 新会话默认值 -->
+  <div class="set-sec">
+    <div class="set-sec-head">
+      <span class="sec-label">新会话默认值</span>
+      <span class="msg-hint">新对话将使用此配置启动</span>
+    </div>
+    <label class="set-field">默认模型
+      <select id="basicDefaultModel" class="set-select">
+        <option value="">沿用当前</option>
+        <option value="auto">Auto</option>
+        <option value="claude-opus-5">Opus 5</option>
+        <option value="claude-opus-4-8">Opus 4.8</option>
+        <option value="claude-sonnet-4-6">Sonnet 4.6</option>
+        <option value="claude-haiku-4-5">Haiku 4.5</option>
+      </select>
+    </label>
+    <label class="set-field">默认模型强度
+      <select id="basicDefaultEffort" class="set-select">
+        <option value="">沿用当前</option>
+        <option value="low">Low（快）</option>
+        <option value="medium">Medium（平衡）</option>
+        <option value="high">High（深思）</option>
+        <option value="max">Max（最强）</option>
+      </select>
+    </label>
+    <label class="set-field">默认询问模式
+      <select id="basicDefaultMode" class="set-select">
+        <option value="">沿用当前</option>
+        <option value="default">询问</option>
+        <option value="acceptEdits">接受编辑</option>
+        <option value="plan">计划</option>
+        <option value="bypassPermissions">自动</option>
+      </select>
+    </label>
+    <div class="set-actions">
+      <button class="btn primary" id="basicDefaultsSaveBtn">保存默认值</button>
+    </div>
+  </div>
+
+  <!-- 我的飞书身份 -->
+  <div class="set-sec">
+    <div class="set-sec-head">
+      <span class="sec-label">我的飞书身份</span>
+    </div>
+    <label class="set-field">我的飞书 open_id
+      <input id="basicMyFeishuOpenId" placeholder="ou_…（测试期筛「属于我的 BUG」用；留空回退可信提交人名单第一个）" autocomplete="off">
+    </label>
+    <div class="set-actions">
+      <button class="btn primary" id="basicMyFeishuOpenIdSaveBtn">保存</button>
+    </div>
+  </div>
+
+  <!-- 插件启停 -->
+  <div class="set-sec">
+    <div class="set-sec-head">
+      <span class="sec-label">插件</span>
+      <span class="msg-hint">启停在进程重启后生效</span>
+    </div>
+    <div class="token-list" id="pluginList"></div>
+  </div>
+  <!-- 导入 / 导出配置 -->
+  <div class="set-sec">
+    <div class="set-sec-head">
+      <span class="sec-label">导入 / 导出配置</span>
+    </div>
+    <div class="cfg-warn">⚠️ 导出文件含明文密钥（Claude token、飞书 App Secret），请妥善保管，勿外传。</div>
+    <div class="set-actions" style="justify-content:flex-start;gap:10px;">
+      <button class="btn" id="cfgExportBtn">导出配置</button>
+      <button class="btn" id="cfgImportBtn">导入配置</button>
+      <input type="file" id="cfgImportFile" accept="application/json,.json" hidden />
+    </div>
+    <div style="font-size:11px;color:var(--faint);margin-top:2px;padding:0 2px;">
+      导出：机器人（凭证 / 角色描述 / 文案）+ Claude 账号池 + 界面偏好。导入将<strong>覆盖</strong>当前全部配置。
+    </div>
+  </div>
+</div>
+          <div class="set-tab" data-tab="providers" hidden>
+            <!-- API Key 组 -->
+            <div class="set-sec">
+              <div class="set-sec-head">
+                <span class="sec-label">API Key</span>
+                <span class="msg-hint">预设厂商 · 自动填充 baseURL</span>
+              </div>
+              <div class="token-list" id="credList"></div>
+              <div class="token-add cred-add">
+                <input id="credLabel" placeholder="名称，如 DeepSeek" autocomplete="off" />
+                <select id="credVendor" class="set-select">
+                  <option value="">-- 选择厂商 --</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="aliyun">阿里云百炼</option>
+                  <option value="moonshot">月之暗面</option>
+                  <option value="zhipu">智谱</option>
+                  <option value="custom">其他（自定义）</option>
+                </select>
+                <select id="credModel" class="set-select" disabled>
+                  <option value="">-- 先选厂商 --</option>
+                </select>
+                <input id="credModelCustom" placeholder="模型名，如 my-model" autocomplete="off" style="display:none;" />
+                <input id="credBaseURL" placeholder="baseURL，如 https://api.xxx.com/v1" autocomplete="off" />
+                <input id="credApiKey" type="password" placeholder="apiKey (sk-…)" autocomplete="new-password" />
+                <button class="btn" id="credAddBtn">＋ 添加</button>
+              </div>
+            </div>
+
+            <!-- 订阅 Key 组 -->
+            <div class="set-sec">
+              <div class="set-sec-head">
+                <span class="sec-label">订阅 Key</span>
+                <span class="active-token" id="activeToken">—</span>
+              </div>
+              <div class="token-list" id="tokenList"></div>
+              <div class="token-add">
+                <input id="tokenLabel" placeholder="名称，如 主账号" autocomplete="off" />
+                <select id="tokenSubscription" class="set-select">
+                  <option value="claude">Claude</option>
+                </select>
+                <input id="tokenValue" placeholder="sk-ant-oat01-…" autocomplete="off" />
+                <button class="btn" id="tokenAddBtn">＋ 添加</button>
+              </div>
+            </div>
+          </div>
+          <div class="set-tab" data-tab="mcp" hidden>
+            <div class="set-sec">
+              <div class="set-sec-head">
+                <span class="sec-label">MCP 服务器（stdio）</span>
+                <span class="msg-hint">供自定义模型调用工具 · 保存后下次运行生效</span>
+              </div>
+              <div class="token-list" id="mcpList"></div>
+            </div>
+            <div class="set-sec">
+              <div class="set-sec-head">
+                <span class="sec-label" id="mcpFormTitle">添加服务器</span>
+              </div>
+              <label class="set-field">名称（可选）
+                <input id="mcpLabel" placeholder="如 filesystem" autocomplete="off" />
+              </label>
+              <label class="set-field">命令（必填）
+                <input id="mcpCommand" placeholder="如 npx / node / python" autocomplete="off" />
+              </label>
+              <label class="set-field">参数（每行一个，路径含空格无需引号）
+                <textarea id="mcpArgs" rows="3" spellcheck="false" placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;C:\allowed\dir"></textarea>
+              </label>
+              <label class="set-field">工作目录（可选，留空跟随运行目录）
+                <input id="mcpCwd" placeholder="如 C:\Users\DELL\Desktop\my-project" autocomplete="off" />
+              </label>
+              <label class="set-field">自动放行工具（每行一个工具名，留空 = 每次审批；建议只放只读工具）
+                <textarea id="mcpAutoAllow" rows="2" spellcheck="false" placeholder="read_file&#10;list_directory"></textarea>
+              </label>
+              <div class="set-actions" style="gap:8px;">
+                <button class="btn" id="mcpCancelBtn" hidden>取消编辑</button>
+                <button class="btn primary" id="mcpAddBtn">＋ 添加</button>
+              </div>
+            </div>
+          </div>
+          <div class="set-tab" data-tab="desktop" hidden></div>
+          <div class="set-tab" data-tab="actions" hidden id="actionListPanel">
+            <!-- 机器人列表 -->
+            <div class="set-sec">
+              <div class="set-sec-head">
+                <span class="sec-label">机器人</span>
+                <span class="feishu-state" id="feishuState">—</span>
+              </div>
+              <div class="token-list" id="botList"></div>
+              <div class="set-actions" style="justify-content:flex-start;">
+                <button class="btn" id="botAddBtn">＋ 新增机器人</button>
+              </div>
+            </div>
+            <!-- 机器人编辑表单 -->
+            <div class="set-sec" id="botFormSec" hidden>
+              <div class="set-sec-head">
+                <span class="sec-label" id="botFormTitle">新增机器人</span>
+                <span class="msg-hint">保存后下一条消息生效 · 凭证变更自动重连</span>
+              </div>
+              <label class="set-field">名称
+                <input id="botName" placeholder="如 运维助手" autocomplete="off" />
+              </label>
+              <label class="set-field">机器人平台
+                <select id="botPlatform" class="set-select">
+                  <option value="feishu">飞书</option>
+                </select>
+              </label>
+              <div class="set-field">托管程度
+                <div class="effort-row" style="margin-top:8px;">
+                  <div class="effort-ends"><span>轻度托管</span><span>中度托管</span><span>完全托管</span></div>
+                  <input type="range" id="botAutonomy" min="0" max="2" step="1" value="0" />
+                </div>
+                <div id="botAutonomyHint" style="font-size:11px;color:var(--faint);margin-top:6px;padding:0 2px;"></div>
+              </div>
+              <label class="set-field">App ID
+                <input id="botAppId" placeholder="cli_xxxxxxxxxxxx" autocomplete="off" />
+              </label>
+              <label class="set-field">App Secret
+                <input id="botAppSecret" type="password" placeholder="App Secret" autocomplete="new-password" />
+              </label>
+              <label class="set-field">项目文件夹（事务仅限此工程；本机其他工程只读，可作逻辑参考）
+                <div class="dir-picker">
+                  <input id="botProjectDir" placeholder="如 C:\Users\DELL\Desktop\my-project" autocomplete="off" />
+                  <button type="button" class="btn dir-pick-btn" id="botProjectDirPickBtn" title="选择文件夹">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                    <span>选择</span>
+                  </button>
+                </div>
+              </label>
+              <label class="set-field msg-field">角色描述（机器人的角色、性格、语气，注入对话）
+                <textarea id="botPersona" rows="4" placeholder="如：你是团队的运维助手小飞，性格活泼，回复简洁友好，适当使用 emoji…"></textarea>
+              </label>
+              <label class="set-field msg-field">工程说明（可空；处理该工程相关工作时作为参考）
+                <textarea id="botProjectNotes" rows="3" placeholder="后端工程: C:\path\to\api-server&#10;前端工程: C:\path\to\web-ui&#10;figma: https://figma.com/file/…"></textarea>
+              </label>
+              <label class="set-field">auto 工作区初始化脚本（可空；自动开发工作区首次创建后以本机权限执行一次，请勿粘贴不可信命令；密钥请走环境变量，勿内联在脚本中）
+                <input id="botSetupScript" placeholder="如 npm install" autocomplete="off" />
+              </label>
+              <label class="set-field">可信提交人 open_id（每行一个）
+                <textarea id="botTrustedOpenIds" rows="3" spellcheck="false" placeholder="ou_xxxxxxxxxxxxxxxx&#10;ou_yyyyyyyyyyyyyyyy"></textarea>
+                <div style="font-size:11px;color:var(--faint);margin-top:6px;padding:0 2px;">他们提交的需求/故障跳过 AI 评审，直接在独立分支自动开发（合并仍需确认）；留空则用 .env 的 TRUSTED_OPEN_IDS</div>
+              </label>
+              <div class="msg-list" id="botMsgList"></div>
+              <div class="set-actions" style="gap:8px;">
+                <button class="btn" id="botCancelBtn">取消</button>
+                <button class="btn primary" id="botSaveBtn">保存机器人</button>
+              </div>
+              <!-- 动作配置（编辑既有机器人时显示） -->
+              <div id="botActionsSec" hidden>
+                <div class="set-sec-head" style="margin-top:14px;">
+                  <span class="sec-label">动作配置</span>
+                  <span class="msg-hint">仅当前机器人可触发</span>
+                </div>
+                <div style="display: flex; gap: 16px;">
+                  <!-- 左：列表 -->
+                  <div style="flex: 1; overflow: auto;">
+                    <button id="addActionBtn" class="btn" style="margin-bottom: 12px;">+ 添加动作</button>
+                    <div id="actionsList"></div>
+                  </div>
+                  <!-- 右：编辑表单 -->
+                  <div id="actionFormPanel" style="flex: 1; overflow: auto; display: none;">
+                    <form id="actionForm"></form>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel-page" data-view="tasks" hidden>
+          <div class="panel-head">
+            <h3>需求 / 故障</h3>
+            <button class="panel-close" title="返回对话">✕</button>
+          </div>
+          <div id="taskBody"></div>
+        </div>
+
+        <div class="panel-page" data-view="req" hidden>
+          <div class="panel-head">
+            <h3 id="reqPageTitle">需求</h3>
+            <button class="panel-close" title="返回对话">✕</button>
+          </div>
+          <div id="reqPage"></div>
+        </div>
+
+        <div class="panel-page" data-view="logs" hidden>
+          <div class="panel-head">
+            <h3>访问日志</h3>
+            <button class="panel-close" title="返回对话">✕</button>
+          </div>
+          <div id="logBody"></div>
+        </div>
+
+        <div class="panel-page" data-view="markdown" hidden>
+          <div class="panel-head">
+            <h3>Markdown 查看工具</h3>
+            <button class="panel-close" title="返回对话">✕</button>
+          </div>
+          <div id="markdownContainer" hidden>
+            <div class="md-toolbar">
+              <div class="md-path">
+                <span class="md-path-label">文件：</span>
+                <span id="mdFileName" class="md-file-name">—</span>
+                <span id="mdFileInfo" class="md-file-info">0 B · 未知时间</span>
+              </div>
+              <div class="md-actions">
+                <button class="btn" id="mdExportHtmlBtn" title="导出为 HTML">HTML</button>
+                <button class="btn" id="mdCopyAllBtn" title="复制全文">复制</button>
+              </div>
+            </div>
+            <div class="md-main">
+              <div class="md-toc-panel">
+                <div class="md-toc-head">目录大纲</div>
+                <div id="mdTocTree" class="md-toc-tree"></div>
+              </div>
+              <div class="md-content-panel">
+                <div class="md-search-box">
+                  <input id="mdSearchInput" type="text" placeholder="搜索内容…" />
+                  <span id="mdSearchCount" class="md-search-count" hidden>0 匹配</span>
+                  <button class="btn icon-btn" id="mdSearchClearBtn" title="清除搜索" hidden>✕</button>
+                </div>
+                <div id="mdContent" class="md-content"></div>
+              </div>
+            </div>
+          </div>
+          <div class="md-empty" id="mdEmpty">
+            <div class="md-empty-icon">📄</div>
+            <div class="md-empty-text">拖入 Markdown 文件或点击「打开」按钮</div>
+            <button class="btn" id="mdOpenFileBtn">打开文件</button>
+          </div>
+        </div>
+
+        <div class="panel-page" data-view="memory" hidden>
+          <div class="panel-head">
+            <h3>记忆库</h3>
+            <button class="panel-close" title="返回对话">✕</button>
+          </div>
+          <div class="mem-toolbar">
+            <span id="memBudgetTip" class="mem-budget-tip"></span>
+            <button class="btn" id="memExtractBtn">立即提炼</button>
+            <button class="btn" id="memExportBtn">导出</button>
+          </div>
+          <div id="memBody"></div>
+        </div>
+
+        <div class="panel-page" data-view="json-tool" hidden>
+          <div class="panel-head">
+            <h3>JSON 美化工具</h3>
+            <button class="panel-close" title="返回对话">✕</button>
+          </div>
+          <div class="json-tool">
+            <div class="json-pane">
+              <div class="json-pane-head">
+                <span class="json-pane-title">输入</span>
+                <div class="json-pane-actions">
+                  <button class="btn" id="jsonFormatBtn" title="格式化缩进">格式化</button>
+                  <button class="btn" id="jsonClearBtn" title="清空">清空</button>
+                </div>
+              </div>
+              <textarea id="jsonInput" class="json-input" spellcheck="false" autocomplete="off" placeholder="在此粘贴 JSON…"></textarea>
+            </div>
+            <div class="json-pane">
+              <div class="json-pane-head">
+                <span class="json-pane-title">解析结果</span>
+                <div class="json-pane-actions">
+                  <button class="btn" id="jsonExpandBtn" title="全部展开">展开</button>
+                  <button class="btn" id="jsonCollapseBtn" title="全部折叠">折叠</button>
+                  <button class="btn" id="jsonCopyBtn" title="复制格式化结果">复制</button>
+                </div>
+              </div>
+              <div id="jsonOutput" class="json-output"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 图片预览灯箱 -->
+      <div id="imgLightbox" class="lightbox" hidden>
+        <div class="lightbox-overlay">
+          <img class="lightbox-img" src="" alt="preview" />
+          <button class="lightbox-close" title="关闭（Esc）">×</button>
+        </div>
+      </div>
+
+      <div class="fab-row" id="fabRow">
+        <div class="notify-fab" id="notifyFab">
+          <button class="model-fab-btn" id="notifyFabBtn" title="任务结束/失败后发飞书通知">
+            <span id="notifyFabLabel">🔔 飞书</span>
+          </button>
+        </div>
+        <div class="model-fab" id="modelFab">
+          <div class="model-pop" id="modelPop" hidden>
+            <div class="model-pills" id="modelPills">
+              <button data-m="auto">Auto</button>
+              <button data-m="claude-opus-5">Opus 5</button>
+              <button data-m="claude-sonnet-5">Sonnet 5</button>
+              <button data-m="claude-haiku-5">Haiku 5</button>
+            </div>
+            <div class="pop-divider" id="customDivider" hidden></div>
+            <div class="model-pills" id="customModelPills" title="自定义模型"></div>
+            <div class="effort-row" id="effortRow">
+              <div class="effort-ends"><span>Faster</span><span>Smarter</span></div>
+              <input type="range" id="effortSlider" min="0" max="3" step="1" value="1" />
+            </div>
+            <div class="pop-divider"></div>
+            <div class="model-pills" id="modePills" title="权限模式">
+              <button data-mode="default">询问</button>
+              <button data-mode="acceptEdits">接受编辑</button>
+              <button data-mode="plan">计划</button>
+              <button data-mode="bypassPermissions">自动</button>
+            </div>
+            <div class="pop-divider"></div>
+            <div class="tools-section" id="toolsSection">
+              <div class="tools-section-hdr">工具</div>
+              <div id="builtinToolsList"></div>
+              <div class="pop-divider tools-mcp-sep" id="mcpToolsDivider" hidden></div>
+              <div id="mcpToolsList"></div>
+            </div>
+          </div>
+          <button class="model-fab-btn" id="modelFabBtn" title="模型 / 思考强度">
+            <span id="modelFabLabel">Auto</span>
+            <span class="caret">▴</span>
+          </button>
+        </div>
+      </div>
+
+      <footer class="composer">
+        <div
+          id="prompt"
+          class="composer-input"
+          contenteditable="true"
+          role="textbox"
+          aria-multiline="true"
+          data-ph="输入消息，Enter 发送 / Shift+Enter 换行 · 可拖入图片/文件"
+        ></div>
+        <button class="btn primary" id="sendBtn">发送</button>
+        <button class="btn stop" id="stopBtn" title="中断当前运行" hidden>停止</button>
+      </footer>
+      </div>
+    </div>
+
+    <!-- 遮罩层：小屏幕时展开侧边栏时显示 -->
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+    <!-- 目录选择弹层 -->
+    <div class="mask" id="dirMask" hidden>
+      <div class="modal">
+        <div class="head">
+          <h3>选择工作目录</h3>
+          <button class="close" id="dirClose">✕</button>
+        </div>
+        <div class="body">
+          <div class="sec-label">常用</div>
+          <div class="saved-list" id="savedList"></div>
+          <div class="sec-label">浏览</div>
+          <div class="browse-path">
+            <input id="pathInput" placeholder="输入路径回车跳转，如 C:\Users\DELL" />
+            <button class="btn" id="goBtn">跳转</button>
+          </div>
+          <div id="dirRows"></div>
+        </div>
+        <div class="foot">
+          <button class="btn" id="sysPickBtn" title="打开系统文件夹选择框">📂 系统选择</button>
+          <span class="cur" id="curPath"></span>
+          <button class="btn" id="starBtn">＋常用</button>
+          <button class="btn primary" id="pickBtn">选择此目录</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Markdown 渲染组件（本地 vendor，无需构建/联网）-->
+    <!-- DOMPurify 必须先于任何渲染：renderMarkdown 缺它会退化成纯文本（见 js/util.js） -->
+    <script src="/vendor/purify.min.js"></script>
+    <script src="/vendor/marked.min.js"></script>
+    <!-- Anime.js 动画库（v4.1.4，本地 vendor：桌面版离线可用，且不再让同步 CDN 请求阻塞 DOMContentLoaded）-->
+    <script src="/vendor/anime.iife.min.js"></script>
+    <script src="/js/markdown-tool.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

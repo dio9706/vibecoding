@@ -1,0 +1,137 @@
+/**
+ * 记忆库 HTTP 接口。沿用本项目单入口子路由范式（对齐 routes-requirements.js）。
+ */
+import { sendJson } from './http-util.js';
+import { withJsonBody } from './body.js';
+import { str } from './input.js';
+import { logger } from '../../shared/logger.js';
+import { readBank, patchItem, rejectItem, ackItems } from '../../store/memory-bank.js';
+import { getMemoryBankSettings } from '../../store/settings.js';
+import { selectForInjection, CATEGORY_LABEL } from '../../features/memory-bank/render.js';
+import { runOnce } from '../../features/memory-bank/index.js';
+
+const CATEGORIES = Object.keys(CATEGORY_LABEL);
+
+function budgetInfo(items, settings, now) {
+  const { included, truncated } = selectForInjection(items, {
+    scope: 'global', now, maxItems: settings.maxItems, maxChars: settings.maxChars,
+  });
+  return { used: included.length, total: settings.maxItems, truncated };
+}
+
+// ==== GET /api/memory/list ====
+function handleList(res) {
+  const now = Date.now();
+  const bank = readBank();
+  const settings = getMemoryBankSettings();
+  sendJson(res, 200, {
+    items: bank.items,
+    unackedCount: bank.items.filter((i) => !i.acked).length,
+    conflictCount: bank.items.filter((i) => i.status === 'conflict').length,
+    budget: budgetInfo(bank.items, settings, now),
+    lastExtractAt: bank.lastExtractAt,
+    enabled: settings.enabled,
+  });
+}
+
+// ==== POST /api/memory/confirm {id, statement?, category?, scope?, inject?} ====
+function handleConfirm(req, res) {
+  return withJsonBody(req, res, (data) => {
+    const id = str(data.id);
+    if (!id) return sendJson(res, 400, { error: 'id 不能为空' });
+    const patch = { status: 'active', promotedBy: 'manual', acked: true, updatedAt: Date.now() };
+    if (data.statement !== undefined) {
+      const s = str(data.statement).trim();
+      if (!s) return sendJson(res, 400, { error: 'statement 不能为空' });
+      patch.statement = s.slice(0, 200);
+    }
+    if (data.category !== undefined) {
+      const c = str(data.category);
+      if (!CATEGORIES.includes(c)) return sendJson(res, 400, { error: '未知 category' });
+      patch.category = c;
+    }
+    if (data.scope !== undefined) {
+      const sc = str(data.scope);
+      if (sc !== 'global' && sc !== 'project') return sendJson(res, 400, { error: '未知 scope' });
+      patch.scope = sc;
+      if (sc === 'global') patch.projectDir = '';
+    }
+    if (data.inject !== undefined) patch.inject = data.inject === true;
+    if (!readBank().items.some((i) => i.id === id)) return sendJson(res, 404, { error: '条目不存在' });
+    patchItem(id, patch);
+    sendJson(res, 200, { ok: true });
+  });
+}
+
+// ==== POST /api/memory/reject {id} ====
+function handleReject(req, res) {
+  return withJsonBody(req, res, (data) => {
+    const id = str(data.id);
+    if (!id) return sendJson(res, 400, { error: 'id 不能为空' });
+    if (!readBank().items.some((i) => i.id === id)) return sendJson(res, 404, { error: '条目不存在' });
+    rejectItem(id, Date.now());
+    sendJson(res, 200, { ok: true });
+  });
+}
+
+// ==== POST /api/memory/ack {id?, all?} ====
+function handleAck(req, res) {
+  return withJsonBody(req, res, (data) => {
+    if (data.all === true) { ackItems(null); return sendJson(res, 200, { ok: true }); }
+    const id = str(data.id);
+    if (!id) return sendJson(res, 400, { error: 'id 或 all 必须提供其一' });
+    ackItems([id]);
+    sendJson(res, 200, { ok: true });
+  });
+}
+
+/** POST /api/memory/extract：手动提炼。202 立即返回，前端轮询 list（对齐 handleBitable 的长任务范式） */
+function handleExtract(req, res) {
+  sendJson(res, 202, { ok: true });
+  runOnce({ cwd: process.cwd() }).catch((e) =>
+    logger.error('memory-routes', '手动提炼异常', { err: e?.message || String(e) }));
+}
+
+// ==== GET /api/memory/export?format=json|md ====
+function handleExport(url, res) {
+  const bank = readBank();
+  const byCategory = {};
+  for (const it of bank.items) byCategory[it.category] = (byCategory[it.category] || 0) + 1;
+  const payload = {
+    schema: 'memory-bank/v1',
+    exportedAt: new Date().toISOString(),
+    stats: {
+      total: bank.items.length,
+      active: bank.items.filter((i) => i.status === 'active').length,
+      byCategory,
+    },
+    // 全量：含 dormant / candidate / 仅记录组 / 证据链 —— 数字分身要用
+    items: bank.items,
+  };
+  if (str(url.searchParams.get('format')) === 'md') {
+    const lines = ['# 我的开发者档案', '', `导出时间：${payload.exportedAt}`, ''];
+    for (const cat of CATEGORIES) {
+      const group = bank.items.filter((i) => i.category === cat);
+      if (!group.length) continue;
+      lines.push(`## ${CATEGORY_LABEL[cat]}`, '');
+      for (const it of group) lines.push(`- ${it.statement}  \`${it.status}\` · 证据 ${it.evidenceCount}`);
+      lines.push('');
+    }
+    res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
+    return res.end(lines.join('\n'));
+  }
+  sendJson(res, 200, payload);
+}
+
+/** 记忆库路由单入口：按 pathname + method 分发 */
+export function handleMemoryRoutes(req, res, url) {
+  const { pathname } = url;
+  const { method } = req;
+  if (pathname === '/api/memory/list' && method === 'GET') return handleList(res);
+  if (pathname === '/api/memory/confirm' && method === 'POST') return handleConfirm(req, res);
+  if (pathname === '/api/memory/reject' && method === 'POST') return handleReject(req, res);
+  if (pathname === '/api/memory/ack' && method === 'POST') return handleAck(req, res);
+  if (pathname === '/api/memory/extract' && method === 'POST') return handleExtract(req, res);
+  if (pathname === '/api/memory/export' && method === 'GET') return handleExport(url, res);
+  return sendJson(res, 404, { error: 'not found' });
+}
