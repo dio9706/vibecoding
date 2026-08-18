@@ -1120,6 +1120,41 @@ export function renderConvListNow() {
         container.appendChild(fragment);
       }
 
+      // ---- 灯箱缩放与拖拽状态管理 ----
+      const lightboxState = {
+        scale: 1,              // 当前缩放倍数
+        translateX: 0,         // X 轴偏移（像素）
+        translateY: 0,         // Y 轴偏移（像素）
+        isDragging: false,     // 是否正在拖拽
+        dragStartX: 0,         // 拖拽起始 X
+        dragStartY: 0,         // 拖拽起始 Y
+      };
+
+      // 数值约束函数
+      function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+
+      // 应用当前 transform 到图片元素
+      function updateLightboxTransform() {
+        const lightbox = document.getElementById('imgLightbox');
+        const img = lightbox?.querySelector('.lightbox-img');
+        if (!img) return;
+
+        const { scale, translateX, translateY } = lightboxState;
+        img.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+      }
+
+      // 重置灯箱状态
+      function resetLightboxState() {
+        lightboxState.scale = 1;
+        lightboxState.translateX = 0;
+        lightboxState.translateY = 0;
+        lightboxState.isDragging = false;
+        lightboxState.dragStartX = 0;
+        lightboxState.dragStartY = 0;
+      }
+
       /**
        * 显示图片灯箱
        */
@@ -1128,10 +1163,17 @@ export function renderConvListNow() {
         const img = lightbox?.querySelector('.lightbox-img');
         if (!img) return;
 
+        // 重置状态
+        resetLightboxState();
+        updateLightboxTransform();
+
         // 缩略图能渲染出来才有灯箱可点，这里必然拿得到 URL
         const src = toWebviewUrl(imagePath);
         if (!src) return;
         img.src = src;
+
+        // 移除缩放相关的 class
+        img.classList.remove('zoomed', 'dragging');
 
         lightbox.hidden = false;
       }
@@ -1141,7 +1183,19 @@ export function renderConvListNow() {
        */
       function closeLightbox() {
         const lightbox = document.getElementById('imgLightbox');
-        if (lightbox) lightbox.hidden = true;
+        if (!lightbox) return;
+
+        // 重置状态
+        resetLightboxState();
+
+        // 清除 transform 和 class
+        const img = lightbox.querySelector('.lightbox-img');
+        if (img) {
+          img.style.transform = '';
+          img.classList.remove('zoomed', 'dragging');
+        }
+
+        lightbox.hidden = true;
       }
 
       // 灯箱事件：点击背景关闭、Esc 关闭、关闭按钮
@@ -1333,6 +1387,8 @@ export function renderConvListNow() {
       // 立即生效：flush 全部排队消息 + 打断当前轮；成功路径的状态翻转由 consumed 事件驱动
       async function effectNowQueuedMsg(msgEl) {
         if (msgEl.dataset.qBusy) return; // 在途防抖：防连点重复请求
+        // msgId 由 steer() 异步 fetch 写入；极端情况下点击早于响应到达，此时找不到消息
+        if (!msgEl.dataset.msgId) return toast('消息尚未就绪，请稍候再试');
         msgEl.dataset.qBusy = '1';
         try {
           const convId = currentConvId;
