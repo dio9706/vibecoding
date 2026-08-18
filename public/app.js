@@ -36,6 +36,9 @@ bindConvNotify({ applyInjected: applyInjectedItems, getCurrentConvId }); // 🔔
         const inChat = name === 'chat';
         appEl.classList.toggle('in-panel', !inChat);
         appEl.classList.toggle('in-json-tool', name === 'json-tool'); // JSON 工具视图额外隐藏底部输入框
+        // Markdown 是纯查看视图：隐藏输入框腾高度，并把滚动从 panel-view 收回到 #mdContent，
+        // 否则一滚动工具栏/目录大纲/搜索框会被整体推出可视区
+        appEl.classList.toggle('in-markdown', name === 'markdown');
         appEl.classList.toggle('in-req', name === 'req'); // 需求文档模式（评审/归档期）无会话语义：隐藏底部输入框，防止误发消息跳回聊天视图
         panelView.hidden = inChat;
         panelView
@@ -88,6 +91,9 @@ bindConvNotify({ applyInjected: applyInjectedItems, getCurrentConvId }); // 🔔
           if (convList) convList.hidden = on;
           if (toolsList) toolsList.hidden = !on;
           if (title) title.textContent = on ? '工具' : '对话';
+          // 「打开历史」是 Markdown 工具的附属区，切回会话态必须一起收起，
+          // 否则它会挂在会话列表底下；是否真有历史由 markdown-tool 自己判定
+          window._syncMdHistoryPanel?.();
         }
         // 供 newConversation 等复位回「会话」态
         window._setSidebarToolsMode = setToolsMode;

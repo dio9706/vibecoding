@@ -70,7 +70,7 @@
         <div class="md-history" id="mdHistory" hidden>
           <div class="md-history-head">打开历史</div>
           <div id="mdHistoryList" class="md-history-list"></div>
-          <button class="btn block" id="mdOpenFileBtn2">📄 打开...</button>
+          <button class="btn" id="mdOpenFileBtn2">📄 打开…</button>
         </div>
       </aside>
       <div class="app">
@@ -201,7 +201,7 @@
       <span class="sec-label">我的飞书身份</span>
     </div>
     <label class="set-field">我的飞书 open_id
-      <input id="basicMyFeishuOpenId" placeholder="ou_…（测试期筛「属于我的 BUG」用；留空回退可信提交人名单第一个）" autocomplete="off">
+      <input id="basicMyFeishuOpenId" placeholder="ou_…（作为唯一可信提交人：他发的需求/故障跳过 AI 评审，直接自动开发）" autocomplete="off">
     </label>
     <div class="set-actions">
       <button class="btn primary" id="basicMyFeishuOpenIdSaveBtn">保存</button>
@@ -251,10 +251,10 @@
                   <option value="zhipu">智谱</option>
                   <option value="custom">其他（自定义）</option>
                 </select>
-                <select id="credModel" class="set-select" disabled>
-                  <option value="">-- 先选厂商 --</option>
-                </select>
-                <input id="credModelCustom" placeholder="模型名，如 my-model" autocomplete="off" style="display:none;" />
+                <!-- 可选可填：datalist 给预设建议，但不限制取值。厂商上新模型
+                     （deepseek-v4-flash 之类）无需改代码，也不必退回「其他（自定义）」重填 baseURL -->
+                <input id="credModel" list="credModelList" placeholder="先选厂商" autocomplete="off" disabled />
+                <datalist id="credModelList"></datalist>
                 <input id="credBaseURL" placeholder="baseURL，如 https://api.xxx.com/v1" autocomplete="off" />
                 <input id="credApiKey" type="password" placeholder="apiKey (sk-…)" autocomplete="new-password" />
                 <button class="btn" id="credAddBtn">＋ 添加</button>
@@ -368,10 +368,6 @@
               </label>
               <label class="set-field">auto 工作区初始化脚本（可空；自动开发工作区首次创建后以本机权限执行一次，请勿粘贴不可信命令；密钥请走环境变量，勿内联在脚本中）
                 <input id="botSetupScript" placeholder="如 npm install" autocomplete="off" />
-              </label>
-              <label class="set-field">可信提交人 open_id（每行一个）
-                <textarea id="botTrustedOpenIds" rows="3" spellcheck="false" placeholder="ou_xxxxxxxxxxxxxxxx&#10;ou_yyyyyyyyyyyyyyyy"></textarea>
-                <div style="font-size:11px;color:var(--faint);margin-top:6px;padding:0 2px;">他们提交的需求/故障跳过 AI 评审，直接在独立分支自动开发（合并仍需确认）；留空则用 .env 的 TRUSTED_OPEN_IDS</div>
               </label>
               <div class="msg-list" id="botMsgList"></div>
               <div class="set-actions" style="gap:8px;">

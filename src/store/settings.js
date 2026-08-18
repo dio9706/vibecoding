@@ -232,9 +232,12 @@ function genId(prefix = 'tk_') {
   return prefix + Math.random().toString(36).slice(2, 8);
 }
 
-/** 纯函数：构造一个 token/凭证条目。openai 条目额外带 baseURL/model；claude 条目不含此二字段。
+/** 纯函数：构造一个 token/凭证条目。openai 条目额外带 baseURL/model/vendor；claude 条目不含此三字段。
+ *  vendor 是**纯展示元数据**（录入时选的厂商预设，用于设置页列表显示「DeepSeek」而非「—」），
+ *  不参与任何运行时逻辑——路由靠 providerId，请求参数靠 baseURL/model。
+ *  三者一律条件展开：claude 条目不该凭空多出空字段，保持两类条目形状干净。
  *  显式传 id/index/now 以保持纯粹可测（无 random/时间副作用）。 */
-export function makeTokenEntry({ id, label, token, providerId = DEFAULT_PROVIDER_ID, baseURL, model, index = 0, now }) {
+export function makeTokenEntry({ id, label, token, providerId = DEFAULT_PROVIDER_ID, baseURL, model, vendor, index = 0, now }) {
   return {
     id,
     providerId,
@@ -242,6 +245,7 @@ export function makeTokenEntry({ id, label, token, providerId = DEFAULT_PROVIDER
     token: token || '',
     ...(baseURL != null ? { baseURL } : {}),
     ...(model != null ? { model } : {}),
+    ...(vendor != null ? { vendor } : {}),
     status: 'healthy',
     resetsAt: null,
     rateLimitType: null,
@@ -261,6 +265,7 @@ export function addToken(label, token, providerId = DEFAULT_PROVIDER_ID, extra =
         providerId,
         baseURL: extra.baseURL,
         model: extra.model,
+        vendor: extra.vendor,
         index: s.tokens.length,
         now: new Date().toISOString(),
       }),

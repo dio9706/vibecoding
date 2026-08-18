@@ -10,11 +10,6 @@ export function bindTauriNav({ showView, openConv }) {
   _nav.openConv = openConv || null;
 }
 
-// 拖拽桥：Tauri 模式下文件/目录拖入时回调 chat.js 插入路径 chip（避免上传副本）。由 chat.js 注入。
-let _dropCb = null;
-export function bindTauriDrop(fn) {
-  _dropCb = fn || null;
-}
       // ============================================================
       // Tauri API 初始化
       // ============================================================
@@ -34,9 +29,13 @@ export function bindTauriDrop(fn) {
             const invoke = window.__TAURI__?.core?.invoke
               ?? ((cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args));
 
-            // event / openPath：优先全局，其次从 CDN 兜底加载（失败不影响窗口控制）
+            // event / opener：优先全局，其次从随包 vendor 兜底加载（失败不影响窗口控制）
             let event = window.__TAURI__?.event ?? null;
-            let openPath = null;
+            // shell.open 自 tauri-plugin-shell 2.1.0 起废弃，且其 scope 正则只认 URL，
+            // 本地路径必然被拒（这就是「打开失败：未知错误」的成因）。改用 opener：
+            // revealItemInDir 走系统文件管理器定位，不执行目标文件，无 RCE 面。
+            let revealPath = null;
+            let openUrl = null;
             try {
               // 一律走随包 vendor，不再从 jsdelivr 动态 import。
               // 原因有二：① 供应链——CDN 投毒/DNS 劫持/企业 MITM 任一成立，攻击者的 JS
@@ -46,10 +45,11 @@ export function bindTauriDrop(fn) {
               if (!event) {
                 event = await import('/vendor/tauri/api-event.js');
               }
-              // Tauri v2 shell 已拆为独立插件 @tauri-apps/plugin-shell，不在 @tauri-apps/api 内
-              openPath = (await import('/vendor/tauri/plugin-shell.js')).open;
+              const opener = await import('/vendor/tauri/plugin-opener.js');
+              revealPath = opener.revealItemInDir;
+              openUrl = opener.openUrl;
             } catch (e) {
-              console.warn('[App] 可选 Tauri 模块 (event/shell) 本地加载失败，不影响窗口控制:', e?.message);
+              console.warn('[App] 可选 Tauri 模块 (event/opener) 本地加载失败，不影响窗口控制:', e?.message);
             }
 
             // 全局 Tauri 实例暴露给前端业务逻辑
@@ -57,7 +57,8 @@ export function bindTauriDrop(fn) {
               isTauri: true,
               invoke,
               event,
-              openPath,
+              revealPath,
+              openUrl,
             };
 
             console.log('[App] Tauri environment detected and initialized');
@@ -78,14 +79,14 @@ export function bindTauriDrop(fn) {
               // 拦截外链：阻止 WebView 导航，改为系统浏览器打开
               e.preventDefault();
               e.stopImmediatePropagation();
-              if (openPath) {
-                openPath(url.href).catch((err) => {
-                  console.warn('[App] shell.open failed, fallback to invoke:', err);
-                  invoke('plugin:shell|open', { path: url.href }).catch(console.error);
+              if (openUrl) {
+                openUrl(url.href).catch((err) => {
+                  console.warn('[App] opener.openUrl failed, fallback to invoke:', err);
+                  invoke('plugin:opener|open_url', { url: url.href }).catch(console.error);
                 });
               } else {
-                // openPath 加载失败时直接 invoke shell 插件命令
-                invoke('plugin:shell|open', { path: url.href }).catch(console.error);
+                // vendor 加载失败时直接 invoke opener 插件命令
+                invoke('plugin:opener|open_url', { url: url.href }).catch(console.error);
               }
             }, true); // true = 捕获阶段，确保在子元素 handler 前拦截
 
@@ -242,13 +243,13 @@ export function bindTauriDrop(fn) {
               if (logsBtn) logsBtn.click();
             }).catch(err => console.error('[Tauri Event] open-logs:', err));
 
-            // ── 文件 / 目录拖入（Tauri 模式直接用本地路径，无需上传副本）──────────
-            // payload: { paths: string[], position: { x, y } }
-            event.listen('tauri://drag-drop', (ev) => {
-              const paths = ev.payload?.paths;
-              if (!Array.isArray(paths) || !paths.length) return;
-              if (_dropCb) _dropCb({ paths, position: ev.payload?.position });
-            }).catch(err => console.error('[Tauri Event] tauri://drag-drop:', err));
+            // ── 文件 / 目录拖入：交给拖拽总线按落点分派 ──────────
+            // 原先这里是单槽位 _dropCb，第二个消费者注册会静默踢掉第一个。
+            // 另外原先用的是默认 event target（{kind:'Any'}），而 Rust 侧 tauri://drag-*
+            // 走 emit_to_webview，其 emit_filter 只放行具体 webview label 的监听器，
+            // Any 一律丢弃——也就是说那个监听器从来就没生效过。总线内部已显式传 target。
+            const { attachDragBus } = await import('./drag-bus.js');
+            attachDragBus(event);
 
             // show-view：来自托盘菜单导航（接收 Rust 端 emit 事件）
             // 注意：事件名【不能】用 tauri:// 前缀（保留给内置事件），否则 listen 收不到。
@@ -319,7 +320,8 @@ export function bindTauriDrop(fn) {
               isTauri: false,
               invoke: null,
               event: null,
-              openPath: null,
+              revealPath: null,
+              openUrl: null,
             };
 
             // Web 端隐藏最小化 / 最大化 / 关闭窗口控制按钮（加固：默认即 hidden）
@@ -340,7 +342,8 @@ export function bindTauriDrop(fn) {
             isTauri: false,
             invoke: null,
             event: null,
-            openPath: null,
+            revealPath: null,
+            openUrl: null,
           };
           window.notifyUser = function(title, body) {
             console.warn('[Notify] Tauri initialization failed:', title);

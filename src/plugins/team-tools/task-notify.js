@@ -70,7 +70,7 @@ function permOpts() {
   return {
     myOpenId: getMyFeishuOpenId(),
     ownerOpenIds: config.lark.ownerOpenIds,
-    trustedOpenIds: resolveTrustedOpenIds(getActiveBot(), config.lark.trustedOpenIds),
+    trustedOpenIds: resolveTrustedOpenIds(getMyFeishuOpenId()),
   };
 }
 

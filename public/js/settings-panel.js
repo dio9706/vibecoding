@@ -39,6 +39,16 @@ const VENDOR_PRESETS = {
   },
 };
 
+// baseURL → vendor key 反查表：vendor 字段是后加的，存量凭证没有它，
+// 靠 baseURL 推回厂商，省掉一次数据迁移。
+// 必须过滤空 baseURL —— custom 预设的 baseURL 是空串，不排除的话
+// 会在表里占据 '' 这个键，把所有缺 baseURL 的凭证误判成「其他（自定义）」。
+const BASEURL_TO_VENDOR = Object.fromEntries(
+  Object.entries(VENDOR_PRESETS)
+    .filter(([, p]) => p.baseURL)
+    .map(([k, p]) => [p.baseURL, k]),
+);
+
 // 订阅类型配置：扩展时同步更新 index.html #tokenSubscription 的 options
 const SUBSCRIPTION_TYPES = [
   { value: 'claude', label: 'Claude' },
@@ -268,8 +278,8 @@ const SUBSCRIPTION_TYPES = [
       // ---- 厂商选择联动 ----
       function setupVendorListener() {
         const vendorSelect = $('#credVendor');
-        const modelSelect = $('#credModel');
-        const modelCustom = $('#credModelCustom');
+        const modelInput = $('#credModel');
+        const modelList = $('#credModelList');
         const baseURLInput = $('#credBaseURL');
 
         if (!vendorSelect) return; // DOM 未挂载时忽略
@@ -282,43 +292,41 @@ const SUBSCRIPTION_TYPES = [
           const vendor = e.target.value;
           const preset = VENDOR_PRESETS[vendor];
 
-          // 重置模型区
-          modelSelect.innerHTML = '<option value="">-- 先选厂商 --</option>';
-          modelCustom.style.display = 'none';
-          modelCustom.value = '';
+          // 模型框恒为自由输入，切厂商只换「建议列表」与预填值。
+          // 预设列表天然滞后于厂商上新（deepseek-v4-flash 这类新模型），
+          // 锁成只读下拉会逼用户改走「其他（自定义）」并重填 baseURL——
+          // 白丢了预设最有价值的那部分。
+          modelList.innerHTML = '';
+          modelInput.value = '';
 
           if (!vendor) {
-            modelSelect.disabled = true;
-            modelSelect.style.display = '';
+            modelInput.disabled = true;
+            modelInput.placeholder = '先选厂商';
             baseURLInput.disabled = false;
             baseURLInput.value = '';
             return;
           }
+          if (!preset) return; // 未知 vendor 值，跳过，不崩溃
+
+          modelInput.disabled = false;
+          preset.models.forEach((m) => {
+            const opt = document.createElement('option');
+            opt.value = m;
+            modelList.appendChild(opt);
+          });
 
           if (vendor === 'custom') {
-            // 其他（自定义）：显示文本框，隐藏 select
-            modelSelect.disabled = true;
-            modelSelect.style.display = 'none';
-            modelCustom.style.display = '';
+            // 其他（自定义）：无预设可依，baseURL 与模型都由用户填
+            modelInput.placeholder = '模型名，如 my-model';
             baseURLInput.disabled = false;
             baseURLInput.placeholder = 'https://api.xxx.com/v1';
             baseURLInput.value = '';
           } else {
-            if (!preset) return; // 未知 vendor 值，跳过，不崩溃
-            // 预设厂商：填充模型列表，锁定 baseURL
-            modelSelect.disabled = false;
-            modelSelect.style.display = '';
-            modelCustom.style.display = 'none';
+            // 预设厂商：baseURL 锁定，模型预填第一个（仍可改写成任意值）
+            modelInput.placeholder = preset.models[0] || '模型名';
+            modelInput.value = preset.models[0] || '';
             baseURLInput.disabled = true;
             baseURLInput.value = preset.baseURL;
-
-            preset.models.forEach((m) => {
-              const opt = document.createElement('option');
-              opt.value = m;
-              opt.textContent = m;
-              modelSelect.appendChild(opt);
-            });
-            if (preset.models.length) modelSelect.value = preset.models[0];
           }
         });
       }
@@ -346,7 +354,9 @@ const SUBSCRIPTION_TYPES = [
           const row = document.createElement('div');
           row.className = 'token-row';
           row.dataset.id = c.id;
-          const vendorLabel = c.vendor ? (VENDOR_PRESETS[c.vendor]?.label || c.vendor) : '—';
+          // 存量凭证无 vendor → 按 baseURL 反查；未知厂商 key 原样显示（不吞信息）
+          const vendorKey = c.vendor || BASEURL_TO_VENDOR[c.baseURL] || '';
+          const vendorLabel = vendorKey ? (VENDOR_PRESETS[vendorKey]?.label || vendorKey) : '—';
           const displayName = c.label || ('(未命名) - ' + vendorLabel + '/' + (c.model || '?'));
           row.innerHTML =
             '<span class="t-label"></span>' +
@@ -369,10 +379,7 @@ const SUBSCRIPTION_TYPES = [
       async function addCredentialUI() {
         const label = $('#credLabel').value.trim();
         const vendor = $('#credVendor').value.trim();
-        // 根据厂商类型取模型值：custom 时读文本框，其他时读 select
-        const model = vendor === 'custom'
-          ? ($('#credModelCustom').value.trim())
-          : ($('#credModel').value.trim());
+        const model = $('#credModel').value.trim(); // 恒为自由输入框（预设仅作 datalist 建议）
         const baseURL = $('#credBaseURL').value.trim();
         const apiKey = $('#credApiKey').value.trim();
 
@@ -395,11 +402,10 @@ const SUBSCRIPTION_TYPES = [
           const vs = $('#credVendor');
           vs.value = '';
           vs.dispatchEvent(new Event('change'));
-          $('#credModel').innerHTML = '<option value="">-- 先选厂商 --</option>';
+          $('#credModel').value = '';
           $('#credModel').disabled = true;
-          $('#credModel').style.display = '';
-          $('#credModelCustom').value = '';
-          $('#credModelCustom').style.display = 'none';
+          $('#credModel').placeholder = '先选厂商';
+          $('#credModelList').innerHTML = '';
           $('#credBaseURL').value = '';
           $('#credBaseURL').disabled = false;
           $('#credApiKey').value = '';

@@ -1,7 +1,7 @@
 // chat.js —— 聊天体（2026-07-24 壳/体反转切分自 app.js）：状态区 / UI 偏好 / 对话历史 / 消息模型与渲染 / 打字机 / 额度 / 发送与流 / 待续跑轮询
 import { toast, confirmDialog, promptDialog } from './ui.js';
 import { $, debounce, renderMarkdown, lsSet } from './util.js';
-import { getPromptText, clearPrompt, handleDrop, insertPathChip } from './composer.js';
+import { getPromptText, clearPrompt, handleDrop, insertDroppedPaths } from './composer.js';
 import {
   loadConvs, saveConvs, flushConvs,
   convPushMessage, convSetMessage, convSetSession, convSetMsgFields,
@@ -10,14 +10,34 @@ import {
 } from './conv-store.js';
 import { bindDirPopover, closeDirModal } from './dir-popover.js';
 import { AnimeAnimations } from './anim.js';
-import { bindTauriDrop } from './tauri-init.js';
+import { registerDropZone } from './drag-bus.js';
 bindDirPopover({ getCwd: () => cwd, selectDir }); // 惰性读 cwd 无 TDZ；selectDir 已提升
-// Tauri 桌面版：文件/目录拖入直接插本地路径 chip，无需上传副本（Web 模式 _dropCb 为 null，不生效）
-bindTauriDrop(({ paths }) => {
-  const promptEl = document.querySelector('#prompt');
-  if (promptEl) promptEl.classList.remove('dragover');
-  paths.forEach(p => insertPathChip(p));
-});
+// Tauri 桌面版：文件/目录拖入直接插本地路径 chip，无需上传副本。
+// 走拖拽总线而非旧的单槽位 bindTauriDrop——Markdown 查看器也要注册，单槽位会互相覆盖。
+// Web 模式下总线永不触发（tauri://drag-* 不存在），HTML5 + 上传副本路线继续生效。
+{
+  const promptZoneEl = document.querySelector('#prompt');
+  if (promptZoneEl) {
+    registerDropZone({
+      el: promptZoneEl,
+      onDragOver: () => promptZoneEl.classList.add('dragover'),
+      onDragLeave: () => promptZoneEl.classList.remove('dragover'),
+      onDrop: (paths, pt) => {
+        promptZoneEl.classList.remove('dragover');
+        // 光标移到落点，附件插在拖放位置（与旧 HTML5 版行为保持一致）
+        const r = document.caretRangeFromPoint ? document.caretRangeFromPoint(pt.x, pt.y) : null;
+        if (r && promptZoneEl.contains(r.startContainer)) {
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(r);
+        }
+        // 这是唯一一处 fire-and-forget 调用，兜在这里而不是塞进 insertDroppedPaths 内部：
+        // 后者保留 rejection 语义，将来有 await 的调用方才拿得到失败原因
+        insertDroppedPaths(paths).catch((err) => console.error('[Drop] 插入路径 chip 失败:', err));
+      },
+    });
+  }
+}
 // 视图桥：壳注入「回聊天视图」跳转，体内 5 处原直调改经 _goChat()
 let _goChat = () => {};
 // 视图桥：聊天视图是否当前激活（供 refreshAskChip 判定，避免反向依赖 app.js 的 activeView）
@@ -77,6 +97,11 @@ export function bindReqConvHook(fn) { _reqConvHook = fn; }
       let chatDisabledTools = JSON.parse(localStorage.getItem('claude_disabled_tools') || '[]');
       let chatCustomModel = localStorage.getItem('claude_custom_model') || '';
       let chatCustomLabel = localStorage.getItem('claude_custom_label') || '';
+      // 选中的自定义凭证 id。**必须随请求带上**：服务端此前只收 model，凭证靠
+      // pickActive 取「第一个可用的 openai-compat」，于是多厂商共存时必然串台——
+      // 点智谱发出 model=glm-4，却配上 DeepSeek 的 apiKey/baseURL，请求打到
+      // api.deepseek.com 要一个 glm-4，必然失败。model 相同的多条凭证也无从区分。
+      let chatCustomCredId = localStorage.getItem('claude_custom_cred_id') || '';
       let chatActiveTokenLabel = ''; // 当前激活 token 的名称，由 initUiPrefs 从服务端填充
 
       // ---- UI 偏好持久化（服务端 settings.json，跨重启/跨浏览器） ----
@@ -629,6 +654,7 @@ export function renderConvListNow() {
         c.provider = chatProvider;
         c.customModel = chatCustomModel;
         c.customLabel = chatCustomLabel;
+        c.customCredId = chatCustomCredId;
         c.updatedAt = Date.now();
         saveConvs(list);
         renderConvListDebounced();
@@ -669,6 +695,7 @@ export function renderConvListNow() {
         c.provider = chatProvider;
         c.customModel = chatCustomModel;
         c.customLabel = chatCustomLabel;
+        c.customCredId = chatCustomCredId;
         saveConvs(list); // 不动 updatedAt：纯偏好变更不改变左栏排序
       }
       export async function openConv(id) {
@@ -970,11 +997,11 @@ export function renderConvListNow() {
         if (kind === 'dir') {
           chip.classList.add('path-dir');
           icon.textContent = '📁';
-          chip.title = '点击打开目录';
+          chip.title = '点击在文件夹中定位';
         } else {
           chip.classList.add('path-file');
           icon.textContent = '📄';
-          chip.title = '点击打开所在文件夹';
+          chip.title = '点击在文件夹中定位';
         }
 
         chip.appendChild(icon);
@@ -983,17 +1010,20 @@ export function renderConvListNow() {
         // 绑定点击事件
         chip.addEventListener('click', (e) => {
           e.stopPropagation();
-          handlePathChipClick(path, kind);
+          handlePathChipClick(path);
         });
 
         return chip;
       }
 
       /**
-       * 处理路径 chip 点击：Tauri 打开文件夹，Web 复制路径
+       * 处理路径 chip 点击：Tauri 在文件管理器中定位，Web 复制路径。
+       *
+       * 文件与目录都直接 reveal 目标本身（在其父目录中被选中）。不再手工截父目录——
+       * 那个写法在根目录、结尾带分隔符时会算出空串。
        */
-      async function handlePathChipClick(path, kind) {
-        if (!window.tauriApi?.openPath) {
+      async function handlePathChipClick(path) {
+        if (!window.tauriApi?.revealPath) {
           // Web 模式：复制路径
           try {
             await navigator.clipboard.writeText(path);
@@ -1004,18 +1034,15 @@ export function renderConvListNow() {
           return;
         }
 
-        // Tauri 模式
-        let target = path;
-        if (kind === 'file') {
-          // 文件：打开所在目录
-          target = path.split(/[\\\/]/).slice(0, -1).join('/');
-        }
-
         try {
-          await window.tauriApi.openPath(target);
+          await window.tauriApi.revealPath(path);
         } catch (err) {
-          console.error('openPath failed:', err);
-          toast('打开失败：' + (err?.message || '未知错误'));
+          console.error('revealPath failed:', err);
+          // Tauri 命令 reject 回传的是**序列化后的字符串**（插件 Error 的 Serialize
+          // 走 serialize_str），对字符串取 .message 恒为 undefined——原先写 err?.message
+          // 把 scope 校验失败的真实原因吞成了「未知错误」，正是本 bug 难查的直接原因。
+          const msg = typeof err === 'string' ? err : (err?.message ?? JSON.stringify(err));
+          toast('打开失败：' + msg);
         }
       }
 
@@ -1951,7 +1978,7 @@ export function renderConvListNow() {
           : {};
         const startBody =
           chatProvider === 'openai-compat'
-            ? { prompt: text, cwd: runCwd, session: sessionId, provider: 'openai-compat', model: chatCustomModel, convId, ...userMark }
+            ? { prompt: text, cwd: runCwd, session: sessionId, provider: 'openai-compat', model: chatCustomModel, credId: chatCustomCredId, convId, ...userMark }
             : { prompt: text, cwd: runCwd, session: sessionId, model: chatModel, effort: chatEffort, mode: effectiveMode, convId, ...userMark };
         fetch('/api/run/start', {
           method: 'POST',
@@ -2723,7 +2750,8 @@ export function renderConvListNow() {
         if (chatProvider === 'openai-compat') {
           modelFabLabel.textContent = chatCustomLabel || chatCustomModel || '自定义模型';
           [...modelPills.children].forEach((b) => b.classList.remove('active'));
-          [...customModelPills.children].forEach((b) => b.classList.toggle('active', b.dataset.m === chatCustomModel));
+          // 按 cid 高亮：同 model 多条凭证时，按 model 匹配会同时点亮好几个 pill
+          [...customModelPills.children].forEach((b) => b.classList.toggle('active', b.dataset.cid === chatCustomCredId));
           effortRow.classList.add('disabled'); // openai v1 无 effort
           modePills.classList.add('disabled'); // openai v1 无权限模式
           return;
@@ -2747,15 +2775,18 @@ export function renderConvListNow() {
           creds.forEach((c) => {
             const b = document.createElement('button');
             b.dataset.m = c.model;
+            b.dataset.cid = c.id; // 高亮与发送都认 id：同 model 的多条凭证（不同 key/厂商）才区分得开
             b.textContent = c.label || c.model;
             b.title = (c.label ? c.label + ' · ' : '') + c.model;
             b.addEventListener('click', () => {
               chatProvider = 'openai-compat';
               chatCustomModel = c.model;
               chatCustomLabel = c.label || c.model;
+              chatCustomCredId = c.id;
               lsSet('claude_provider', chatProvider);
               lsSet('claude_custom_model', chatCustomModel);
               lsSet('claude_custom_label', chatCustomLabel);
+              lsSet('claude_custom_cred_id', chatCustomCredId);
               syncModelUI();
               persistPrefsToConv();
               modelPop.hidden = true;
@@ -2763,11 +2794,27 @@ export function renderConvListNow() {
             });
             customModelPills.appendChild(b);
           });
-          // 在用的自定义模型若已被删除 → 回退 Claude，避免继续发送已删除的 model
-          if (chatProvider === 'openai-compat' && !creds.some((c) => c.model === chatCustomModel)) {
-            chatProvider = 'claude-agent';
-            lsSet('claude_provider', chatProvider);
-            persistPrefsToConv();
+          // 在用的凭证若已被删除 → 回退 Claude，避免继续发送指向已删凭证的请求。
+          // 按 id 判定：同名 model 的另一条凭证还在，不代表**这一条**还在，
+          // 按 model 匹配会让删除后的选择静默漂移到另一个账号上。
+          // 升级路径：老用户没有 credId（此前不存），按 model 兜底认一次，
+          // 认到就把 id 补上，不至于一升级就被踢回 Claude。
+          if (chatProvider === 'openai-compat') {
+            let cur = chatCustomCredId ? creds.find((c) => c.id === chatCustomCredId) : null;
+            if (!cur && !chatCustomCredId) cur = creds.find((c) => c.model === chatCustomModel);
+            if (cur) {
+              if (cur.id !== chatCustomCredId) {
+                chatCustomCredId = cur.id;
+                lsSet('claude_custom_cred_id', chatCustomCredId);
+                persistPrefsToConv();
+              }
+            } else {
+              chatProvider = 'claude-agent';
+              chatCustomCredId = '';
+              lsSet('claude_provider', chatProvider);
+              lsSet('claude_custom_cred_id', '');
+              persistPrefsToConv();
+            }
           }
           const divider = $('#customDivider');
           if (divider) divider.hidden = creds.length === 0;
@@ -2796,6 +2843,14 @@ export function renderConvListNow() {
           if (prefs.customLabel && prefs.customLabel !== chatCustomLabel) {
             chatCustomLabel = prefs.customLabel;
             lsSet('claude_custom_label', chatCustomLabel);
+          }
+          // 凭证归属随会话还原。老会话没存过 customCredId：置空而非保留当前值——
+          // 留着上一个会话的 id 会让这条会话拿别人的 key 发请求，比退化成
+          // 服务端 pickActive 兜底更糟（后者至少是个确定行为，且会按 model 找）。
+          const nextCredId = prefs.customCredId || '';
+          if (nextCredId !== chatCustomCredId) {
+            chatCustomCredId = nextCredId;
+            lsSet('claude_custom_cred_id', chatCustomCredId);
           }
         }
         if (prefs.model && MODEL_LABELS[prefs.model] && prefs.model !== chatModel) {
@@ -2892,14 +2947,26 @@ export function renderConvListNow() {
           send();
         }
       });
-      promptEl.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        promptEl.classList.add('dragover');
-      });
-      promptEl.addEventListener('dragleave', (e) => {
-        if (!promptEl.contains(e.relatedTarget)) promptEl.classList.remove('dragover');
-      });
-      promptEl.addEventListener('drop', handleDrop);
+      // 只有 Web 模式才绑 HTML5 拖拽。Tauri 原生拖拽接管后 dataTransfer.files 恒空，
+      // 这三个监听永不触发——留着就是下一批「看着有、实际从不执行」的死代码，
+      // 而本次要修的两个 bug 恰恰都是这么来的（tauri-init 那个 drag-drop 监听器同理）。
+      // Tauri 模式的拖拽走 drag-bus 总线，注册在本文件顶部。
+      //
+      // 判据用 __TAURI_INTERNALS__ 而非 window.tauriApi?.isTauri：本段是 chat.js 的模块顶层
+      // 同步代码，而 tauriApi 由 tauri-init.js 的异步 IIFE 在 `await import(vendor)` 之后才赋值
+      // （app.js 先 import tauri-init 再 import chat，IIFE 早已挂起）——此刻读必然是 undefined，
+      // 会被误判成 Web 模式。__TAURI_INTERNALS__ 是 Tauri v2 webview 里始终存在的同步全局量，
+      // 无时序问题（tauri-init.js 自己判 isTauri 用的也是它）。
+      if (typeof window.__TAURI_INTERNALS__ === 'undefined') {
+        promptEl.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          promptEl.classList.add('dragover');
+        });
+        promptEl.addEventListener('dragleave', (e) => {
+          if (!promptEl.contains(e.relatedTarget)) promptEl.classList.remove('dragover');
+        });
+        promptEl.addEventListener('drop', handleDrop);
+      }
       $('#sidebarNew').addEventListener('click', newConversation);
 
       // 会话列表右键菜单（事件委托到 convList）
@@ -3133,7 +3200,7 @@ export function renderConvListNow() {
           const effectiveMode = chatMode;
           const startBody =
             chatProvider === 'openai-compat'
-              ? { prompt: text, cwd: runCwd, session: sessionId, provider: 'openai-compat', model: chatCustomModel, convId }
+              ? { prompt: text, cwd: runCwd, session: sessionId, provider: 'openai-compat', model: chatCustomModel, credId: chatCustomCredId, convId }
               : { prompt: text, cwd: runCwd, session: sessionId, model: chatModel, effort: chatEffort, mode: effectiveMode, convId };
 
           fetch('/api/run/start', {

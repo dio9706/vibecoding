@@ -12,7 +12,7 @@ import {
 import { runClassifierOnce } from '../../features/llm-classify.js';
 import { reviewTask } from '../../plugins/team-tools/review/index.js';
 import { getRequirement, updateRequirement } from '../../store/requirements.js';
-import { getMyFeishuOpenId, getActiveBot } from '../../store/settings.js';
+import { getMyFeishuOpenId } from '../../store/settings.js';
 import { resolveTrustedOpenIds } from '../../plugins/team-tools/feedback/logic.js';
 import { config } from '../../shared/config.js';
 import { enqueueSystemTask, raceWithTimeoutFlag } from './requirement-ops.js';
@@ -50,7 +50,7 @@ export function resolveInspectIdentity({ myFeishuOpenId, trusted }) {
 export function currentInspectIdentity() {
   return resolveInspectIdentity({
     myFeishuOpenId: getMyFeishuOpenId(),
-    trusted: resolveTrustedOpenIds(getActiveBot(), config.lark.trustedOpenIds),
+    trusted: resolveTrustedOpenIds(getMyFeishuOpenId()),
   });
 }
 

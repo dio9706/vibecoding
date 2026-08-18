@@ -8,12 +8,11 @@
  */
 
 /**
- * 可信提交人名单出口：per-bot 设置（机器人编辑表单）优先，未配置（空/缺失/非数组）才回退 env。
- * 不做并集——否则设置页「清空」永远无法覆盖 env，用户改了没反应，语义不可预期。
+ * 可信提交人名单出口：取基础设置中「我的飞书 open_id」作为唯一可信提交人。
+ * 单 open_id → 单元素数组；未填则返回空数组。
  */
-export function resolveTrustedOpenIds(bot, envList = []) {
-  const fromBot = Array.isArray(bot?.trustedOpenIds) ? bot.trustedOpenIds.filter(Boolean) : [];
-  return fromBot.length ? fromBot : (envList || []).filter(Boolean);
+export function resolveTrustedOpenIds(myFeishuOpenId) {
+  return myFeishuOpenId ? [myFeishuOpenId] : [];
 }
 
 /**

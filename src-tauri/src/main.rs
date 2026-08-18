@@ -391,10 +391,15 @@ fn wait_backend_ready(port: u16) -> bool {
 static WINDOW_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// 创建一个应用窗口（单实例架构下多开共用同一后端/托盘，仅多一个 webview 窗口）。
-/// disable_drag_drop_handler()：Tauri v2 正确 API，禁用 Tauri 的 Webview IDropTarget 拦截，
-/// 让 WebView2 保持 SetAllowExternalDrop(true) 默认值，使前端 HTML5 drop 事件可正常触发。
-/// 注意：v1 的 file_drop_handler(false) 和 v2 错误用法 drag_and_drop(false) 操作的是
-/// WindowBuilder（OS 级窗口 OLE）而非 WebviewBuilder，无法解除 Webview 层的文件拖入拦截。
+///
+/// 刻意**不调用** disable_drag_drop_handler()：保留 Tauri 的 Webview IDropTarget 拦截，
+/// 让 tauri://drag-* 事件正常 emit，前端才能拿到拖入项的**真实本地绝对路径**（并支持文件夹）。
+/// 曾经调用过它，是为了让 WebView2 保持 SetAllowExternalDrop(true)、走 HTML5 drop——
+/// 但那条路只能读到文件内容、拿不到原始路径，只好把文件复制一份到 .uploads 再把副本路径
+/// 交给 Claude，且拖文件夹完全无反应（dataTransfer.files 对目录给不出条目）。
+///
+/// 代价：webview 内 HTML5 drop 的 dataTransfer.files 恒空。所有文件拖拽区必须走
+/// public/js/drag-bus.js 的落点分派，不能再绑 DOM drop 事件。
 fn create_app_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     create_app_window_ctx(app, None, None)
 }
@@ -427,8 +432,7 @@ fn create_app_window_ctx(app: &AppHandle, cwd: Option<&str>, conv: Option<&str>)
     .fullscreen(false)
     .focused(true)
     .decorations(false)
-    .visible(false)  // 防启动白闪：先隐藏，页面加载完成（on_page_load Finished）再显示
-    .disable_drag_drop_handler();  // v2 正确 API：解除 Webview 层文件拖入拦截，让 HTML5 drop 事件生效
+    .visible(false);  // 防启动白闪：先隐藏，页面加载完成（on_page_load Finished）再显示
     // 项目窗口：页面脚本执行前注入上下文（serde_json 保证字符串转义安全，含反斜杠路径）
     if cwd.is_some() || conv.is_some() {
         let script = format!(
@@ -782,6 +786,8 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
+        // shell 仍保留（sidecar 启动依赖 shell:allow-execute），但「打开」能力改由 opener 承担
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None::<Vec<&str>>,

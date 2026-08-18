@@ -20,6 +20,10 @@ const UPLOADS_DIR = process.env.APP_DATA_DIR
 const SCRIPT_EXTS = { '.py': 'python', '.js': 'node' };
 const SCRIPT_MAX = 1 * 1024 * 1024; // 脚本 1MB 上限
 
+/** Markdown 读取白名单：只放行这两个扩展名，避免 /api/fs/read 变成通用任意文件读取 */
+const READ_EXTS = new Set(['.md', '.markdown']);
+const READ_MAX = 10 * 1024 * 1024; // 10MB
+
 /**
  * 纯函数：校验/清洗上传脚本名。basename 防穿越 + 字符清洗；扩展名须 ∈ {.py,.js}。
  * @returns {{ok:true,scriptName:string,scriptType:string}|{ok:false,error:string}}
@@ -34,6 +38,81 @@ export function validateScriptName(rawName) {
   // 扩展名统一小写：下游 script-runner 的 endsWith('.py') 与 listScriptFiles 正则均大小写敏感
   const scriptName = cleaned.slice(0, cleaned.length - rawExt.length) + ext;
   return { ok: true, scriptName, scriptType };
+}
+
+/**
+ * 纯函数：批量判断路径类型。
+ *
+ * 设计为批量而非单条——一次拖拽可能带入数十个文件，逐个 HTTP 请求过于碎片化。
+ * 任何异常都归为 'missing' 而不上抛：一个脏路径不该让整批拖拽失败。
+ *
+ * @param {unknown[]} paths
+ * @returns {{path:string, kind:'file'|'dir'|'missing', size?:number, mtime?:number}[]}
+ */
+export function statPaths(paths) {
+  return (Array.isArray(paths) ? paths : []).map((raw) => {
+    const p = str(raw);
+    if (!p) return { path: '', kind: 'missing' };
+    try {
+      const st = fs.statSync(p); // 跟随符号链接：指向普通文件的软链应视为文件
+      if (st.isDirectory()) return { path: p, kind: 'dir' };
+      if (st.isFile()) return { path: p, kind: 'file', size: st.size, mtime: st.mtimeMs };
+      return { path: p, kind: 'missing' }; // 管道 / 设备等特殊文件按不存在处理
+    } catch {
+      return { path: p, kind: 'missing' };
+    }
+  });
+}
+
+/**
+ * 纯函数：校验 /api/fs/read 的 path 参数。
+ * @returns {{ok:true, path:string}|{ok:false, error:string}}
+ */
+export function validateReadPath(raw) {
+  const p = str(raw);
+  if (!p) return { ok: false, error: '缺少 path 参数' };
+  if (!path.isAbsolute(p)) return { ok: false, error: '仅支持绝对路径' };
+  if (!READ_EXTS.has(path.extname(p).toLowerCase())) {
+    return { ok: false, error: '仅支持 .md / .markdown 文件' };
+  }
+  return { ok: true, path: p };
+}
+
+/** POST /api/fs/stat —— body { paths: string[] }，批量返回类型。上限 200 条防滥用。 */
+export function handleFsStat(req, res) {
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+  return withJsonBody(req, res, (data) => {
+    const paths = Array.isArray(data?.paths) ? data.paths.slice(0, 200) : [];
+    sendJson(res, 200, { results: statPaths(paths) });
+  });
+}
+
+/**
+ * GET /api/fs/read?path= —— 读 Markdown 内容。
+ *
+ * 安全边界：扩展名白名单 + 必须是普通文件 + 10MB 上限。大小在读之前用 stat 拦，
+ * 不能先 readFileSync 再判——那样 1GB 文件已经进了内存。
+ */
+export function handleFsRead(url, res) {
+  const v = validateReadPath(url.searchParams.get('path'));
+  if (!v.ok) return sendJson(res, 400, { error: v.error });
+  let st;
+  try {
+    st = fs.statSync(v.path);
+  } catch {
+    return sendJson(res, 404, { error: '文件不存在：' + v.path });
+  }
+  if (!st.isFile()) return sendJson(res, 400, { error: '不是普通文件' });
+  if (st.size > READ_MAX) return sendJson(res, 413, { error: '文件过大（>10MB）' });
+  try {
+    sendJson(res, 200, {
+      content: fs.readFileSync(v.path, 'utf8'),
+      size: st.size,
+      mtime: st.mtimeMs,
+    });
+  } catch (e) {
+    sendJson(res, 500, { error: '读取失败：' + (e?.message || e) });
+  }
 }
 
 /** 上传拖入的文件副本到 .uploads/，返回绝对路径（浏览器拿不到原始路径，故存副本供 Claude 读取） */

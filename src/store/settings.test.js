@@ -23,7 +23,7 @@ test('normalizeSettings：保留 token 其余字段', () => {
   assert.equal(out.tokens[0].utilization, 0.5);
 });
 
-test('makeTokenEntry：claude 条目不含 baseURL/model，带默认字段', () => {
+test('makeTokenEntry：claude 条目不含 baseURL/model/vendor，带默认字段', () => {
   const e = makeTokenEntry({ id: 'k1', token: 'sk-x', providerId: 'claude-agent', index: 0, now: 'T' });
   assert.equal(e.id, 'k1');
   assert.equal(e.providerId, 'claude-agent');
@@ -33,14 +33,30 @@ test('makeTokenEntry：claude 条目不含 baseURL/model，带默认字段', () 
   assert.equal(e.updatedAt, 'T');
   assert.equal('baseURL' in e, false);
   assert.equal('model' in e, false);
+  assert.equal('vendor' in e, false);
 });
 
-test('makeTokenEntry：openai 条目携带 baseURL/model 与自定义 label', () => {
-  const e = makeTokenEntry({ id: 'o1', token: 'sk-o', providerId: 'openai-compat', label: 'DeepSeek', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', index: 2, now: 'T' });
+test('makeTokenEntry：openai 条目携带 baseURL/model/vendor 与自定义 label', () => {
+  const e = makeTokenEntry({ id: 'o1', token: 'sk-o', providerId: 'openai-compat', label: 'DeepSeek', vendor: 'deepseek', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', index: 2, now: 'T' });
   assert.equal(e.providerId, 'openai-compat');
   assert.equal(e.label, 'DeepSeek');
+  assert.equal(e.vendor, 'deepseek');
   assert.equal(e.baseURL, 'https://api.deepseek.com');
   assert.equal(e.model, 'deepseek-chat');
+});
+
+// vendor 是纯展示元数据，允许缺省：手写 API 调用 / 存量数据都可能没有它，
+// 此时不该落一个空字段（前端按 baseURL 反查兜底）
+test('makeTokenEntry：openai 条目省略 vendor 时不带该字段', () => {
+  const e = makeTokenEntry({ id: 'o2', token: 'sk-o', providerId: 'openai-compat', baseURL: 'https://api.x.com/v1', model: 'm', now: 'T' });
+  assert.equal('vendor' in e, false);
+  assert.equal(e.baseURL, 'https://api.x.com/v1');
+});
+
+test('normalizeSettings：透传 openai 凭证的 vendor 字段（新增字段不被剥离）', () => {
+  const out = normalizeSettings({ tokens: [{ id: 'o', providerId: 'openai-compat', token: 'x', vendor: 'zhipu', baseURL: 'b', model: 'glm-4' }] });
+  assert.equal(out.tokens[0].vendor, 'zhipu');
+  assert.equal(normalizeSettings(out).tokens[0].vendor, 'zhipu'); // 幂等
 });
 
 test('makeTokenEntry：label 缺省按 index 生成（账号N）', () => {

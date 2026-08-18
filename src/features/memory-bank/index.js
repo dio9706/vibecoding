@@ -195,9 +195,10 @@ export async function runOnce({ cwd = process.cwd(), now = Date.now() } = {}) {
       lastScannedAt: bank.lastScannedAt,
       // 提炼失败时不推进游标，下轮整批重试；否则这批输入会被永久跳过、证据静默丢失
       userLogOffset: cursor,
-      // 只有真发起过 LLM 调用才算「跑过一轮」：没花额度就不该起冷却，
-      // 否则一次空扫会把 shouldRun 的 minIntervalHours 冷却窗白白吃掉。
-      lastExtractAt: llmCalls > 0 ? now : bank.lastExtractAt,
+      // 只有成功推进游标（cursor > bank.userLogOffset），才算「跑过一轮」、触发冷却。
+      // 调用失败时游标不动（cursor === bank.userLogOffset），不更新 lastExtractAt，
+      // 让下一轮 tick 立即重试，避免冷却死循环：失败 → 冷却 → 冷却期间还是失败 → 永不重试。
+      lastExtractAt: cursor > bank.userLogOffset ? now : bank.lastExtractAt,
       items,
       blacklist,
     });

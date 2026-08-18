@@ -40,6 +40,13 @@ promptEl?.addEventListener('paste', (e) => {
         });
         promptEl.innerHTML = '';
       }
+      // 抽成函数是因为图片加载失败时要拿它替换掉裂图（见 makeChip 的 onerror），两处必须一致
+      function makeFileIcon() {
+        const ic = document.createElement('span');
+        ic.className = 'att-ic';
+        ic.textContent = '📄';
+        return ic;
+      }
       function makeChip(att) {
         const chip = document.createElement('span');
         chip.className = 'att-chip';
@@ -48,12 +55,15 @@ promptEl?.addEventListener('paste', (e) => {
         if (att.isImage && att.thumbUrl) {
           const img = document.createElement('img');
           img.src = att.thumbUrl;
+          // asset 协议带 scope 白名单（tauri.conf.json 的 assetProtocol.scope），路径落在白名单外
+          // 时请求被拒，<img> 不报错、只静默变成一张裂图——onerror 是唯一能感知到「这张图加载不
+          // 出来」的信号（同 chat.js:makeImageElement 的处理）。
+          // 只把预览换成 📄，dataset.path 与文件名原样保留：路径才是要交给 Claude 的东西，
+          // 不能因为缩略图挂了就把附件丢了。
+          img.onerror = () => img.replaceWith(makeFileIcon());
           chip.appendChild(img);
         } else {
-          const ic = document.createElement('span');
-          ic.className = 'att-ic';
-          ic.textContent = '📄';
-          chip.appendChild(ic);
+          chip.appendChild(makeFileIcon());
         }
         const nm = document.createElement('span');
         nm.className = 'att-nm';
@@ -116,8 +126,9 @@ promptEl?.addEventListener('paste', (e) => {
           window.toast.error('文件上传失败：' + (err && err.message ? err.message : err));
         }
       }
+      /** Web 模式的 HTML5 拖拽入口：浏览器拿不到本地绝对路径，只能读文件内容上传副本。
+       *  Tauri 模式不会走到这里——原生拖拽已接管，走 drag-bus 总线拿真实路径（零副本）。 */
       export function handleDrop(e) {
-        // dragover 样式无论有无文件都清掉（Tauri 模式下 dataTransfer.files 为空但 DOM drop 仍触发）
         promptEl.classList.remove('dragover');
         const files = e.dataTransfer && e.dataTransfer.files;
         if (!files || !files.length) return;
@@ -135,18 +146,49 @@ promptEl?.addEventListener('paste', (e) => {
       }
 
       /**
-       * 直接插入本地路径 chip（Tauri 模式专用：无需上传副本，Claude 可直接访问本地路径）。
-       * 文件夹与无扩展名文件均显示 📁 图标；有扩展名的显示 📄。
+       * Tauri 模式：把一批拖入的真实路径转成 chip。
+       *
+       * 先批量 stat 拿真实类型——旧版用「最后一段不含 . 即目录」的启发式，
+       * 会把 README / Dockerfile / LICENSE 判成文件夹。
        */
-      export function insertPathChip(absPath) {
-        // 取路径最后一段作为展示名（兼容 / 与 \ 分隔符）
+      export async function insertDroppedPaths(paths) {
+        const kinds = new Map();
+        try {
+          const r = await fetch('/api/fs/stat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paths }),
+          });
+          const d = await r.json();
+          for (const it of d.results || []) kinds.set(it.path, it.kind);
+        } catch {
+          // stat 失败不阻断拖拽：降级到扩展名启发式，chip 照常插入。
+          // 拖拽是高频操作，不能因为后端抖动就完全不响应
+        }
+        for (const p of paths) insertPathChip(p, kinds.get(p));
+      }
+
+      /**
+       * 插入本地路径 chip（Tauri 模式专用：零副本，Claude 直接读原路径）。
+       * @param {string} absPath
+       * @param {'file'|'dir'|'missing'} [kind] 来自 /api/fs/stat；缺省时退回扩展名启发式
+       */
+      export function insertPathChip(absPath, kind) {
         const lastSeg = absPath.split(/[/\\]/).filter(Boolean).pop() || absPath;
-        // 启发式判断是否为目录：最后段不含 . 视为目录（可能误判无扩展名文件，但实用够用）
-        const isDir = !lastSeg.includes('.');
-        const chip = makeChip({ path: absPath, name: lastSeg, isImage: false, thumbUrl: '' });
+        const isDir = kind ? kind === 'dir' : !lastSeg.includes('.');
+        const isImage = !isDir && /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(lastSeg);
+        // 本地图片走 asset 协议预览：原生路径下没有 File 对象，createObjectURL 不再适用。
+        // 依赖 Cargo 的 protocol-asset feature 与 tauri.conf.json 的 assetProtocol.scope
+        const convert = window.__TAURI__?.core?.convertFileSrc;
+        const thumbUrl = isImage && convert ? convert(absPath) : '';
+        const chip = makeChip({ path: absPath, name: lastSeg, isImage: !!thumbUrl, thumbUrl });
         if (isDir) {
           const ic = chip.querySelector('.att-ic');
           if (ic) ic.textContent = '📁';
+        }
+        if (kind === 'missing') {
+          chip.classList.add('att-missing'); // 路径已不存在，视觉提示而不是静默丢弃
+          chip.title = '路径不存在：' + absPath;
         }
         insertNodeAtCaret(chip);
       }

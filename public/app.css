@@ -1101,6 +1101,11 @@
       .att-chip.uploading {
         opacity: 0.6;
       }
+      /* 拖入时 stat 判定为不存在：仍插入 chip 但给出视觉警示，避免静默丢弃 */
+      .att-chip.att-missing {
+        border-color: var(--amber);
+        opacity: 0.75;
+      }
       .composer .btn.primary {
         padding: 12px 22px;
         border-radius: 12px;

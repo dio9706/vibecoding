@@ -64,8 +64,10 @@ export function handleRunStart(req, res) {
     const run = createRun();
     if (provider === 'openai-compat') {
       sendJson(res, 200, { runId: run.id, model });
+      // credId 指明用**哪一条**凭证；缺省（老前端/老会话）由 startOpenAiRun 回退 pickActive
+      const credId = str(data.credId);
       // startOpenAiRun 是 async：兜底 setup 阶段的同步/异步抛错 → failRun，避免未处理 rejection
-      startOpenAiRun(run, { prompt, model, cwd, convId }).catch((e) =>
+      startOpenAiRun(run, { prompt, model, credId, cwd, convId }).catch((e) =>
         failRun(run, `自定义模型启动失败：${e?.message || String(e)}`),
       );
       return;
@@ -166,7 +168,12 @@ export function handleRunMsgNow(req, res) {
       return sendJson(res, 200, { ok: false }); // 含判档窗口（_input 未就绪）：消息继续持有，首轮 result 自动进入
     }
     if (!run.heldMsgs.length) return sendJson(res, 200, { ok: true }); // 与本轮自然 flush 重合：已进入任务，无需打断
-    flushHeldMsgs(run);
+    const flushed = flushHeldMsgs(run);
+    if (!flushed.length) {
+      // push 全部返回 false：输入流已关闭（autoClose 已触发），run 即将自然结束；
+      // 消息仍在 heldMsgs，done 事件会将其标为 unsent；此处告知前端失败以触发提示。
+      return sendJson(res, 200, { ok: false });
+    }
     cancelPendingAsks(run); // 被打断轮的挂起审批按默认值作废，避免悬空
     run._input.interrupt().catch(() => {}); // 打断失败不致命（见上）
     runPulse(run); // 必须保留：cancelPendingAsks 退出 waiting 后不刷计时，靠这里防看门狗误杀

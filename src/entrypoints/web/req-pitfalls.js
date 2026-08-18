@@ -78,34 +78,35 @@ export function ensureClaudeMdPath(projectDir) {
 
 /**
  * 写入避坑清单条目到 pitfalls.md。
- * 读取现有条目 → 去重合并 → 整体写回（原子性保证）。
+ * 读取现有条目 → 去重合并（调用 mergePitfalls，已支持 30 条上限）→ 整体写回（原子性保证）。
  * items 格式：字符串数组，每个元素为一条避坑项。
  * @param {string} projectDir 项目目录绝对路径
  * @param {Array<string>} items 避坑条目数组
  * @returns {Promise<void>}
  */
 export async function writePitfalls(projectDir, items) {
+  const { mergePitfalls } = await import('./req-logic.js');
+  const { logger } = await import('../../shared/logger.js');
+
   const filePath = ensurePitfallsPath(projectDir);
 
   // 读取现有内容
   const existing = await readFile(filePath);
-  const existingLines = existing
+  const existingItems = existing
     ? existing
         .split('\n')
         .filter((line) => line.trim() && line.trim().startsWith('-'))
         .map((line) => line.replace(/^-\s*/, '').trim())
     : [];
 
-  // 去重合并：新条目仅在首 20 字不重复时才追加
-  const seen = new Set(existingLines.map((item) => item.slice(0, 20)));
-  const merged = [...existingLines];
+  // 调用 mergePitfalls（已支持 30 条上限与截断标记）
+  const { items: merged, truncated, removed } = mergePitfalls(existingItems, items);
 
-  for (const item of items) {
-    const key = item.slice(0, 20);
-    if (!seen.has(key)) {
-      merged.push(item);
-      seen.add(key);
-    }
+  if (truncated && removed > 0) {
+    logger.warn('req-pitfalls', '避坑清单已满 30 条，超出部分被截断', {
+      projectDir,
+      removed,
+    });
   }
 
   // 格式化并写回

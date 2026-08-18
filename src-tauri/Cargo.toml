@@ -14,12 +14,15 @@ tauri-build = { version = "2.0", features = [] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # tray-icon: 系统托盘支持  image-png: 托盘/窗口图标加载
-tauri = { version = "2.0", features = ["tray-icon", "image-png"] }
+tauri = { version = "2.0", features = ["protocol-asset", "tray-icon", "image-png"] }
 # 系统级能力插件（v2 全部拆成独立 crate）
 tauri-plugin-notification = "2.0"
 tauri-plugin-global-shortcut = "2.0"
 tauri-plugin-autostart = "2.0"
 tauri-plugin-shell = "2.0"
+# opener：shell 的 open 自 2.1.0 起废弃，且其 scope 正则只认 URL，本地路径必被拒。
+# 迁到 opener 后用 reveal_item_in_dir 在文件管理器中定位，不执行目标文件，无 RCE 面。
+tauri-plugin-opener = "2"
 # 单实例：多次打开只保留一个进程/后端/托盘，额外的启动请求转为「新开窗口」
 tauri-plugin-single-instance = "2.0"
 # HTTP 健康检查（替代 v1 的 tauri::http::Client）

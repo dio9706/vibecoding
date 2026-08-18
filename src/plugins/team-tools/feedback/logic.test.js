@@ -152,19 +152,12 @@ test('canOperateVerdict：提交人/可信白名单/owner 可操作，其他人�
   assert.equal(canOperateVerdict('ou_me', null, {}), false);
 });
 
-test('resolveTrustedOpenIds：bot 配置非空优先（不与 env 并集）', () => {
-  assert.deepEqual(resolveTrustedOpenIds({ trustedOpenIds: ['ou_bot'] }, ['ou_env']), ['ou_bot']);
+test('resolveTrustedOpenIds：有 open_id → 单元素数组', () => {
+  assert.deepEqual(resolveTrustedOpenIds('ou_me'), ['ou_me']);
 });
 
-test('resolveTrustedOpenIds：bot 未配置/空/非数组 → 回退 env', () => {
-  assert.deepEqual(resolveTrustedOpenIds({ trustedOpenIds: [] }, ['ou_env']), ['ou_env']);
-  assert.deepEqual(resolveTrustedOpenIds({}, ['ou_env']), ['ou_env']);
-  assert.deepEqual(resolveTrustedOpenIds(null, ['ou_env']), ['ou_env']);
-  assert.deepEqual(resolveTrustedOpenIds({ trustedOpenIds: 'ou_x' }, ['ou_env']), ['ou_env']);
-});
-
-test('resolveTrustedOpenIds：两侧皆空 → 空数组；空串被剔除', () => {
-  assert.deepEqual(resolveTrustedOpenIds(null, []), []);
-  assert.deepEqual(resolveTrustedOpenIds({}, undefined), []);
-  assert.deepEqual(resolveTrustedOpenIds({ trustedOpenIds: ['', 'ou_a'] }, []), ['ou_a']);
+test('resolveTrustedOpenIds：空/undefined → 空数组', () => {
+  assert.deepEqual(resolveTrustedOpenIds(''), []);
+  assert.deepEqual(resolveTrustedOpenIds(undefined), []);
+  assert.deepEqual(resolveTrustedOpenIds(null), []);
 });

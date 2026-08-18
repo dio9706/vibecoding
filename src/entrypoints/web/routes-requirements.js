@@ -492,6 +492,25 @@ function handleSessionDelete(req, res) {
   });
 }
 
+// ==== GET /api/req/pitfalls/get?dir=<projectDir> ====
+/** 拉取指定工程目录的现有避坑清单内容 */
+async function handlePitfallsGet(url, res) {
+  try {
+    const dir = str(url.searchParams.get('dir'));
+    if (!dir) return sendJson(res, 400, { error: 'dir 参数不能为空' });
+
+    const { readFile } = await import('./req-pitfalls.js');
+    const { ensurePitfallsPath } = await import('./req-pitfalls.js');
+    const filePath = ensurePitfallsPath(dir);
+    const content = await readFile(filePath);
+
+    sendJson(res, 200, { ok: true, content: content || '' });
+  } catch (e) {
+    logger.error('req-pitfalls-get', '读取避坑清单失败', { err: e?.message || String(e) });
+    sendJson(res, 500, { ok: false, error: '读取失败' });
+  }
+}
+
 // ==== POST /api/req/pitfalls {id, frontend: [], backend: []} ====
 function handlePitfalls(req, res) {
   return withJsonBody(req, res, async (data) => {
@@ -580,6 +599,7 @@ export function handleRequirementRoutes(req, res, url) {
   if (pathname === '/api/req/conv' && method === 'POST') return handleConv(req, res);
   if (pathname === '/api/req/session' && method === 'POST') return handleSession(req, res);
   if (pathname === '/api/req/session' && method === 'DELETE') return handleSessionDelete(req, res);
+  if (pathname === '/api/req/pitfalls' && method === 'GET') return handlePitfallsGet(url, res);
   if (pathname === '/api/req/pitfalls' && method === 'POST') return handlePitfalls(req, res);
   if (pathname === '/api/req/dev-done' && method === 'POST') return handleDevDone(req, res);
   if (pathname === '/api/req/test-pass' && method === 'POST') return handleTestPass(req, res);

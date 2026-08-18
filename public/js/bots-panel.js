@@ -109,7 +109,6 @@ function openBotForm(bot) {
   $('#botPersona').value = bot?.persona || '';
   $('#botProjectNotes').value = bot?.projectNotes || '';
   $('#botSetupScript').value = bot?.setupScript || '';
-  $('#botTrustedOpenIds').value = (bot?.trustedOpenIds || []).join('\n');
   $('#botAutonomy').value = String(Math.max(0, AUTONOMY.indexOf(bot?.autonomy || 'light')));
   paintAutonomyHint();
   renderBotMessages(bot ? bot.messages : messagesMeta.map((m) => ({ ...m, value: '' })));
@@ -136,7 +135,6 @@ async function saveBot() {
     persona: $('#botPersona').value.trim(),
     projectNotes: $('#botProjectNotes').value.trim(),
     setupScript: $('#botSetupScript').value.trim(),
-    trustedOpenIds: $('#botTrustedOpenIds').value.split('\n').map((s) => s.trim()).filter(Boolean),
     autonomy: AUTONOMY[Number($('#botAutonomy').value)] || 'light',
     messages,
   };

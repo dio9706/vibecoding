@@ -988,6 +988,12 @@ async function startRetroSummary(reqId) {
   const cwd = req.projects?.frontend?.dir || req.projects?.backend?.dir || '';
 
   try {
+    // 拉取现有的避坑清单（前后端）
+    const existingPitfalls = await fetchExistingPitfalls(
+      req.projects?.frontend?.dir,
+      req.projects?.backend?.dir
+    );
+
     // 创建 retro 会话（不使用种子，直接喂转录）
     const retroConvId = createReqConv({
       reqId: reqId,
@@ -1018,11 +1024,46 @@ async function startRetroSummary(reqId) {
     if (window._updateReqList) window._updateReqList();
 
     // 启动 map-reduce 编排
-    runRetroMapReduce(reqId, retroConvId, cwd);
+    runRetroMapReduce(reqId, retroConvId, cwd, existingPitfalls);
   } catch (e) {
     window.toast.error('启动汇总失败：' + (e?.message || e));
     console.error('[startRetroSummary]', e);
   }
+}
+
+/**
+ * 拉取指定工程目录的现有避坑清单。
+ * @param {string} frontendDir 前端工程目录（可选）
+ * @param {string} backendDir 后端工程目录（可选）
+ * @returns {Promise<{frontend: string, backend: string}>} 拉到的内容（失败时为空串）
+ */
+async function fetchExistingPitfalls(frontendDir, backendDir) {
+  const result = { frontend: '', backend: '' };
+
+  try {
+    // 前端避坑清单
+    if (frontendDir) {
+      const feRes = await fetch(`/api/req/pitfalls/get?dir=${encodeURIComponent(frontendDir)}`);
+      if (feRes.ok) {
+        const feData = await feRes.json();
+        result.frontend = feData.content || '';
+      }
+    }
+
+    // 后端避坑清单
+    if (backendDir) {
+      const beRes = await fetch(`/api/req/pitfalls/get?dir=${encodeURIComponent(backendDir)}`);
+      if (beRes.ok) {
+        const beData = await beRes.json();
+        result.backend = beData.content || '';
+      }
+    }
+  } catch (e) {
+    // 失败时静默忽略，不中止流程（可选信息）
+    console.warn('[fetchExistingPitfalls]', e?.message);
+  }
+
+  return result;
 }
 
 /**
@@ -1032,8 +1073,9 @@ async function startRetroSummary(reqId) {
  * @param {string} reqId 需求 ID
  * @param {string} retroConvId retro 会话 ID
  * @param {string} cwd 工程目录
+ * @param {{frontend: string, backend: string}} existingPitfalls 项目现有的前后端避坑清单（可选）
  */
-async function runRetroMapReduce(reqId, retroConvId, cwd) {
+async function runRetroMapReduce(reqId, retroConvId, cwd, existingPitfalls = {}) {
   // 拉取最新需求信息（含 sessions）
   let req;
   try {
@@ -1125,7 +1167,7 @@ async function runRetroMapReduce(reqId, retroConvId, cwd) {
 
   // ★ REDUCE 阶段：聚合分析
   try {
-    const reducePrompt = buildClientRetroReducePrompt(mapMessages);
+    const reducePrompt = buildClientRetroReducePrompt(mapMessages, existingPitfalls);
     await sendMessageToConv(retroConvId, reducePrompt);
 
     const reduceResult = await waitForRunCompletion(retroConvId);
@@ -1139,12 +1181,12 @@ async function runRetroMapReduce(reqId, retroConvId, cwd) {
     // 提取标记块
     const { pitfallsText } = extractPitfallsBlock(reduceResult);
     if (!pitfallsText) {
-      window.toast.error('未找到避坑标记块，请手工从会话复制');
-      return;
+      // 改为正常情况：未提炼出新避坑项（可能都是已知问题），不中止，允许用户跳过或手动添加
+      window.toast.info('本次开发未提炼出新避坑项（可能都是已知问题）');
     }
 
-    // 预览确认
-    await showPitfallsPreviewDialog(reqId, pitfallsText);
+    // 预览确认（即使 pitfallsText 为空也弹出，让用户看到"无新内容"并确认或手动编辑）
+    await showPitfallsPreviewDialog(reqId, pitfallsText || '');
   } catch (e) {
     window.toast.error('reduce 阶段失败：' + (e?.message || e));
     console.error('[REDUCE]', e);
@@ -1247,20 +1289,38 @@ function buildClientRetroMapPrompt(sessionTitle, transcript, sessionIndex, total
 /**
  * 客户端生成 reduce 阶段提示词。
  * @param {Array<{role: string, content: string}>} mapMessages map 阶段的消息数组
+ * @param {{frontend: string, backend: string}} existingPitfalls 项目现有的前后端避坑清单（可选）
  * @returns {string} reduce 提示词
  */
-function buildClientRetroReducePrompt(mapMessages) {
+function buildClientRetroReducePrompt(mapMessages, existingPitfalls = {}) {
   const summaries = mapMessages
     .filter((m) => m.role === 'assistant')
     .map((m, i) => `${i + 1}. ${m.content}`)
     .join('\n\n');
 
+  // 拼接现有避坑清单的上下文
+  let historicalContext = '';
+  if (existingPitfalls.frontend || existingPitfalls.backend) {
+    historicalContext = '\n## 项目已知的避坑清单（历史沉淀）\n';
+    if (existingPitfalls.frontend) {
+      historicalContext += `### 前端\n${existingPitfalls.frontend}\n\n`;
+    }
+    if (existingPitfalls.backend) {
+      historicalContext += `### 后端\n${existingPitfalls.backend}\n\n`;
+    }
+  }
+
   return (
     `上述 ${mapMessages.length} 个会话的开发过程你已逐一回顾：\n\n` +
     `${summaries}\n\n` +
     `---\n\n` +
-    `请重点识别 **跨会话反复出现的错误**（出现 2 次以上）。只出现一次的可能是偶然，忽略。\n\n` +
-    `最后，请在回答末尾输出一个固定标记块，格式如下（必须包含）：\n\n` +
+    `请识别这次开发中暴露的 **可复用的规则与坑**。\n\n` +
+    `判断标准：\n` +
+    `- 若某坑与下述项目历史反复出现 → 重点标注为【高频印证】\n` +
+    `- 若是新坑 → 标注为【新增】\n` +
+    `- 只出现一次但确实有借鉴价值 → 也可列入，由 dev/qa 筛选余地\n` +
+    historicalContext +
+    `\n最后，请在回答末尾输出一个固定标记块，格式如下（可为空，但必须包含结构）：\n\n` +
     `\`\`\`\n` +
     `<!-- PITFALLS-BEGIN -->\n` +
     `- [前端] <可执行的避坑规则，带定位信息>\n` +

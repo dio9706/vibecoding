@@ -212,7 +212,6 @@ function botView(b) {
     projectNotes: b.projectNotes || '',
     setupScript: b.setupScript || '',
     autonomy: AUTONOMY_LEVELS.includes(b.autonomy) ? b.autonomy : 'light',
-    trustedOpenIds: Array.isArray(b.trustedOpenIds) ? b.trustedOpenIds : [], // 可信提交人 open_id 白名单，回读给编辑表单
     enabled: !!b.enabled,
   };
 }
@@ -250,17 +249,6 @@ function cleanBotInput(data, { requireCreds = false } = {}) {
   if (data.autonomy !== undefined) {
     if (!AUTONOMY_LEVELS.includes(data.autonomy)) return { error: '托管程度取值无效' };
     out.autonomy = data.autonomy;
-  }
-  if (data.trustedOpenIds !== undefined) {
-    // 入参可能是前端 textarea 的换行分隔字符串，也可能是数组（导入等场景）：统一归一为 string[]
-    const rawList = Array.isArray(data.trustedOpenIds)
-      ? data.trustedOpenIds
-      : typeof data.trustedOpenIds === 'string'
-        ? data.trustedOpenIds.split('\n')
-        : [];
-    const openIds = rawList.map((s) => String(s).trim()).filter(Boolean);
-    if (openIds.some((s) => s.length > MAX_LEN)) return { error: `可信提交人 open_id 单项超过 ${MAX_LEN} 字符` };
-    out.trustedOpenIds = openIds;
   }
   if (data.messages !== undefined) {
     const r = sanitizeMessages(data.messages);
@@ -446,6 +434,9 @@ function cleanCredentialPatch(data) {
   if (typeof data.apiKey === 'string' && data.apiKey.trim()) patch.token = data.apiKey.trim();
   if (typeof data.baseURL === 'string' && data.baseURL.trim()) patch.baseURL = data.baseURL.trim();
   if (typeof data.model === 'string' && data.model.trim()) patch.model = data.model.trim();
+  // vendor 不做值域白名单：它是纯展示元数据，不参与执行路径；校验会让「新增厂商」
+  // 变成前后端两处改动，而前端已有 VENDOR_PRESETS[v]?.label || v 的兜底（未知值原样显示）
+  if (typeof data.vendor === 'string' && data.vendor.trim()) patch.vendor = data.vendor.trim();
   return patch;
 }
 
@@ -456,6 +447,7 @@ export function handleCredentialsList(res) {
     .map((t) => ({
       id: t.id,
       label: t.label,
+      vendor: t.vendor || '', // 存量凭证无此字段 → 前端按 baseURL 反查兜底
       baseURL: t.baseURL || '',
       model: t.model || '',
       masked: maskToken(t.token),
@@ -472,12 +464,15 @@ export function handleCredentialsAdd(req, res) {
     const model = str(data.model);
     if (!apiKey || !baseURL || !model) return sendJson(res, 400, { error: 'apiKey / baseURL / model 均必填' });
     const label = str(data.label);
+    // 展示用元数据，不必填（手写 API 调用可不传）。空串归一为 undefined：
+    // makeTokenEntry 按 != null 条件展开，否则会落一个空的 vendor 字段
+    const vendor = str(data.vendor) || undefined;
     try {
-      addToken(label, apiKey, 'openai-compat', { baseURL, model });
+      addToken(label, apiKey, 'openai-compat', { baseURL, model, vendor });
     } catch (e) {
       return sendJson(res, 500, { error: '保存凭证失败：' + (e?.message || e) });
     }
-    logger.info('web', '[POST /api/credentials] 新增自定义模型凭证', { label: label || '(默认)', baseURL, model });
+    logger.info('web', '[POST /api/credentials] 新增自定义模型凭证', { label: label || '(默认)', vendor, baseURL, model });
     sendJson(res, 200, { ok: true });
   });
 }

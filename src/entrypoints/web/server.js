@@ -60,6 +60,8 @@ import {
   handleSaved,
   serveStatic,
   pruneUploads,
+  handleFsStat,
+  handleFsRead,
 } from './routes-files.js';
 import { handleRequirementRoutes } from './routes-requirements.js';
 import { handleMemoryRoutes } from './routes-memory.js';
@@ -148,6 +150,8 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/api/history') return handleHistory(url, res);
   if (url.pathname.startsWith('/api/history/')) return handleHistoryDetail(url, res);
   if (url.pathname === '/api/upload') return handleUpload(req, res, url);
+  if (url.pathname === '/api/fs/stat') return handleFsStat(req, res);
+  if (url.pathname === '/api/fs/read') return handleFsRead(url, res);
   if (url.pathname === '/api/dirs/browse') return handleBrowse(url, res);
   if (url.pathname === '/api/dirs/pick') return handlePickDir(res);
   if (url.pathname === '/api/dirs/saved') return handleSaved(req, res);
