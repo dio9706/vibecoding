@@ -758,16 +758,17 @@
       }
       .lightbox-overlay {
         position: relative;
-        max-width: 90vw;
-        max-height: 90vh;
-        cursor: pointer;
+        width: 90vw;
+        height: 90vh;
+        overflow: hidden;
       }
       .lightbox-img {
+        display: block;
+        user-select: none;
+        cursor: zoom-in;
+        transform-origin: center;
         max-width: 100%;
         max-height: 100%;
-        user-select: none;
-        pointer-events: none;
-        display: block;
       }
       .lightbox-close {
         position: absolute;
@@ -785,6 +786,14 @@
       }
       .lightbox-close:hover {
         opacity: 0.8;
+      }
+      .lightbox-img.zoomed {
+        cursor: grab;
+        max-width: none;
+        max-height: none;
+      }
+      .lightbox-img.dragging {
+        cursor: grabbing;
       }
 
       .bubble {
@@ -1812,6 +1821,26 @@
 
       /* 需求文档模式（评审/归档期）：无会话语义，隐藏底部输入框（开发/测试期走聊天视图不受影响） */
       .app.in-req .composer { display: none; }
+
+      /* ---- Markdown 查看工具：面板整体不滚，滚动交给 #mdContent ---- */
+      .app.in-markdown .composer { display: none; }
+      /* panel-view 默认 overflow-y:auto 会让整页（含工具栏/目录/搜索框）一起滚走。
+         markdown 视图改成定高 flex 列容器，把滚动下放到内容区自己承担 */
+      .app.in-markdown .panel-view {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        padding-bottom: 20px;
+      }
+      .app.in-markdown .panel-page[data-view='markdown'] {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0; /* 不加则 flex 子项按内容撑高，overflow:hidden 失效 */
+      }
+      /* display:flex 会盖过 [hidden] 的 UA display:none，需显式覆盖 */
+      .app.in-markdown .panel-page[data-view='markdown'][hidden] { display: none; }
+      .app.in-markdown .panel-page[data-view='markdown'] > .panel-head { flex-shrink: 0; }
 
       /* ---- JSON 美化工具：主区双屏 ---- */
       .app.in-json-tool .composer { display: none; }
