@@ -1216,6 +1216,50 @@ export function renderConvListNow() {
         lightbox.hidden = true;
       }
 
+      // 处理滚轮缩放
+      function handleLightboxWheel(event) {
+        event.preventDefault();
+
+        const lightbox = document.getElementById('imgLightbox');
+        const img = lightbox?.querySelector('.lightbox-img');
+        const overlay = lightbox?.querySelector('.lightbox-overlay');
+        if (!img || !overlay) return;
+
+        // 获取鼠标在 overlay 中的位置
+        const rect = overlay.getBoundingClientRect();
+        const mouseX = event.clientX - rect.left;
+        const mouseY = event.clientY - rect.top;
+
+        // 判断滚轮方向
+        const isScrollUp = event.deltaY < 0;
+        const scaleFactor = isScrollUp ? 1.1 : 1 / 1.1;
+
+        // 计算新缩放
+        const oldScale = lightboxState.scale;
+        const newScale = clamp(oldScale * scaleFactor, 0.5, 5);
+
+        if (newScale === oldScale) return; // 已到达极限，不处理
+
+        // 保持鼠标指向处的图片像素不动：
+        // 新位移 = 旧位移 * 缩放比 + 鼠标位置 * (1 - 缩放比)
+        const ratio = newScale / oldScale;
+        lightboxState.translateX = lightboxState.translateX * ratio + mouseX * (1 - ratio);
+        lightboxState.translateY = lightboxState.translateY * ratio + mouseY * (1 - ratio);
+
+        // 更新缩放
+        lightboxState.scale = newScale;
+
+        // 应用 transform
+        updateLightboxTransform();
+
+        // 更新样式反馈
+        if (newScale > 1) {
+          img.classList.add('zoomed');
+        } else {
+          img.classList.remove('zoomed');
+        }
+      }
+
       // 灯箱事件：点击背景关闭、Esc 关闭、关闭按钮
       document.addEventListener('DOMContentLoaded', () => {
         const lightbox = document.getElementById('imgLightbox');
@@ -1230,6 +1274,9 @@ export function renderConvListNow() {
 
           // 阻止点击图片容器冒泡（不关闭）
           overlay?.addEventListener('click', (e) => e.stopPropagation());
+
+          // 滚轮缩放事件
+          overlay?.addEventListener('wheel', handleLightboxWheel, { passive: false });
 
           // 关闭按钮
           closeBtn?.addEventListener('click', (e) => {
