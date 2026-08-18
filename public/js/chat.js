@@ -1216,6 +1216,94 @@ export function renderConvListNow() {
         lightbox.hidden = true;
       }
 
+      // 处理图片按下（开始拖拽）
+      function handleLightboxMouseDown(event) {
+        if (lightboxState.scale <= 1) return; // 仅在放大时允许拖拽
+
+        lightboxState.dragStartX = event.clientX;
+        lightboxState.dragStartY = event.clientY;
+        lightboxState.isDragging = false; // 等待移动超过阈值
+
+        // 绑定全局 mousemove 和 mouseup
+        document.addEventListener('mousemove', handleLightboxMouseMove);
+        document.addEventListener('mouseup', handleLightboxMouseUp);
+      }
+
+      // 处理鼠标移动（拖拽中）
+      function handleLightboxMouseMove(event) {
+        const lightbox = document.getElementById('imgLightbox');
+        const img = lightbox?.querySelector('.lightbox-img');
+        const overlay = lightbox?.querySelector('.lightbox-overlay');
+        if (!img || !overlay) return;
+
+        const dx = event.clientX - lightboxState.dragStartX;
+        const dy = event.clientY - lightboxState.dragStartY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        // 距离超过 3px 才确认拖拽
+        if (!lightboxState.isDragging && distance > 3) {
+          lightboxState.isDragging = true;
+          img.classList.add('dragging');
+        }
+
+        if (lightboxState.isDragging) {
+          // 更新位移
+          lightboxState.translateX += dx;
+          lightboxState.translateY += dy;
+
+          // 应用边界约束
+          applyDragBoundary(img, overlay);
+
+          // 应用 transform
+          updateLightboxTransform();
+
+          // 更新起始点（持续拖拽时）
+          lightboxState.dragStartX = event.clientX;
+          lightboxState.dragStartY = event.clientY;
+        }
+      }
+
+      // 处理鼠标抬起（拖拽结束）
+      function handleLightboxMouseUp(event) {
+        const lightbox = document.getElementById('imgLightbox');
+        const img = lightbox?.querySelector('.lightbox-img');
+
+        if (img && lightboxState.isDragging) {
+          img.classList.remove('dragging');
+        }
+
+        lightboxState.isDragging = false;
+
+        // 清理全局事件监听
+        document.removeEventListener('mousemove', handleLightboxMouseMove);
+        document.removeEventListener('mouseup', handleLightboxMouseUp);
+      }
+
+      // 应用拖拽边界约束
+      function applyDragBoundary(img, overlay) {
+        if (!img || !overlay) return;
+
+        const { scale, translateX, translateY } = lightboxState;
+        const imgRect = img.getBoundingClientRect();
+        const overlayRect = overlay.getBoundingClientRect();
+
+        // 获取图片的原始尺寸
+        const imgWidth = img.naturalWidth || img.offsetWidth;
+        const imgHeight = img.naturalHeight || img.offsetHeight;
+
+        // 视窗尺寸（px，转换自 vw/vh）
+        const viewportWidth = overlayRect.width;
+        const viewportHeight = overlayRect.height;
+
+        // 计算最大拖拽距离
+        const maxTranslateX = (imgWidth * scale - viewportWidth) / 2;
+        const maxTranslateY = (imgHeight * scale - viewportHeight) / 2;
+
+        // 约束
+        lightboxState.translateX = clamp(translateX, -maxTranslateX, maxTranslateX);
+        lightboxState.translateY = clamp(translateY, -maxTranslateY, maxTranslateY);
+      }
+
       // 处理滚轮缩放
       function handleLightboxWheel(event) {
         event.preventDefault();
@@ -1265,6 +1353,7 @@ export function renderConvListNow() {
         const lightbox = document.getElementById('imgLightbox');
         const overlay = lightbox?.querySelector('.lightbox-overlay');
         const closeBtn = lightbox?.querySelector('.lightbox-close');
+        const img = lightbox?.querySelector('.lightbox-img');
 
         if (lightbox) {
           // 点击背景（lightbox 本身）关闭
@@ -1283,6 +1372,9 @@ export function renderConvListNow() {
             e.stopPropagation();
             closeLightbox();
           });
+
+          // 图片拖拽事件
+          img?.addEventListener('mousedown', handleLightboxMouseDown);
         }
 
         // Esc 关闭
