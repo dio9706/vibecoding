@@ -1326,7 +1326,13 @@ export function renderConvListNow() {
         const oldScale = lightboxState.scale;
         const newScale = clamp(oldScale * scaleFactor, 0.5, 5);
 
-        if (newScale === oldScale) return; // 已到达极限，不处理
+        // 调试日志：验证 scale 计算（Task 3 后可移除）
+        console.log(`[wheel] oldScale=${oldScale}, scaleFactor=${scaleFactor.toFixed(2)}, newScale=${newScale.toFixed(2)}`);
+
+        if (newScale === oldScale) {
+          console.log('[wheel] 已到达缩放极限，不处理');
+          return; // 已到达极限，不处理
+        }
 
         // 保持鼠标指向处的图片像素不动：
         // 新位移 = 旧位移 * 缩放比 + 鼠标位置 * (1 - 缩放比)
@@ -1356,13 +1362,15 @@ export function renderConvListNow() {
         const img = lightbox?.querySelector('.lightbox-img');
 
         if (lightbox) {
-          // 点击背景（lightbox 本身）关闭
+          // 点击蒙层（背景）关闭，但点击图片或拖拽中时不关闭
           lightbox.addEventListener('click', (e) => {
-            if (e.target === lightbox) closeLightbox();
+            // 只在点击图片内部时不关闭
+            if (e.target.closest('.lightbox-img')) return;
+            // 正在拖拽 → 不关闭
+            if (lightboxState.isDragging) return;
+            // 其他所有情况关闭（包括点击 overlay 背景和蒙层外的黑色区域）
+            closeLightbox();
           });
-
-          // 阻止点击图片容器冒泡（不关闭）
-          overlay?.addEventListener('click', (e) => e.stopPropagation());
 
           // 滚轮缩放事件
           overlay?.addEventListener('wheel', handleLightboxWheel, { passive: false });
