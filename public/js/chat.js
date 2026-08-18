@@ -1121,16 +1121,42 @@ export function renderConvListNow() {
       }
 
       // ---- 灯箱缩放与拖拽状态管理 ----
-      const lightboxState = {
-        scale: 1,              // 当前缩放倍数
-        translateX: 0,         // X 轴偏移（像素）
-        translateY: 0,         // Y 轴偏移（像素）
-        isDragging: false,     // 是否正在拖拽
-        dragStartX: 0,         // 拖拽起始 X
-        dragStartY: 0,         // 拖拽起始 Y
+      /**
+       * 灯箱初始状态常量
+       * @property {number} scale - 当前缩放倍数（1.0 = 100%，范围 0.5~5）
+       * @property {number} translateX - X 轴偏移，单位像素
+       * @property {number} translateY - Y 轴偏移，单位像素
+       * @property {boolean} isDragging - 是否正在进行拖拽操作
+       * @property {number} dragStartX - 拖拽开始时的鼠标 X 坐标（视口坐标）
+       * @property {number} dragStartY - 拖拽开始时的鼠标 Y 坐标（视口坐标）
+       */
+      const INITIAL_LIGHTBOX_STATE = {
+        scale: 1,
+        translateX: 0,
+        translateY: 0,
+        isDragging: false,
+        dragStartX: 0,
+        dragStartY: 0,
       };
 
-      // 数值约束函数
+      /**
+       * 灯箱状态对象，管理图片的缩放和拖拽
+       * @property {number} scale - 当前缩放倍数（1.0 = 100%，范围 0.5~5）
+       * @property {number} translateX - X 轴偏移，单位像素
+       * @property {number} translateY - Y 轴偏移，单位像素
+       * @property {boolean} isDragging - 是否正在进行拖拽操作
+       * @property {number} dragStartX - 拖拽开始时的鼠标 X 坐标（视口坐标）
+       * @property {number} dragStartY - 拖拽开始时的鼠标 Y 坐标（视口坐标）
+       */
+      let lightboxState = { ...INITIAL_LIGHTBOX_STATE };
+
+      /**
+       * 将数值约束在指定范围内（inclusive）
+       * @param {number} value - 待约束的值
+       * @param {number} min - 最小值（应 <= max）
+       * @param {number} max - 最大值（应 >= min）
+       * @returns {number} 约束后的值
+       */
       function clamp(value, min, max) {
         return Math.max(min, Math.min(max, value));
       }
@@ -1147,34 +1173,27 @@ export function renderConvListNow() {
 
       // 重置灯箱状态
       function resetLightboxState() {
-        lightboxState.scale = 1;
-        lightboxState.translateX = 0;
-        lightboxState.translateY = 0;
-        lightboxState.isDragging = false;
-        lightboxState.dragStartX = 0;
-        lightboxState.dragStartY = 0;
+        Object.assign(lightboxState, INITIAL_LIGHTBOX_STATE);
       }
 
       /**
        * 显示图片灯箱
        */
       function showLightbox(imagePath) {
+        // 提前验证参数和 URL 转换
+        const src = toWebviewUrl(imagePath);
+        if (!src) return; // 提前返回，不修改状态
+
         const lightbox = document.getElementById('imgLightbox');
         const img = lightbox?.querySelector('.lightbox-img');
         if (!img) return;
 
-        // 重置状态
+        // 此时才修改状态（确保 URL 有效）
         resetLightboxState();
         updateLightboxTransform();
 
-        // 缩略图能渲染出来才有灯箱可点，这里必然拿得到 URL
-        const src = toWebviewUrl(imagePath);
-        if (!src) return;
         img.src = src;
-
-        // 移除缩放相关的 class
         img.classList.remove('zoomed', 'dragging');
-
         lightbox.hidden = false;
       }
 
@@ -1185,10 +1204,9 @@ export function renderConvListNow() {
         const lightbox = document.getElementById('imgLightbox');
         if (!lightbox) return;
 
-        // 重置状态
         resetLightboxState();
 
-        // 清除 transform 和 class
+        // 清除 transform 和样式
         const img = lightbox.querySelector('.lightbox-img');
         if (img) {
           img.style.transform = '';
