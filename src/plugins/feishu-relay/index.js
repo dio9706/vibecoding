@@ -15,9 +15,9 @@ import { registerCardKindHandler } from '../../shared/card-actions.js';
 import { armSupplement, peekSupplement, takeSupplement, clearSupplement } from '../../shared/pending-supplement.js';
 import { resolveTrustedOpenIds } from '../../shared/trusted-ids.js';
 import { getMyFeishuOpenId, getActiveBot } from '../../store/settings.js';
-import { getEntry, pickLatestNotified } from '../../store/conv-notify.js';
+import { getEntry, findEntryByShortId, pickLatestNotified } from '../../store/conv-notify.js';
 import { sendTextToUser, updateCard } from '../../integrations/lark.js';
-import { parseConvCardAction, matchSupplementText, isEndSessionText, canOperateRelay, CONV_CARD_KIND } from './logic.js';
+import { parseConvCardAction, matchSupplementText, isEndSessionText, canOperateRelay, matchSessionText, CONV_CARD_KIND } from './logic.js';
 
 /** 文本兜底选目标会话的窗口：机器人重启丢了等待态时，按「最近被通知过的会话」定位 */
 const FALLBACK_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -137,9 +137,20 @@ const feature = {
     const pendingEntry = takeSupplement(ctx.user?.id);
     if (pendingEntry) return pendingEntry.onText(String(ctx.text ?? '').trim(), ctx.reply);
 
+    // 2.5. 会话 ID 路由：用户发「会话 a1b2c3d4 内容」
+    const sessionMatch = matchSessionText(ctx.text);
+    if (sessionMatch) {
+      const target = findEntryByShortId(sessionMatch.shortId);
+      if (!target) {
+        return ctx.reply(`⚠️ 未找到会话「${sessionMatch.shortId}」，请检查会话 ID 是否正确。`);
+      }
+      const label = target.title || target.convId;
+      return doInject(target.convId, label, sessionMatch.body, ctx.reply);
+    }
+
     // 3. 文本兜底（match 路径）：机器人重启丢了等待态、或用户不想点按钮
     const body = matchSupplementText(ctx.text);
-    if (!body) return ctx.reply('没识别到补充内容，请发「补充内容 <你的补充>」。');
+    if (!body) return ctx.reply('没识别到补充内容，请发「补充内容 <你的补充>」或「会话 <ID> <内容>」。');
     const target = pickLatestNotified(FALLBACK_WINDOW_MS);
     if (!target) return ctx.reply('近 24 小时没有收到过通知的会话，请先在网页端激活飞书通知。');
     return doInject(target.convId, target.title || target.convId, body, ctx.reply);
@@ -151,7 +162,7 @@ const feature = {
    * 两个操作数都是无副作用的纯谓词，换序不改语义。
    */
   match: (ctx) =>
-    (isEndSessionText(ctx.text) || !!matchSupplementText(ctx.text)) &&
+    (isEndSessionText(ctx.text) || !!matchSupplementText(ctx.text) || !!matchSessionText(ctx.text)) &&
     canOperateRelay(ctx.user?.id, relayPermOpts()),
 };
 
