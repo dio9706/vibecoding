@@ -30,7 +30,7 @@ import {
   buildArchiveSummary,
   parseFeatureTag,
 } from './req-logic.js';
-import { listFeatureTags } from '../../store/feature-index.js';
+import { listFeatureTags, harvestFiles } from '../../store/feature-index.js';
 
 export const DOCGEN_TIMEOUT_MS = 15 * 60_000; // spec §5.3：docgen race 上限
 const POLL_MS = 5000;
@@ -616,6 +616,13 @@ function defaultRunGit(dir, baseBranch, branch) {
   return runScript('git', ['-C', dir, 'log', `${baseBranch}..${branch}`, '--oneline'], { shell: false });
 }
 
+/** 默认 git diff 实现（单测经 { runGitDiff } 注入桩替换，对齐 runGit 先例）。 */
+function defaultRunGitDiff(dir, baseBranch, branch) {
+  return runScript('git', ['-C', dir, 'diff', `${baseBranch}..${branch}`, '--name-only'], {
+    shell: false,
+  });
+}
+
 const archiving = new Set(); // 双击护栏：同一需求的 archive 并发调用时挡住后来者（对齐 finalizeRequirement 的 finalizing 先例）
 
 /**
@@ -634,7 +641,7 @@ const archiving = new Set(); // 双击护栏：同一需求的 archive 并发调
  * branchLogs 每条同时带 dir：多工程定稿时共用同一 branch 字符串（前后端各自仓库里建同名
  * 分支），buildArchiveSummary 按 dir（而非 branch）索引，避免双工程档案互相覆盖。
  */
-export async function archiveRequirement(id, note, { runGit = defaultRunGit } = {}) {
+export async function archiveRequirement(id, note, { runGit = defaultRunGit, runGitDiff = defaultRunGitDiff } = {}) {
   if (archiving.has(id)) return { ok: false, status: 409, error: '归档正在进行中' };
   archiving.add(id);
   try {
@@ -651,6 +658,32 @@ export async function archiveRequirement(id, note, { runGit = defaultRunGit } = 
       const r = await runGit(b.dir, b.baseBranch, b.branch);
       const out = (r?.out || '').trim();
       branchLogs.push({ dir: b.dir, log: !r?.ok ? null : out || '（该分支相对基线无新提交）' });
+    }
+
+    // 收割改动文件至功能账本（有 featureTag 才执行；失败降级静默跳过，不阻塞归档）
+    if (req.featureTag) {
+      try {
+        const allFiles = [];
+        for (const b of req.branches || []) {
+          const r = await runGitDiff(b.dir, b.baseBranch, b.branch);
+          if (r?.ok && r.out?.trim()) {
+            allFiles.push(...r.out.trim().split('\n').filter(Boolean));
+          }
+        }
+        if (allFiles.length) {
+          harvestFiles(req.featureTag, allFiles);
+          logger.info('req-ops', '功能账本收割完成', {
+            reqId: id,
+            tag: req.featureTag,
+            fileCount: allFiles.length,
+          });
+        }
+      } catch (e) {
+        logger.warn('req-ops', '功能账本收割异常（已跳过，不影响归档）', {
+          reqId: id,
+          err: e?.message || String(e),
+        });
+      }
     }
 
     // fail-closed：note 非字符串（如前端传了对象）一律归空串，不落 [object Object]（同 handleGuidelines 的处理方式）

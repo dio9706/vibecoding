@@ -535,3 +535,75 @@ test('parseFeatureTag：文档无§三标签时返回 null', () => {
   const parsed3 = parseFeatureTag(empty);
   assert.equal(parsed3, null, 'parseFeatureTag 应返回 null（空文档）');
 });
+
+test('archiveRequirement：有 featureTag 时收割 git diff 文件', async () => {
+  const r = createRequirement({ title: '收割 git diff 文件测试' });
+  updateRequirement(r.id, { phase: 'archiving', featureTag: '宝宝辅食' });
+  updateRequirement(r.id, {
+    branches: [{ dir: 'D:/fe', branch: 'req/x', baseBranch: 'main' }],
+  });
+
+  const mockRunGit = async () => ({ ok: true, out: 'abc123 feat: 改宝宝辅食' });
+  const mockRunGitDiff = async (_dir, _base, _branch) => ({
+    ok: true,
+    out: 'src/views/BabyFood.vue\nsrc/api/babyFood.js\n',
+  });
+
+  const res = await archiveRequirement(r.id, '测试备注', {
+    runGit: mockRunGit,
+    runGitDiff: mockRunGitDiff,
+  });
+
+  assert.equal(res.ok, true);
+
+  // 验证收割结果已写入功能账本
+  const { getTopFiles } = await import('../../store/feature-index.js');
+  const files = getTopFiles('宝宝辅食');
+  assert.ok(files?.some((f) => f.path === 'src/views/BabyFood.vue'), 'BabyFood.vue 应在账本中');
+  assert.ok(files?.some((f) => f.path === 'src/api/babyFood.js'), 'babyFood.js 应在账本中');
+});
+
+test('archiveRequirement：runGitDiff 失败时归档仍成功', async () => {
+  const r = createRequirement({ title: 'runGitDiff 失败降级测试' });
+  updateRequirement(r.id, { phase: 'archiving', featureTag: '盘子需求' });
+  updateRequirement(r.id, {
+    branches: [{ dir: 'D:/be', branch: 'req/y', baseBranch: 'main' }],
+  });
+
+  const mockRunGit = async () => ({ ok: true, out: '(no commits)' });
+  const mockRunGitDiff = async () => ({ ok: false, out: '', err: '模拟 git diff 失败' });
+
+  const result = await archiveRequirement(r.id, '', {
+    runGit: mockRunGit,
+    runGitDiff: mockRunGitDiff,
+  });
+
+  // 关键：runGitDiff 失败不应阻塞归档流程
+  assert.equal(result.ok, true, '收割失败不应阻塞归档');
+  const after = getRequirement(r.id);
+  assert.equal(after.phase, 'archived', '需求仍应成功归档');
+});
+
+test('archiveRequirement：无 featureTag 时跳过收割', async () => {
+  const r = createRequirement({ title: '无标签跳过收割测试' });
+  updateRequirement(r.id, { phase: 'archiving', featureTag: null });
+  updateRequirement(r.id, {
+    branches: [{ dir: 'D:/fe', branch: 'req/z', baseBranch: 'main' }],
+  });
+
+  // 设置一个计数器来检查 runGitDiff 是否被调用
+  let runGitDiffCalled = false;
+  const mockRunGit = async () => ({ ok: true, out: '' });
+  const mockRunGitDiff = async () => {
+    runGitDiffCalled = true;
+    return { ok: true, out: 'src/foo.js\n' };
+  };
+
+  const result = await archiveRequirement(r.id, '', {
+    runGit: mockRunGit,
+    runGitDiff: mockRunGitDiff,
+  });
+
+  assert.equal(result.ok, true, '归档应成功');
+  assert.equal(runGitDiffCalled, false, 'runGitDiff 不应被调用（无标签时跳过收割）');
+});
