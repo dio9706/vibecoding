@@ -17,10 +17,10 @@ export function shouldNotifySettle(run) {
   return !['stopped', 'quota_blocked'].includes(run.subtype);
 }
 
-export function summarize(text, max = 300) {
+export function summarize(text, max = 500) {
   const s = typeof text === 'string' ? text.trim() : '';
   if (!s) return '(无输出)';
-  return s.length > max ? s.slice(0, max) + '…' : s;
+  return s.length > max ? '…' + s.slice(-max) : s;
 }
 
 export function formatDuration(ms) {
