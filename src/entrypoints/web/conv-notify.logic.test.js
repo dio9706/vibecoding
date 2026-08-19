@@ -24,7 +24,7 @@ test('shouldNotifySettle：还在跑的 run 不通知（纵深防御）', () => 
 
 test('summarize 截断并加省略号，短文本原样', () => {
   assert.equal(summarize('abc', 10), 'abc');
-  assert.equal(summarize('a'.repeat(20), 10), 'a'.repeat(10) + '…');
+  assert.equal(summarize('a'.repeat(20), 10), '…' + 'a'.repeat(10));
   assert.equal(summarize('', 10), '(无输出)');
   assert.equal(summarize(null, 10), '(无输出)');
 });
