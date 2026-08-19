@@ -761,3 +761,43 @@ test('list：返回体应带 sessions，否则前端轮询会抹掉会话树', a
   assert.equal(item.sessions.length, 1);
   assert.equal(item.sessions[0].title, '子会话L');
 });
+
+// ==== Task 6：功能标签路由 + seed 快照注入 ====
+test('PUT /api/req/feature-tag：设置功能标签', async () => {
+  const req = await createReq('改宝宝辅食');
+  const res = await put('/api/req/feature-tag', {
+    id: req.id,
+    tag: '宝宝辅食',
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.featureTag, '宝宝辅食');
+
+  // 验证持久化
+  const getRes = await get(`/api/req/get?id=${req.id}`);
+  assert.equal(getRes.status, 200);
+  assert.equal(getRes.json.featureTag, '宝宝辅食');
+});
+
+test('PUT /api/req/feature-tag：tag 为空字符串时清除标签', async () => {
+  const req = await createReq('清标签测试');
+  const id = req.id;
+
+  // 先设置
+  await put('/api/req/feature-tag', { id, tag: '宝宝辅食' });
+
+  // 再清除
+  const res = await put('/api/req/feature-tag', { id, tag: '' });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.featureTag, null);
+
+  // 验证持久化
+  const getRes = await get(`/api/req/get?id=${id}`);
+  assert.equal(getRes.json.featureTag, null);
+});
+
+test('GET /api/feature-index：返回功能账本', async () => {
+  const res = await get('/api/feature-index');
+  assert.equal(res.status, 200);
+  assert.ok('index' in res.json);
+  assert.ok(typeof res.json.index === 'object');
+});

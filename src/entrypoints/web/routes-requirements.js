@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { getRequirement, getRequirements, updateRequirement, createRequirement, canTransition, normalizeSessions } from '../../store/requirements.js';
 import { enqueueSystemTask, finalizeRequirement, archiveRequirement, hasQueuedTasks, reqDir, DOCGEN_GUIDE } from './requirement-ops.js';
 import { pickCwdAndDirs, buildSeedPrompt } from './req-logic.js';
+import { getTopFiles, getFeatureIndex } from '../../store/feature-index.js';
 import { writePitfalls, ensureClaudeMdRef } from './req-pitfalls.js';
 import { inspectBitable, confirmBug, ignoreBug, retryBug, currentInspectIdentity } from './req-inspect.js';
 import { parseBitableLink } from '../../plugins/team-tools/bug-patrol/logic.js';
@@ -58,13 +59,21 @@ function handleGet(url, res) {
   // devCwd：开发/系统任务所在的工程目录（pickCwdAndDirs 取第一个工程，与 dispatchSystemTask/runDocgen 同源）。
   // 前端据此按 cwd 定位 Claude 磁盘会话（~/.claude/projects/<encode(cwd)>/<devSession>.jsonl），
   // 用于「开发已完成、过程没进 localStorage」时从 session 转录回放开发过程。
+  const featureSnapshot =
+    r.featureTag && (r.phase === 'dev' || r.phase === 'test')
+      ? (() => {
+          const files = getTopFiles(r.featureTag);
+          return files ? { tag: r.featureTag, files } : null;
+        })()
+      : null;
   sendJson(res, 200, {
     ...r,
     devDocLatest,
     queued: hasQueuedTasks(id),
     devCwd: pickCwdAndDirs(r.projects).cwd,
     sessions: normalizeSessions(r),
-    seed: r.phase === 'dev' || r.phase === 'test' ? buildSeedPrompt(r) : null,
+    seed: r.phase === 'dev' || r.phase === 'test' ? buildSeedPrompt(r, { featureSnapshot }) : null,
+    featureTag: r.featureTag ?? null,
   });
 }
 
@@ -581,6 +590,26 @@ const handleBugConfirm = handleBugAction(confirmBug);
 const handleBugIgnore = handleBugAction(ignoreBug);
 const handleBugRetry = handleBugAction(retryBug);
 
+// ==== PUT /api/req/feature-tag ====
+function handleFeatureTag(req, res) {
+  return withJsonBody(req, res, (data) => {
+    const id = str(data.id);
+    if (!id) return sendJson(res, 400, { error: 'id 不能为空' });
+    const r = getRequirement(id);
+    if (!r) return sendJson(res, 404, { error: '需求不存在' });
+    // tag 为空字符串视为清除
+    const tag = str(data.tag) || null;
+    if (tag && tag.length > 20) return sendJson(res, 400, { error: 'tag 不能超过 20 字符' });
+    updateRequirement(id, { featureTag: tag }, tag ? `手动设置功能模块标签：${tag}` : '清除功能模块标签');
+    sendJson(res, 200, { ok: true, featureTag: tag });
+  });
+}
+
+// ==== GET /api/feature-index ====
+function handleFeatureIndex(res) {
+  sendJson(res, 200, { index: getFeatureIndex() });
+}
+
 /** 需求工作流路由单入口：按 pathname + method 分发 */
 export function handleRequirementRoutes(req, res, url) {
   const { pathname } = url;
@@ -609,5 +638,7 @@ export function handleRequirementRoutes(req, res, url) {
   if (pathname === '/api/req/bug/confirm' && method === 'POST') return handleBugConfirm(req, res);
   if (pathname === '/api/req/bug/ignore' && method === 'POST') return handleBugIgnore(req, res);
   if (pathname === '/api/req/bug/retry' && method === 'POST') return handleBugRetry(req, res);
+  if (pathname === '/api/req/feature-tag' && method === 'PUT') return handleFeatureTag(req, res);
+  if (pathname === '/api/feature-index' && method === 'GET') return handleFeatureIndex(res);
   return sendJson(res, 404, { error: 'not found' });
 }
