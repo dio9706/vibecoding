@@ -227,6 +227,7 @@ async function onInbound(m) {
     text: m.text,
     sessionKey: m.chatKey,
     reply: (t) => say(t),
+    sendCard: (card) => channel.sendCard(m.chatKey, card),
     meta: {
       messageId: m.messageId,
       chatId: m.chatKey,

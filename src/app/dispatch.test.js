@@ -25,6 +25,9 @@ function ctxOf() {
       reply: async (t) => {
         replies.push(t);
       },
+      sendCard: async (card) => {
+        replies.push(card);
+      },
     },
   };
 }
@@ -149,7 +152,7 @@ test('dispatchSafely：ctx 没有 reply 时不额外抛异常', async () => {
   assert.equal(r.notified, false);
 });
 
-test('dispatch：无匹配意图时应调用 buildWelcomeText 返回动态欢迎文案', async () => {
+test('dispatch：无匹配意图时应调用 buildWelcomeCard 返回卡片', async () => {
   const { ctx, replies } = ctxOf();
 
   // 创建一个空 featureList（无任何 feature 匹配）
@@ -166,14 +169,12 @@ test('dispatch：无匹配意图时应调用 buildWelcomeText 返回动态欢迎
     }),
   });
 
-  // 验证：ctx.reply 被调用
+  // 验证：ctx.sendCard 被调用
   assert.equal(replies.length, 1, '应该有且仅有一条回复');
-  const reply = replies[0];
+  const card = replies[0];
 
-  // 验证回复包含 buildWelcomeText 的关键内容
-  assert.match(reply, /没有识别到你的意图/, '回复包含未识别提示');
-  assert.match(reply, /提交需求/, '回复包含提交需求示例');
-  assert.match(reply, /提交故障/, '回复包含提交故障示例');
-  assert.match(reply, /问个问题/, '回复包含问个问题示例');
-  assert.match(reply, /识别到我会及时回复你～/, '回复包含结尾提示');
+  // 验证卡片是一个对象且包含 elements 字段（飞书卡片结构）
+  assert.ok(typeof card === 'object', '回复应该是卡片对象');
+  assert.ok(Array.isArray(card.elements), '卡片应该包含 elements 数组');
+  assert.ok(card.elements.length > 0, 'elements 数组不应为空');
 });

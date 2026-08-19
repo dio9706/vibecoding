@@ -6,7 +6,7 @@
 import { classify } from './intent.js';
 import { features } from '../features/index.js';
 import { logger, preview } from '../shared/logger.js';
-import { msg, buildWelcomeText } from '../shared/messages.js';
+import { msg, buildWelcomeText, buildWelcomeCard } from '../shared/messages.js';
 import { PASS } from './signals.js';
 import { getActiveBot } from '../store/settings.js';
 
@@ -99,7 +99,8 @@ export async function dispatch(ctx, { featureList = features, classifyFn = class
     // 3. 无匹配：帮助
     logger.info('dispatch', '无匹配 → 帮助');
     const bot = getActiveBot();
-    await ctx.reply(buildWelcomeText(bot?.id));
+    const welcomeCard = buildWelcomeCard(bot?.id);
+    await ctx.sendCard(welcomeCard);
   } catch (e) {
     logger.error('dispatch', '处理异常', { err: e?.message || String(e), stack: preview(e?.stack, 500) });
     throw e;
