@@ -9,6 +9,7 @@
  * 未命中时 return false 而不是直接 404，让 server.js 继续往后匹配（详见文件末尾）。
  */
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { sendJson } from './http-util.js';
 import { withJsonBody } from './body.js';
 import { str, normalizeMode } from './input.js';
@@ -134,6 +135,37 @@ function handleInject(req, res) {
   });
 }
 
+// ==== POST /api/conv-notify/new —— 飞书进程跨进程调用，创建新会话 ====
+function handleNew(req, res) {
+  if (req.method !== 'POST') return notAllowed(res);
+  return withJsonBody(req, res, (data) => {
+    try {
+      // 1. 生成 UUID 作为 convId
+      const convId = randomUUID();
+
+      // 2. 在 conv-notify.json 中注册会话
+      const entry = enableConv({
+        convId,
+        title: str(data.title) || '飞书新建会话',
+        session: '', // 初始为空，前端打开时会同步
+        cwd: str(data.cwd) || '',
+        model: str(data.model) || 'auto',
+        effort: str(data.effort) || 'medium',
+        mode: normalizeMode(data.mode) || 'default',
+      });
+
+      if (!entry) {
+        return sendJson(res, 500, { ok: false, error: '会话注册失败' });
+      }
+
+      // 3. 返回 convId 给飞书侧
+      return sendJson(res, 200, { ok: true, convId });
+    } catch (e) {
+      return sendJson(res, 500, { ok: false, error: '服务异常: ' + (e?.message || String(e)) });
+    }
+  });
+}
+
 /**
  * 会话通知路由单入口：按 pathname 分发。
  * @returns {false|any} 未命中返回 false，由 server.js 继续往后匹配（而非在此 404）——
@@ -147,5 +179,6 @@ export function handleConvNotifyRoutes(req, res, url) {
   if (p === '/api/conv-notify/inbox') return handleInbox(res, url);
   if (p === '/api/conv-notify/claim') return handleClaim(req, res);
   if (p === '/api/conv-notify/inject') return handleInject(req, res);
+  if (p === '/api/conv-notify/new') return handleNew(req, res);
   return false;
 }
