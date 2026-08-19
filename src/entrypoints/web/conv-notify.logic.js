@@ -29,7 +29,7 @@ export function formatDuration(ms) {
   return `${Math.floor(sec / 60)}m ${sec % 60}s`;
 }
 
-/** 会话终结通知卡片：标题 + 结果 + 耗时 + 摘要 + [补充内容][结束会话] */
+/** 会话终结通知卡片：标题 + 结果 + 耗时 + 摘要 + 会话ID提示 */
 export function buildConvSettledCard(entry, run) {
   const ok = !run.is_error && run.status !== 'error';
   const head = ok ? '✅ **任务已完成**' : '❌ **任务失败**';
@@ -39,31 +39,18 @@ export function buildConvSettledCard(entry, run) {
     entry.mode === 'default'
       ? '\n\n⚠️ 该会话为「询问模式」，补充内容若触发改码工具会等待网页端审批。'
       : '';
+
+  const shortId = entry.convId.slice(0, 8);
+  const sessionHint = `\n\n---\n会话ID：\`${shortId}\`\n如需继续对话，向我发送：会话 ${shortId} 你的内容`;
+
   return {
     elements: [
       {
         tag: 'div',
         text: {
           tag: 'lark_md',
-          content: `${head}\n会话：「${entry.title || entry.convId}」 · 耗时 ${dur}\n\n${summarize(run.text)}${askHint}`,
+          content: `${head}\n会话：「${entry.title || entry.convId}」 · 耗时 ${dur}\n\n${summarize(run.text)}${askHint}${sessionHint}`,
         },
-      },
-      {
-        tag: 'action',
-        actions: [
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: '📝 补充内容' },
-            type: 'primary',
-            value: { kind: CONV_CARD_KIND, convId: entry.convId, action: 'supplement' },
-          },
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: '🛑 结束会话' },
-            type: 'default',
-            value: { kind: CONV_CARD_KIND, convId: entry.convId, action: 'end' },
-          },
-        ],
       },
     ],
   };
