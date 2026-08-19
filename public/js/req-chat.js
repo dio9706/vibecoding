@@ -468,7 +468,10 @@ function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
   fileInput.type = 'file';
   fileInput.hidden = true;
   docsSec.appendChild(fileInput);
-  uploadBtn.addEventListener('click', () => fileInput.click());
+  uploadBtn.addEventListener('click', () => {
+    pendingReplaceName = null;
+    fileInput.click();
+  });
   fileInput.addEventListener('change', async () => {
     const file = fileInput.files[0];
     fileInput.value = '';
@@ -482,7 +485,7 @@ function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
       const r = await fetch('/api/req/apidoc', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: reqId, name: file.name, path: ud.path }),
+        body: JSON.stringify({ id: reqId, name: pendingReplaceName || file.name, path: ud.path }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || '登记失败');
@@ -507,6 +510,7 @@ function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
       window.toast.error('API 文档上传失败：' + (e?.message || e));
     }
     refreshRail(reqId);
+    pendingReplaceName = null;
   });
 
   // —— 设计准则 ——
