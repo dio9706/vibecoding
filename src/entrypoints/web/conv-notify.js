@@ -33,6 +33,9 @@ export function startConvNotify() {
 /**
  * run 终结回调。emitSettled 是**同步**调用且位于 SDK 流处理链内，
  * 所以这里只做廉价的准备工作，网络发送一律甩给 Promise 链后立刻返回。
+ *
+ * 特别地：若 run 因未 flush 而有未发送的持有消息（run.unsentIds），
+ * 自动重新注入这些消息到新 run，避免用户的内容丢失。
  */
 function onRunSettled(run) {
   try {
@@ -51,6 +54,27 @@ function onRunSettled(run) {
       return;
     }
     const creds = { appId: bot.appId, appSecret: bot.appSecret };
+
+    // 若有未发送的持有消息，自动重新注入
+    if (run.unsentIds && run.unsentIds.length && entry.inbox && entry.inbox.length) {
+      const unsentSet = new Set(run.unsentIds);
+      const toResend = entry.inbox.filter((item) => unsentSet.has(item.id));
+      if (toResend.length) {
+        // 将所有未发送的消息（可能是多条）拼接成一个 prompt 重新注入
+        const combinedText = toResend.map((item) => item.text).join('\n\n');
+        try {
+          injectToConv(run.convId, combinedText);
+          logger.info('conv-notify', '已自动重新注入未发送内容', {
+            convId: run.convId,
+            count: toResend.length,
+            msgIds: toResend.map((m) => m.id),
+          });
+        } catch (e) {
+          logger.warn('conv-notify', '重新注入未发送内容失败', { convId: run.convId, err: e?.message || String(e) });
+        }
+      }
+    }
+
     const card = buildConvSettledCard(entry, run);
     sendCardToUser(creds, openId, card)
       .then((mid) => {
