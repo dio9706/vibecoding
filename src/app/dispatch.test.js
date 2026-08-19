@@ -178,3 +178,76 @@ test('dispatch：无匹配意图时应调用 buildWelcomeCard 返回卡片', asy
   assert.ok(Array.isArray(card.elements), '卡片应该包含 elements 数组');
   assert.ok(card.elements.length > 0, 'elements 数组不应为空');
 });
+
+test('dispatch：Welcome 卡片集成测试 - 验证卡片完整结构与按钮配置', async () => {
+  const { buildWelcomeCard } = await import('../shared/messages.js');
+
+  // Mock 动作配置数据
+  const mockActions = [
+    {
+      id: 'ac_1',
+      botId: 'bot_123',
+      name: '清理数据',
+      description: '清理测试数据',
+      example: '输入环境',
+      enabled: true,
+    },
+    {
+      id: 'ac_2',
+      botId: 'bot_123',
+      name: '查询日志',
+      description: '查询系统日志',
+      enabled: true,
+    },
+    {
+      id: 'ac_3',
+      botId: 'bot_456',
+      name: '其他 bot 动作',
+      enabled: true, // 不属于当前 bot，不应显示
+    },
+  ];
+
+  // 调用 buildWelcomeCard，传入 botId 和 mock 的 actions
+  const card = buildWelcomeCard('bot_123', mockActions);
+
+  // 验证卡片基础结构
+  assert.ok(typeof card === 'object', '卡片应该是对象');
+  assert.ok(Array.isArray(card.elements), '卡片应该包含 elements 数组');
+  assert.equal(card.elements.length, 2, '卡片应该有两个元素（说明 + 按钮区）');
+
+  // 验证第一个元素：说明文本
+  const textElem = card.elements[0];
+  assert.equal(textElem.tag, 'div', '第一个元素应该是 div');
+  assert.ok(textElem.text, 'div 应该包含 text');
+  assert.equal(textElem.text.tag, 'lark_md', 'text 应该是 lark_md 格式');
+  assert.ok(textElem.text.content.includes('没有识别到你的意图'), '说明文本应该包含关键词');
+  assert.ok(textElem.text.content.includes('提交需求'), '说明文本应该包含提交需求');
+  assert.ok(textElem.text.content.includes('提交故障'), '说明文本应该包含提交故障');
+  assert.ok(textElem.text.content.includes('问个问题'), '说明文本应该包含问个问题');
+
+  // 验证第二个元素：动作按钮区
+  const actionElem = card.elements[1];
+  assert.equal(actionElem.tag, 'action', '第二个元素应该是 action');
+  assert.ok(Array.isArray(actionElem.actions), 'action 应该包含 actions 数组');
+  assert.equal(actionElem.actions.length, 2, '应该有 2 个按钮（属于 bot_123）');
+
+  // 验证第一个按钮
+  const btn1 = actionElem.actions[0];
+  assert.equal(btn1.tag, 'button', '按钮应该是 button tag');
+  assert.equal(btn1.type, 'primary', '按钮应该是 primary 类型');
+  assert.equal(btn1.text.tag, 'plain_text', '按钮文本应该是 plain_text');
+  assert.equal(btn1.text.content, '清理数据', '按钮文本应该是动作名');
+  assert.equal(btn1.value.kind, 'quick-action', '按钮 value 的 kind 应该是 quick-action');
+  assert.equal(btn1.value.actionId, 'ac_1', '按钮 value 应该包含 actionId');
+  assert.equal(btn1.value.actionName, '清理数据', '按钮 value 应该包含 actionName');
+  assert.equal(btn1.value.botId, 'bot_123', '按钮 value 应该包含 botId');
+  assert.ok(typeof btn1.value._timestamp === 'number', '按钮 value 应该包含 _timestamp');
+
+  // 验证第二个按钮
+  const btn2 = actionElem.actions[1];
+  assert.equal(btn2.tag, 'button', '第二个按钮应该是 button tag');
+  assert.equal(btn2.text.content, '查询日志', '第二个按钮文本应该是动作名');
+  assert.equal(btn2.value.actionId, 'ac_2', '第二个按钮应该有正确的 actionId');
+  assert.equal(btn2.value.actionName, '查询日志', '第二个按钮应该有正确的 actionName');
+  assert.equal(btn2.value.botId, 'bot_123', '第二个按钮应该有正确的 botId');
+});
