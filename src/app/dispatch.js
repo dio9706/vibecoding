@@ -6,8 +6,9 @@
 import { classify } from './intent.js';
 import { features } from '../features/index.js';
 import { logger, preview } from '../shared/logger.js';
-import { msg } from '../shared/messages.js';
+import { msg, buildWelcomeText } from '../shared/messages.js';
 import { PASS } from './signals.js';
+import { getActiveBot } from '../store/settings.js';
 
 /** 失败回告文案。刻意不暴露内部错误细节，只保证用户知道「这条没成」。 */
 const FAILURE_TEXT = '😵 处理这条消息时出错了，我已记录。麻烦换个说法再发一次～';
@@ -97,7 +98,8 @@ export async function dispatch(ctx, { featureList = features, classifyFn = class
 
     // 3. 无匹配：帮助
     logger.info('dispatch', '无匹配 → 帮助');
-    await ctx.reply(msg('welcome'));
+    const bot = getActiveBot();
+    await ctx.reply(buildWelcomeText(bot?.id));
   } catch (e) {
     logger.error('dispatch', '处理异常', { err: e?.message || String(e), stack: preview(e?.stack, 500) });
     throw e;
