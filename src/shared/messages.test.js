@@ -91,5 +91,48 @@ test('sanitizeMessages：丢弃已下线的 feedbackAck，保留新 key', () => 
 });
 
 test.describe('buildWelcomeText', () => {
-  // 4 个测试用例将在后续步骤添加
+  test('有已启用动作时应列出动作列表', async (t) => {
+    // 模拟的已启用动作列表
+    const mockActions = [
+      {
+        id: 'ac_001',
+        botId: 'bot_123',
+        name: '小程序二维码',
+        description: '生成并发送小程序二维码给指定用户',
+        enabled: true,
+      },
+      {
+        id: 'ac_002',
+        botId: 'bot_123',
+        name: '清理环境',
+        description: '清除测试环境中的所有测试数据',
+        enabled: true,
+      },
+      {
+        id: 'ac_003',
+        botId: 'bot_123',
+        name: '退款流程',
+        description: '执行退款流程并通知相关人员',
+        enabled: true,
+      },
+    ];
+
+    const { buildWelcomeText } = await import('./messages.js');
+    const text = buildWelcomeText('bot_123', mockActions);
+
+    // 断言：应包含核心操作提示
+    assert.match(text, /没有识别到你的意图/, '包含未识别提示');
+    assert.match(text, /提交需求/, '包含提交需求');
+    assert.match(text, /提交故障/, '包含提交故障');
+    assert.match(text, /问个问题/, '包含问个问题');
+
+    // 断言：应包含动作列表
+    assert.match(text, /或其他已配置的功能，比如/, '包含「比如」标题');
+    assert.match(text, /生成并发送小程序二维码给指定用户/, '包含第一个动作描述');
+    assert.match(text, /清除测试环境中的所有测试数据/, '包含第二个动作描述');
+    assert.match(text, /执行退款流程并通知相关人员/, '包含第三个动作描述');
+
+    // 断言：应包含结尾提示语
+    assert.match(text, /识别到我会及时回复你～/, '包含结尾提示');
+  });
 });
