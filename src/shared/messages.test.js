@@ -179,4 +179,30 @@ test.describe('buildWelcomeText', () => {
     assert.doesNotMatch(text, /这是第 7 个动作/, '第 7 个动作不单独列出');
     assert.doesNotMatch(text, /这是第 8 个动作/, '第 8 个动作不单独列出');
   });
+
+  test('botId 为 null 时应降级到「暂未配置」', async (t) => {
+    // 模拟的动作列表包含其他 bot 的动作
+    const mockActions = [
+      {
+        id: 'ac_x',
+        botId: 'bot_other',
+        name: '其他机器人的动作',
+        description: '这是另一个机器人的动作',
+        enabled: true,
+      },
+    ];
+
+    const { buildWelcomeText } = await import('./messages.js');
+    const text = buildWelcomeText(null, mockActions);
+
+    // 断言：应包含基础操作提示
+    assert.match(text, /没有识别到你的意图/, '包含未识别提示');
+    assert.match(text, /提交需求/, '包含提交需求');
+
+    // 断言：因为 botId 不匹配，无法找到 null 的动作，应显示「暂未配置」
+    assert.match(text, /或其他已配置的功能（暂未配置）/, '包含暂未配置提示');
+
+    // 断言：不应包含其他 bot 的动作描述
+    assert.doesNotMatch(text, /这是另一个机器人的动作/, '不包含其他 bot 的动作');
+  });
 });
