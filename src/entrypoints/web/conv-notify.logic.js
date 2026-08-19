@@ -40,8 +40,9 @@ export function buildConvSettledCard(entry, run) {
       ? '\n\n⚠️ 该会话为「询问模式」，补充内容若触发改码工具会等待网页端审批。'
       : '';
 
-  const shortId = entry.convId.slice(0, 8);
-  const sessionHint = `\n\n---\n会话ID：\`${shortId}\`\n如需继续对话，向我发送：会话 ${shortId} 你的内容`;
+  // 会话 ID 防守：确保 convId 总是有效，取前 8 位作为短 ID
+  const id = (entry.convId || '').slice(0, 8);
+  const sessionHint = `\n\n---\n会话ID：\`${id}\`\n如需继续对话，向我发送：会话 ${id} 你的内容`;
 
   return {
     elements: [
