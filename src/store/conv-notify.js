@@ -90,6 +90,33 @@ export function claimInjections(convId, ids) {
 }
 
 /**
+ * 按前 8 位短 ID 查找会话条目。
+ * @param {string} shortId 前 8 位 ID（如 'a1b2c3d4'）
+ * @returns {Object | null} 匹配的会话条目，或 null
+ *
+ * 冲突处理：若多个会话 convId 都以 shortId 开头，返回 enabledAt 最晚的那个（最近创建）。
+ *
+ * 例如：
+ * findEntryByShortId('a1b2c3d4')
+ * → { convId: 'a1b2c3d4-...', title: '...' }
+ */
+export function findEntryByShortId(shortId) {
+  if (!shortId || typeof shortId !== 'string') return null;
+
+  let best = null;
+  for (const entry of Object.values(getAll())) {
+    // 检查 convId 是否以 shortId 开头
+    if (!entry.convId || !entry.convId.startsWith(shortId)) continue;
+
+    // 冲突时选最近创建的（enabledAt 最晚）
+    if (!best || (entry.enabledAt && best.enabledAt && entry.enabledAt > best.enabledAt)) {
+      best = entry;
+    }
+  }
+  return best;
+}
+
+/**
  * 文本兜底用：最近 maxAgeMs 内被通知过的那个会话。
  * 机器人重启丢了等待态时，用户直接发「补充内容 xxx」就落到这里。
  * @param {number} maxAgeMs 窗口

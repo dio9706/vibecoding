@@ -45,6 +45,42 @@ test('claim 只删指定 id', () => {
   for (const id of ids) assert.ok(!left.includes(id));
 });
 
+test('findEntryByShortId 精确找到以短 ID 开头的会话', () => {
+  m.enableConv({ convId: 'a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d', title: 'test-short-id', session: 's', cwd: 'C:\\p', model: 'auto', effort: 'medium', mode: 'default' });
+  const result = m.findEntryByShortId('a1b2c3d4');
+  assert.ok(result);
+  assert.equal(result.convId, 'a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d');
+  assert.equal(result.title, 'test-short-id');
+});
+
+test('findEntryByShortId 短 ID 不匹配时返回 null', () => {
+  const result = m.findEntryByShortId('ffffffff');
+  assert.equal(result, null);
+});
+
+test('findEntryByShortId 冲突时返回最近创建的会话', () => {
+  // 创建第一个会话
+  m.enableConv({ convId: 'a1b2c3d4-old-xxxx', title: 'old', session: 's', cwd: 'C:\\p', model: 'auto', effort: 'medium', mode: 'default' });
+  // 稍作延迟确保 enabledAt 不同
+  const entry2 = m.enableConv({ convId: 'a1b2c3d4-new-yyyy', title: 'new', session: 's', cwd: 'C:\\p', model: 'auto', effort: 'medium', mode: 'default' });
+
+  const result = m.findEntryByShortId('a1b2c3d4');
+  assert.ok(result);
+  // 应该返回最晚创建的（enabledAt 最晚）
+  assert.equal(result.title, 'new');
+  assert.equal(result.convId, 'a1b2c3d4-new-yyyy');
+});
+
+test('findEntryByShortId 非字符串输入返回 null', () => {
+  assert.equal(m.findEntryByShortId(null), null);
+  assert.equal(m.findEntryByShortId(undefined), null);
+  assert.equal(m.findEntryByShortId(123), null);
+});
+
+test('findEntryByShortId 空字符串返回 null', () => {
+  assert.equal(m.findEntryByShortId(''), null);
+});
+
 test('pickLatestNotified 取窗口内最近通知过的一条', () => {
   m.enableConv({ convId: 'c2', title: 'T2', session: 's', cwd: 'C:\\p', model: 'auto', effort: 'medium', mode: 'default' });
   m.patchConv('c1', { lastNotifiedAt: new Date(1000).toISOString() });
