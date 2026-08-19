@@ -5,6 +5,7 @@
  * 可配 key 限 BOT_MESSAGE_KEYS（机器人编辑表单渲染）；welcome/materialAck/execNewChat 恒用默认文案。
  */
 import { getActiveBot } from '../store/settings.js';
+import { getConfigs } from '../store/action-configs.js';
 
 export const MAX_LEN = 2000;
 
@@ -60,6 +61,54 @@ export const REGISTRY = {
   execNewChat: { label: '新对话确认（owner）', defaultText: '🆕 已开始新对话' },
   execProcessing: { label: '处理中提示（owner）', defaultText: '🤔 处理中…' },
 };
+
+/**
+ * 动态构造"未识别意图"兜底文案
+ * @param {string|null} botId 机器人 ID；为空/未知 bot 时返回基础文案
+ * @param {Array} actions 动作配置列表；若未提供则使用 getConfigs() 读取
+ * @returns {string} 完整文案（包含动态获取的动作列表）
+ */
+export function buildWelcomeText(botId, actions) {
+  // 1. 静态核心段
+  const core =
+    '没有识别到你的意图，我可以进行这些操作：\n' +
+    '· 提交需求\n' +
+    '    例: 提个需求: 把背景改成蓝色\n' +
+    '· 提交故障\n' +
+    '    例: 提个bug: 聊天主页面语音有问题\n' +
+    '· 问个问题\n' +
+    '    例: 问个问题: 我要在聊天页加个弹框, 这个功能复杂吗?\n';
+
+  // 2. 读取该 bot 的已启用动作
+  // 优先使用传入的 actions 参数，否则调用 getConfigs()
+  const configList = actions || getConfigs();
+  const enabledActions = configList
+    .filter((c) => c && c.botId === botId && c.enabled)
+    .slice(0, 5); // 最多 5 条
+
+  // 3. 拼装动作段（或提示段）
+  let actionSection = '';
+  if (enabledActions.length > 0) {
+    actionSection = '\n或其他已配置的功能，比如\n';
+    enabledActions.forEach((action, i) => {
+      // 优先用 description，否则降级用 name
+      const label = (action.description && action.description.trim()) || action.name || '';
+      actionSection += `    ${i + 1}. ${label}\n`;
+    });
+
+    // 超出 5 条时追加「…等」提示
+    const totalEnabled = configList.filter((c) => c && c.botId === botId && c.enabled).length;
+    if (totalEnabled > 5) {
+      actionSection += `    …等 ${totalEnabled - 5} 项\n`;
+    }
+  } else {
+    // 无已启用动作：显示提示语
+    actionSection = '\n或其他已配置的功能（暂未配置）\n';
+  }
+
+  // 4. 拼装完整文案
+  return core + actionSection + '\n识别到我会及时回复你～';
+}
 
 /** 纯逻辑：覆盖值（非空）优先；未知 key 抛错，开发期即暴露注册表与调用点不一致 */
 export function resolveMessage(key, overrides) {
