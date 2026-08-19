@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dispatch, dispatchSafely } from './dispatch.js';
 import { PASS } from './signals.js';
+import { buildWelcomeText } from '../shared/messages.js';
 
 /**
  * 背景（静默失败三连）：
@@ -146,4 +147,33 @@ test('dispatchSafely：ctx 没有 reply 时不额外抛异常', async () => {
   );
   assert.equal(r.ok, false);
   assert.equal(r.notified, false);
+});
+
+test('dispatch：无匹配意图时应调用 buildWelcomeText 返回动态欢迎文案', async () => {
+  const { ctx, replies } = ctxOf();
+
+  // 创建一个空 featureList（无任何 feature 匹配）
+  const featureList = [];
+
+  // 调用 dispatch，classifyFn 返回无法匹配的意图，触发第 3 段帮助路径
+  await dispatch(ctx, {
+    featureList,
+    classifyFn: async () => ({
+      intent: 'other',
+      body: '',
+      strong: false,
+      env: 'test',
+    }),
+  });
+
+  // 验证：ctx.reply 被调用
+  assert.equal(replies.length, 1, '应该有且仅有一条回复');
+  const reply = replies[0];
+
+  // 验证回复包含 buildWelcomeText 的关键内容
+  assert.match(reply, /没有识别到你的意图/, '回复包含未识别提示');
+  assert.match(reply, /提交需求/, '回复包含提交需求示例');
+  assert.match(reply, /提交故障/, '回复包含提交故障示例');
+  assert.match(reply, /问个问题/, '回复包含问个问题示例');
+  assert.match(reply, /识别到我会及时回复你～/, '回复包含结尾提示');
 });
