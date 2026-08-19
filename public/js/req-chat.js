@@ -373,6 +373,7 @@ function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
   // 读未声明绑定会抛 ReferenceError —— 上传路径被 catch 成「上传失败」（其实文件已传完并落库，
   // 只是后续那条让 Claude 对照修正的消息没发出去，表现为「上传了但没生效」），删除路径连 toast 都不弹。
   const epoch = chromeEpoch;
+  let pendingReplaceName = null;
 
   // —— API 文档管理 ——
   const docsSec = document.createElement('div');
@@ -400,6 +401,14 @@ function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
       name.className = 'name';
       name.textContent = doc.name;
       name.title = `${doc.name} · 更新于 ${fmtTime(doc.updatedAt)}`;
+      const replace = document.createElement('button');
+      replace.className = 'q-btn';
+      replace.textContent = '🔄';
+      replace.title = '替换（选择新文件上传）';
+      replace.addEventListener('click', () => {
+        pendingReplaceName = doc.name;
+        fileInput.click();
+      });
       const del = document.createElement('button');
       del.className = 'q-btn';
       del.textContent = '✕';
@@ -437,7 +446,7 @@ function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
         }
         refreshRail(data.id);
       });
-      row.append(name, del);
+      row.append(name, replace, del);
       listBox.appendChild(row);
     }
     if (uploadingName) {
