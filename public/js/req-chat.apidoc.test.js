@@ -187,3 +187,99 @@ test('上传 API 文档：登记失败时报出服务端错误原文', async () 
     'toast 里不应出现 ReferenceError 文案',
   );
 });
+
+test('替换 API 文档：点击🔄按钮，上传新文件，name 应为原文档名', async () => {
+  // 场景：已有 existing-api.md，点替换按钮，上传 new-api.md
+  // 期望：POST /api/req/apidoc 的请求体中 name 是 existing-api.md（原文档名），不是 new-api.md（新文件名）
+  const data = devReq({
+    apiDocs: [
+      { id: 'd1', name: 'existing-api.md', path: 'C:\\old\\existing-api.md', updatedAt: '2026-08-19' },
+    ],
+  });
+  const input = await mountAndGetFileInput(data);
+
+  let postedName = null; // 捕获 POST /api/req/apidoc 的请求体中的 name 字段
+  stubFetch({
+    '/api/upload': () => ({ path: 'C:\\tmp\\new-api.md', name: 'new-api.md' }),
+    '/api/req/apidoc': (opts) => {
+      const body = JSON.parse(opts.body || '{}');
+      postedName = body.name;
+      return {
+        ok: true,
+        action: '更新',
+        doc: { id: 'd1', name: 'existing-api.md', path: 'C:\\tmp\\new-api.md' },
+      };
+    },
+    '/api/req/get': () => data,
+  });
+  toastCalls = [];
+
+  // 模拟点击替换按钮：需要先找到按钮、模拟点击以设置 pendingReplaceName
+  const replaceBtn = dom.window.document.querySelector('#reqRail .req-apidoc-item button[title*="替换"]');
+  assert.ok(replaceBtn, '应该有替换按钮');
+  replaceBtn.click();
+  // 点击后 pendingReplaceName 应被设为 'existing-api.md'（在 fileInput.click() 之前就设置了）
+  // 现在模拟选择文件
+  await pickFile(input, 'new-api.md');
+
+  // 验证关键点：POST 请求体的 name 应该是原文档名
+  assert.strictEqual(
+    postedName,
+    'existing-api.md',
+    `替换时 POST name 应为原文档名，实际：${postedName}`,
+  );
+
+  // 验证服务端返回 action='更新'
+  const apidocCall = fetchLog.find((f) => f.url.includes('/api/req/apidoc') && f.method === 'POST');
+  assert.ok(apidocCall, '应调用 POST /api/req/apidoc');
+
+  // 验证消息文案包含"已更新"
+  assert.ok(
+    toastCalls.some(([kind, msg]) => kind === 'success' && msg.includes('已入队自动修正')),
+    `应提示已入队自动修正，实际 toast：${JSON.stringify(toastCalls)}`,
+  );
+});
+
+test('新增 API 文档：点击＋上传，选择新文件，name 应为新文件名', async () => {
+  // 场景：没有文档，点＋上传，上传 new-api.md
+  // 期望：POST /api/req/apidoc 的请求体中 name 是 new-api.md（新文件名），action='新增'
+  const data = devReq({ apiDocs: [] });
+  const input = await mountAndGetFileInput(data);
+
+  let postedName = null;
+  let postedAction = null;
+  stubFetch({
+    '/api/upload': () => ({ path: 'C:\\tmp\\new-api.md', name: 'new-api.md' }),
+    '/api/req/apidoc': (opts) => {
+      const body = JSON.parse(opts.body || '{}');
+      postedName = body.name;
+      return {
+        ok: true,
+        action: '新增',
+        doc: { id: 'd1', name: 'new-api.md', path: 'C:\\tmp\\new-api.md' },
+      };
+    },
+    '/api/req/get': () => data,
+  });
+  toastCalls = [];
+
+  // 点击＋上传按钮（此时 pendingReplaceName 应为 null）
+  const uploadBtn = dom.window.document.querySelector('#reqRail .req-rail-head button:not(.rail-toggle)');
+  assert.ok(uploadBtn, '应该有上传按钮');
+  uploadBtn.click();
+  // 模拟选择文件
+  await pickFile(input, 'new-api.md');
+
+  // 验证关键点：POST 请求体的 name 应该是新文件名
+  assert.strictEqual(
+    postedName,
+    'new-api.md',
+    `新增时 POST name 应为新文件名，实际：${postedName}`,
+  );
+
+  // 验证消息文案包含"已新增"
+  assert.ok(
+    toastCalls.some(([kind, msg]) => kind === 'success' && msg.includes('已入队自动修正')),
+    `应提示已入队自动修正，实际 toast：${JSON.stringify(toastCalls)}`,
+  );
+});
