@@ -135,4 +135,21 @@ test.describe('buildWelcomeText', () => {
     // 断言：应包含结尾提示语
     assert.match(text, /识别到我会及时回复你～/, '包含结尾提示');
   });
+
+  test('无已启用动作时应显示「暂未配置」提示', async (t) => {
+    // 模拟无已启用动作的场景（传入空数组）
+    const { buildWelcomeText } = await import('./messages.js');
+    const text = buildWelcomeText('bot_456', []);
+
+    // 断言：应包含核心操作提示
+    assert.match(text, /没有识别到你的意图/, '包含未识别提示');
+    assert.match(text, /提交需求/, '包含提交需求');
+
+    // 断言：应包含「暂未配置」提示，而非「比如」列表
+    assert.match(text, /或其他已配置的功能（暂未配置）/, '包含暂未配置提示');
+    assert.doesNotMatch(text, /或其他已配置的功能，比如/, '不包含「比如」列表标题');
+
+    // 断言：应包含结尾提示语
+    assert.match(text, /识别到我会及时回复你～/, '包含结尾提示');
+  });
 });
