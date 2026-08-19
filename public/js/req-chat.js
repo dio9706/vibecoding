@@ -513,76 +513,7 @@ function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
     pendingReplaceName = null;
   });
 
-  // —— 设计准则 ——
-  const guideSec = document.createElement('div');
-  guideSec.className = 'req-rail-sec';
-  const guideTitle = document.createElement('b');
-  guideTitle.textContent = '🎨 设计准则';
-  const ta = document.createElement('textarea');
-  ta.className = 'req-guidelines';
-  ta.placeholder = '主色、圆角、间距等约定，开发时注入给 AI…';
-  ta.value = data.designGuidelines || '';
-  let savedValue = ta.value;
-  ta.dataset.saved = savedValue; // 供 renderRail 重建时判断「当前值是否为未保存草稿」
-  if (draft !== null) ta.value = draft; // 重建回填草稿（优先于服务端旧值）
-  if (hadFocus) requestAnimationFrame(() => ta.focus());
-  ta.addEventListener('blur', async () => {
-    const text = ta.value;
-    if (text === savedValue) return; // 失焦且值变化才保存
-    try {
-      const r = await fetch('/api/req/guidelines', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: data.id, text }),
-      });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) return window.toast.error(d.error || '保存失败');
-      savedValue = text;
-      ta.dataset.saved = text; // 与 savedValue 同步：重建时据此区分草稿
-      window.toast.success('设计准则已保存');
-    } catch (e) {
-      window.toast.error('网络错误：' + (e?.message || e));
-    }
-  });
-
-  // 确认发送按钮（开发期专属）：点击才主动向 Claude 发送准则更新消息
-  const confirmBtn = document.createElement('button');
-  confirmBtn.className = 'q-btn q-btn-text req-guidelines-confirm';
-  confirmBtn.textContent = '✓ 确认发送';
-  confirmBtn.title = '点击后将设计准则作为一条消息发送给 Claude，Claude 在后续开发中遵循';
-  confirmBtn.addEventListener('click', async () => {
-    const text = ta.value.trim();
-    if (!text) return window.toast.error('设计准则为空，无需发送');
-    // 检查当前会话是否活跃
-    if (!data.convId) return window.toast.error('会话未就绪，请重新打开');
-    // 若有未保存变更，先 PUT 存库
-    if (text !== savedValue) {
-      try {
-        const r = await fetch('/api/req/guidelines', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: data.id, text }),
-        });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) return window.toast.error(d.error || '保存失败');
-        savedValue = text;
-        ta.dataset.saved = text;
-      } catch (e) {
-        return window.toast.error('网络错误：' + (e?.message || e));
-      }
-    }
-    sendMessageProgrammatically(`设计准则已更新，请在后续开发中遵循：\n${text}`, { mode: 'bypassPermissions' });
-    confirmBtn.textContent = '已发送 ✓';
-    confirmBtn.disabled = true;
-    setTimeout(() => {
-      confirmBtn.textContent = '✓ 确认发送';
-      confirmBtn.disabled = false;
-    }, 2000);
-  });
-
-  guideSec.append(guideTitle, ta, confirmBtn);
-
-  railEl.append(docsSec, guideSec);
+  railEl.append(docsSec);
 }
 
 /** 右栏局部刷新（apidoc 增删后）：只重拉记录重画右栏与横幅 busy 芯片，不动聊天区 */
