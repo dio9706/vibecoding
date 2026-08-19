@@ -68,6 +68,10 @@ import { toast, confirmDialog } from './ui.js';
             意图描述：<textarea id="actionDesc" required>${escapeHtml(action?.description || '')}</textarea>
           </label>
           <label>
+            示例文案（可选）：<textarea id="actionExample" placeholder="如：输入用户 ID，如 alice@company.com" maxlength="200" rows="2">${escapeHtml(action?.example || '')}</textarea>
+            <small style="display:block;margin-top:4px;color:var(--faint);">用于卡片按钮的提示文案，30-100 字符最佳</small>
+          </label>
+          <label>
             关键词（逗号分隔）：<input type="text" id="actionKeywords" value="${escapeHtml((action?.keywords || []).join(', '))}" />
           </label>
           <label>脚本文件（.py / .js）：</label>
@@ -218,6 +222,7 @@ import { toast, confirmDialog } from './ui.js';
           botId: currentBotId, // 新建时归属当前机器人；更新时服务端剥离（归属不可改）
           name: $('#actionName').value,
           description: $('#actionDesc').value,
+          example: $('#actionExample').value || '', // 示例文案（可选）
           keywords: $('#actionKeywords').value.split(',').map((k) => k.trim()).filter(Boolean),
           scriptType: scriptInfo.scriptType,
           scriptName: scriptInfo.scriptName,
