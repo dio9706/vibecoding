@@ -3694,3 +3694,70 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* ---- 功能模块标签 chip（Task 7） ---- */
+.req-chip--tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.req-chip__label {
+  font-size: 12px;
+}
+
+.req-chip__edit {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 12px;
+  color: var(--text);
+  transition: all 0.15s;
+}
+
+.req-chip__edit:hover {
+  color: var(--accent);
+}
+
+.req-chip__input {
+  font-size: 12px;
+  width: 120px;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+}
+
+.req-chip__input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.req-chip__save,
+.req-chip__cancel {
+  font-size: 11px;
+  padding: 2px 6px;
+  margin-left: 2px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  transition: all 0.15s;
+}
+
+.req-chip__save:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a1109;
+}
+
+.req-chip__cancel:hover {
+  background: var(--panel);
+  border-color: var(--border);
+}

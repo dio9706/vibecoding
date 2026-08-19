@@ -1545,6 +1545,12 @@ function renderChipsBar(req) {
   bar.appendChild(makeProjectChip(req, 'frontend', req.projects?.frontend));
   bar.appendChild(makeProjectChip(req, 'backend', req.projects?.backend));
   bar.appendChild(makeReqDocChip(req, req.reqDoc));
+
+  // 功能标签 chip（仅在 devDoc 至少有一版后才显示——docgen 完成才有标签）
+  if (req.devDoc?.versions?.length) {
+    bar.appendChild(makeFeatureTagChip(req));
+  }
+
   const editBtn = document.createElement('button');
   editBtn.type = 'button';
   editBtn.className = 'btn req-edit-config-btn';
@@ -1577,6 +1583,82 @@ function makeReqDocChip(req, reqDoc) {
   chip.textContent = reqDoc ? `📄 ${reqDoc.name}` : '＋ 需求文档';
   if (reqDoc) chip.title = reqDoc.name;
   chip.onclick = () => openConfigModal(req);
+  return chip;
+}
+
+/** 功能模块标签 chip：展示模式 + 编辑模式 */
+function makeFeatureTagChip(req) {
+  const chip = document.createElement('div');
+  chip.className = 'req-chip req-chip--tag';
+  chip.dataset.reqId = req.id;
+
+  function renderTagChip(tag) {
+    chip.innerHTML = '';
+    const label = document.createElement('span');
+    label.className = 'req-chip__label';
+    label.textContent = `功能模块：${tag || '未识别'}`;
+    chip.appendChild(label);
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'req-chip__edit';
+    editBtn.title = '修改功能模块标签';
+    editBtn.textContent = '✏️';
+    editBtn.onclick = (e) => {
+      e.stopPropagation();
+      showTagEditMode(tag);
+    };
+    chip.appendChild(editBtn);
+  }
+
+  function showTagEditMode(currentTag) {
+    chip.innerHTML = '';
+    const input = document.createElement('input');
+    input.className = 'req-chip__input';
+    input.type = 'text';
+    input.value = currentTag || '';
+    input.placeholder = '如：宝宝辅食';
+    input.maxLength = 20;
+    chip.appendChild(input);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'req-chip__save';
+    saveBtn.textContent = '保存';
+    saveBtn.onclick = async () => {
+      const newTag = input.value.trim();
+      try {
+        const res = await fetch('/api/req/feature-tag', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: req.id, tag: newTag }),
+        });
+        if (!res.ok) {
+          const err = await res.text().catch(() => '未知错误');
+          throw new Error(err);
+        }
+        renderTagChip(newTag || null);
+      } catch (e) {
+        // 显示错误不离开编辑模式
+        input.style.borderColor = 'red';
+        input.title = e.message;
+        window.toast?.error('保存失败：' + e.message);
+      }
+    };
+    chip.appendChild(saveBtn);
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'req-chip__cancel';
+    cancelBtn.textContent = '取消';
+    cancelBtn.onclick = () => renderTagChip(currentTag);
+    chip.appendChild(cancelBtn);
+
+    input.focus();
+    input.select();
+  }
+
+  renderTagChip(req.featureTag);
   return chip;
 }
 
