@@ -40,6 +40,7 @@ export function createRequirement({ title }) {
     branches: [], // 定稿时逐开发工程 [{ dir, branch, baseBranch }]
     apiDocs: [], // [{ id, name, path, updatedAt }]
     designGuidelines: '',
+    featureTag: null, // 功能模块标签（docgen 自动推断或用户手改）
     bitable: null, // { url, appToken, tableId }
     bugs: [], // [{ id, recordId, title, detail, verdict:'sure'|'doubt', reason, status, at }]
     busy: null, // { kind, runId, startedAt } —— 串行闸落盘镜像
