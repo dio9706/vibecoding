@@ -152,4 +152,31 @@ test.describe('buildWelcomeText', () => {
     // 断言：应包含结尾提示语
     assert.match(text, /识别到我会及时回复你～/, '包含结尾提示');
   });
+
+  test('超过 5 条动作时应显示前 5 条并提示还有其他项', async (t) => {
+    // 模拟 8 条已启用的动作
+    const actions = Array.from({ length: 8 }, (_, i) => ({
+      id: `ac_${i + 1}`,
+      botId: 'bot_789',
+      name: `动作 ${i + 1}`,
+      description: `这是第 ${i + 1} 个动作`,
+      enabled: true,
+    }));
+
+    const { buildWelcomeText } = await import('./messages.js');
+    const text = buildWelcomeText('bot_789', actions);
+
+    // 断言：前 5 条动作应在文本中
+    assert.match(text, /这是第 1 个动作/, '包含第 1 个动作');
+    assert.match(text, /这是第 2 个动作/, '包含第 2 个动作');
+    assert.match(text, /这是第 3 个动作/, '包含第 3 个动作');
+    assert.match(text, /这是第 4 个动作/, '包含第 4 个动作');
+    assert.match(text, /这是第 5 个动作/, '包含第 5 个动作');
+
+    // 断言：第 6、7、8 条应在「…等」提示中，不单独列出
+    assert.match(text, /…等 3 项/, '包含「…等 3 项」提示');
+    assert.doesNotMatch(text, /这是第 6 个动作/, '第 6 个动作不单独列出');
+    assert.doesNotMatch(text, /这是第 7 个动作/, '第 7 个动作不单独列出');
+    assert.doesNotMatch(text, /这是第 8 个动作/, '第 8 个动作不单独列出');
+  });
 });
