@@ -110,6 +110,66 @@ export function buildWelcomeText(botId, actions) {
   return core + actionSection + '\n识别到我会及时回复你～';
 }
 
+/**
+ * 构造 Welcome 飞书卡片（包含操作说明 + 动作快捷按钮）
+ * @param {string|null} botId 机器人 ID
+ * @param {Array} actions 动作配置列表；若未提供则使用 getConfigs() 读取
+ * @returns {object} Feishu schema 1.0 卡片 JSON
+ */
+export function buildWelcomeCard(botId, actions) {
+  // 1. 操作说明段（Markdown 格式）
+  const headerText =
+    '没有识别到你的意图，我可以进行这些操作：\n' +
+    '\n' +
+    '· 提交需求\n' +
+    '    例: 提个需求: 把背景改成蓝色\n' +
+    '\n' +
+    '· 提交故障\n' +
+    '    例: 提个bug: 聊天主页面语音有问题\n' +
+    '\n' +
+    '· 问个问题\n' +
+    '    例: 问个问题: 我要在聊天页加个弹框, 这个功能复杂吗?';
+
+  // 2. 读取该 bot 的已启用动作，最多 5 条
+  // 优先使用传入的 actions 参数，否则调用 getConfigs()
+  const configList = actions || getConfigs();
+  const enabledActions = configList
+    .filter((c) => c && c.botId === botId && c.enabled)
+    .slice(0, 5);
+
+  // 3. 生成按钮区（action 元素）
+  const actionButtons = enabledActions.map((action) => ({
+    tag: 'button',
+    type: 'primary',
+    text: { tag: 'plain_text', content: action.name },
+    value: {
+      kind: 'quick-action',
+      actionId: action.id,
+      actionName: action.name,
+      botId: botId,
+      _timestamp: Date.now(),
+    },
+  }));
+
+  // 4. 超过 5 条时追加提示文本
+  const totalEnabled = configList.filter((c) => c && c.botId === botId && c.enabled).length;
+  if (totalEnabled > 5) {
+    actionButtons.push({
+      tag: 'text',
+      content: `…还有 ${totalEnabled - 5} 项动作，可直接对我说「帮我 [动作名]」`,
+    });
+  }
+
+  // 5. 拼装卡片（含说明 + 按钮区，或仅说明）
+  const elements = [{ tag: 'div', text: { tag: 'lark_md', content: headerText } }];
+
+  if (actionButtons.length > 0) {
+    elements.push({ tag: 'action', actions: actionButtons });
+  }
+
+  return { elements };
+}
+
 /** 纯逻辑：覆盖值（非空）优先；未知 key 抛错，开发期即暴露注册表与调用点不一致 */
 export function resolveMessage(key, overrides) {
   const entry = REGISTRY[key];

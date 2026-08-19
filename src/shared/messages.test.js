@@ -206,3 +206,120 @@ test.describe('buildWelcomeText', () => {
     assert.doesNotMatch(text, /这是另一个机器人的动作/, '不包含其他 bot 的动作');
   });
 });
+
+test.describe('buildWelcomeCard', () => {
+  test('有已启用动作时应生成卡片含操作说明和按钮', async (t) => {
+    const { buildWelcomeCard } = await import('./messages.js');
+
+    const mockActions = [
+      {
+        id: 'ac_001',
+        botId: 'bot_123',
+        name: '清理数据',
+        description: '清理测试数据',
+        example: '输入环境名称',
+        enabled: true,
+      },
+      {
+        id: 'ac_002',
+        botId: 'bot_123',
+        name: '生成二维码',
+        description: '生成小程序二维码',
+        example: '输入用户 ID',
+        enabled: true,
+      },
+    ];
+
+    const card = buildWelcomeCard('bot_123', mockActions);
+
+    // 验证卡片结构
+    assert.ok(card.elements, '卡片有 elements 字段');
+    assert.equal(card.elements.length, 2, '有两个元素（说明 + 按钮区）');
+
+    // 验证说明段
+    assert.equal(card.elements[0].tag, 'div', '第一个元素是 div');
+    assert.equal(card.elements[0].text.tag, 'lark_md', '说明段使用 lark_md');
+    assert.match(card.elements[0].text.content, /没有识别到你的意图/, '包含操作说明');
+    assert.match(card.elements[0].text.content, /提交需求/, '包含需求说明');
+
+    // 验证按钮区
+    const actionElem = card.elements[1];
+    assert.equal(actionElem.tag, 'action', '第二个元素是 action');
+    assert.equal(actionElem.actions.length, 2, '有两个按钮');
+
+    // 验证第一个按钮
+    const btn1 = actionElem.actions[0];
+    assert.equal(btn1.tag, 'button', '是 button 元素');
+    assert.equal(btn1.text.content, '清理数据', '第一个按钮文案');
+    assert.equal(btn1.value.kind, 'quick-action', '按钮 value 有 kind');
+    assert.equal(btn1.value.actionId, 'ac_001', '按钮 value 有 actionId');
+    assert.equal(btn1.value.botId, 'bot_123', '按钮 value 有 botId');
+
+    // 验证第二个按钮
+    const btn2 = actionElem.actions[1];
+    assert.equal(btn2.text.content, '生成二维码', '第二个按钮文案');
+    assert.equal(btn2.value.actionId, 'ac_002', '第二个按钮的 actionId');
+  });
+
+  test('无已启用动作时卡片仅含操作说明', async (t) => {
+    const { buildWelcomeCard } = await import('./messages.js');
+
+    const card = buildWelcomeCard('bot_456', []);
+
+    // 无动作时卡片应仅含操作说明（elements 只有一个）
+    assert.ok(card.elements, '卡片有 elements');
+    assert.equal(card.elements.length, 1, '无动作时只有 1 个元素');
+    assert.match(card.elements[0].text.content, /没有识别到你的意图/, '仍有操作说明');
+  });
+
+  test('超过 5 条动作时仅显示前 5 条并提示还有更多', async (t) => {
+    const { buildWelcomeCard } = await import('./messages.js');
+
+    const actions = Array.from({ length: 8 }, (_, i) => ({
+      id: `ac_${i + 1}`,
+      botId: 'bot_789',
+      name: `动作 ${i + 1}`,
+      description: `说明 ${i + 1}`,
+      example: `示例 ${i + 1}`,
+      enabled: true,
+    }));
+
+    const card = buildWelcomeCard('bot_789', actions);
+
+    const actionElem = card.elements[1];
+    assert.ok(actionElem, '有 action 元素');
+
+    // 应该显示 5 个按钮 + 1 个文本提示
+    const buttons = actionElem.actions.filter(a => a.tag === 'button');
+    const texts = actionElem.actions.filter(a => a.tag === 'text');
+
+    assert.equal(buttons.length, 5, '显示 5 个按钮');
+    assert.equal(texts.length, 1, '有 1 个文本提示');
+    assert.match(texts[0].content, /还有 3 项/, '提示「还有 3 项」');
+
+    // 验证前 5 个按钮的名称
+    for (let i = 0; i < 5; i++) {
+      assert.equal(buttons[i].text.content, `动作 ${i + 1}`, `第 ${i + 1} 个按钮文案`);
+    }
+  });
+
+  test('botId 为 null 时应无任何按钮', async (t) => {
+    const { buildWelcomeCard } = await import('./messages.js');
+
+    const mockActions = [
+      {
+        id: 'ac_x',
+        botId: 'bot_other',
+        name: '其他机器人的动作',
+        description: '这是另一个机器人的动作',
+        enabled: true,
+      },
+    ];
+
+    const card = buildWelcomeCard(null, mockActions);
+
+    // 因为 botId 不匹配，无法找到 null 的动作，应只有说明段
+    assert.equal(card.elements.length, 1, '无动作时只有说明段');
+    assert.match(card.elements[0].text.content, /没有识别到你的意图/, '仍有操作说明');
+  });
+});
