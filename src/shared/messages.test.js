@@ -89,3 +89,7 @@ test('sanitizeMessages：丢弃已下线的 feedbackAck，保留新 key', () => 
   assert.equal(r.ok, true);
   assert.deepEqual(r.values, { ackBug: '稍等' });
 });
+
+test.describe('buildWelcomeText', () => {
+  // 4 个测试用例将在后续步骤添加
+});
