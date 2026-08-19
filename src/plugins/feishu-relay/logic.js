@@ -36,6 +36,32 @@ export function isEndSessionText(text) {
   return (typeof text === 'string' ? text.trim() : '') === END_TEXT;
 }
 
+/**
+ * 识别「会话 <至少8位ID> <正文>」格式。
+ * @param {string} text 用户输入的完整文本
+ * @returns {{ shortId: string, body: string } | null}
+ *
+ * 例如：
+ * matchSessionText('会话 a1b2c3d4 我想补充一些东西')
+ * → { shortId: 'a1b2c3d4', body: '我想补充一些东西' }
+ *
+ * matchSessionText('会话补充内容')
+ * → null
+ */
+export function matchSessionText(text) {
+  if (typeof text !== 'string') return null;
+  const trimmed = text.trim();
+
+  // 正则：「会话」+ 空格 + 至少8位字母/数字 + 空格 + 至少1个字符
+  const match = trimmed.match(/^会话\s+([a-zA-Z0-9]{8,})\s+(.+)$/);
+  if (!match) return null;
+
+  return {
+    shortId: match[1],
+    body: match[2],
+  };
+}
+
 // 「谁能点我的私聊卡片」判定已上移到 shared/trusted-ids.js（team-tools 的任务完成卡片也要用同一把尺子，
 // 而插件之间禁止互相 import，同 resolveTrustedOpenIds 的处置）。这里原样再导出：
 // 本模块既有的 importer（feishu-relay/index.js）与测试全部零改动，迁移不产生连锁修改。

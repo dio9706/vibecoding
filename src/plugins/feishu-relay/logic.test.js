@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CONV_CARD_KIND, parseConvCardAction, matchSupplementText, isEndSessionText, canOperateRelay } from './logic.js';
+import { CONV_CARD_KIND, parseConvCardAction, matchSupplementText, isEndSessionText, matchSessionText, canOperateRelay } from './logic.js';
 
 test('parseConvCardAction：对象 value 正常解析', () => {
   const r = parseConvCardAction({
@@ -43,6 +43,48 @@ test('isEndSessionText：trim 后全等才算', () => {
   assert.equal(isEndSessionText(' 结束会话 '), true);
   assert.equal(isEndSessionText('结束会话吧'), false);
   assert.equal(isEndSessionText('请结束会话'), false);
+});
+
+test('matchSessionText：正常匹配 8 位 ID + 正文', () => {
+  const result = matchSessionText('会话 a1b2c3d4 我要补充内容');
+  assert.deepEqual(result, { shortId: 'a1b2c3d4', body: '我要补充内容' });
+});
+
+test('matchSessionText：超过 8 位 ID 也匹配', () => {
+  const result = matchSessionText('会话 a1b2c3d4e5f6g7h8 详细说明');
+  assert.deepEqual(result, { shortId: 'a1b2c3d4e5f6g7h8', body: '详细说明' });
+});
+
+test('matchSessionText：少于 8 位 ID 不匹配', () => {
+  const result = matchSessionText('会话 a1b2c3 内容');
+  assert.equal(result, null);
+});
+
+test('matchSessionText：不是「会话」开头不匹配', () => {
+  const result = matchSessionText('我要说 a1b2c3d4 内容');
+  assert.equal(result, null);
+});
+
+test('matchSessionText：空格不足不匹配', () => {
+  const result = matchSessionText('会话a1b2c3d4内容');
+  assert.equal(result, null);
+});
+
+test('matchSessionText：非字符串输入返回 null', () => {
+  assert.equal(matchSessionText(null), null);
+  assert.equal(matchSessionText(123), null);
+  assert.equal(matchSessionText(undefined), null);
+  assert.equal(matchSessionText({}), null);
+});
+
+test('matchSessionText：trim 会话前后空格', () => {
+  const result = matchSessionText('  会话 a1b2c3d4 内容  ');
+  assert.deepEqual(result, { shortId: 'a1b2c3d4', body: '内容' });
+});
+
+test('matchSessionText：正文可包含多空格', () => {
+  const result = matchSessionText('会话 abc12345 我 想  要   多个   空格');
+  assert.deepEqual(result, { shortId: 'abc12345', body: '我 想  要   多个   空格' });
 });
 
 test('canOperateRelay：本人/owner/可信名单放行，其他人拒绝', () => {
