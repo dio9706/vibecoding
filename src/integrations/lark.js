@@ -3,6 +3,7 @@
  * 提供 client / WSClient 工厂 + 发消息 + 表情回复 + 消息资源（图片）下载。
  */
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import * as Lark from '@larksuiteoapi/node-sdk';
 import { getLarkCredentials } from '../shared/config.js';
@@ -166,6 +167,51 @@ export async function sendImageByUrl(chatId, url) {
   const buf = Buffer.from(await resp.arrayBuffer());
   const key = await uploadImage(buf);
   await sendImage(chatId, key);
+}
+
+/**
+ * 上传文件到飞书，返回 file_key（失败抛错，由调用方兜底）。
+ * 与 uploadImage 同构：code-gen client 已剥外层信封 → file_key 在顶层，保留 .data 兜底。
+ *
+ * 飞书限制：文件 ≤ 30MB，且不允许空文件。两条都在上传前挡掉 ——
+ * 让接口去报是一串英文错误码，调用方没法转成给用户看的话，且白跑一次网络请求。
+ * 任意扩展名走 file_type: 'stream'（飞书只给 opus/mp4/pdf/doc/xls/ppt 定了专用类型）。
+ * @param {Buffer} buf
+ * @param {string} fileName 带扩展名
+ * @param {'opus'|'mp4'|'pdf'|'doc'|'xls'|'ppt'|'stream'} [fileType]
+ */
+export async function uploadFile(buf, fileName, fileType = 'stream') {
+  if (!buf || !buf.length) throw new Error('不能上传空文件');
+  if (buf.length > 30 * 1024 * 1024) {
+    throw new Error(`文件超过 30MB 限制（${(buf.length / 1024 / 1024).toFixed(1)}MB）`);
+  }
+  const r = await getClient().im.v1.file.create({
+    data: { file_type: fileType, file_name: fileName, file: buf },
+  });
+  const key = r?.file_key || r?.data?.file_key || null;
+  if (!key) throw new Error('上传文件未返回 file_key');
+  logger.info('lark', '上传文件', { fileName, bytes: buf.length, fileKey: key });
+  return key;
+}
+
+/** 发送文件消息（已有 file_key） */
+export async function sendFile(chatId, fileKey) {
+  await getClient().im.v1.message.create({
+    params: { receive_id_type: 'chat_id' },
+    data: {
+      receive_id: chatId,
+      content: JSON.stringify({ file_key: fileKey }),
+      msg_type: 'file',
+    },
+  });
+  logger.info('lark', '发送文件', { chatId, fileKey });
+}
+
+/** 本地路径 → 上传 → 发文件消息。失败抛错（调用方回退发文字摘要）。 */
+export async function sendFileByPath(chatId, filePath, fileName) {
+  const buf = await fsp.readFile(filePath);
+  const key = await uploadFile(buf, fileName || path.basename(filePath));
+  await sendFile(chatId, key);
 }
 
 /** 给消息贴表情；返回 reaction_id，失败返回 null（不影响主流程） */

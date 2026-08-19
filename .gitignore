@@ -48,6 +48,8 @@ scripts/*
 !scripts/build-win.bat
 !scripts/build-mac.sh
 !scripts/prepare-sidecar.mjs
+# 埋点索引同步脚本：连接信息全走环境变量，无敏感信息（手工运维工具，不参与运行时）
+!scripts/sync-event-dict.mjs
 
 # ---- 日志与临时文件 ----
 logs/

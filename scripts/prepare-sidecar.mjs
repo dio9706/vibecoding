@@ -57,7 +57,10 @@ const stage = path.join(RES, 'sidecar');
 fs.rmSync(RES, { recursive: true, force: true });
 fs.mkdirSync(stage, { recursive: true });
 
-for (const item of ['server.js', 'package.json', 'package-lock.json', 'src', 'public']) {
+// 'data' 必须在列：data/event-dict.json 是埋点统计的埋点索引，缺了它 loadDict() 恒返回 null，
+// 埋点统计在打包版里静默失效——而开发机上一切正常（开发直接读仓库根目录）。
+// 这类「只在打包后才复现、且不报错只降级」的缺陷排查成本极高，故随代码一起 stage。
+for (const item of ['server.js', 'package.json', 'package-lock.json', 'src', 'public', 'data']) {
   const from = path.join(ROOT, item);
   if (!fs.existsSync(from)) {
     throw new Error(`[prepare-sidecar] 缺少必需项，无法产出完整 sidecar: ${item}`);

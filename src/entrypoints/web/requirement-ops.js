@@ -28,7 +28,9 @@ import {
   buildBugFixPrompt,
   reqBranchName,
   buildArchiveSummary,
+  parseFeatureTag,
 } from './req-logic.js';
+import { listFeatureTags } from '../../store/feature-index.js';
 
 export const DOCGEN_TIMEOUT_MS = 15 * 60_000; // spec §5.3：docgen race 上限
 const POLL_MS = 5000;
@@ -357,12 +359,18 @@ export async function runDocgen(req, payload = {}) {
     const supplements = payload.supplements?.length ? payload.supplements : payload.supplement ? [payload.supplement] : [];
     // 修订但 docSession 缺失（如上一版异常未捕获到 session）时退化为全量重新生成，属自愈路径
     const canRevise = !!(supplements.length && req.docSession);
+    const existingTags = listFeatureTags();
     const prompt = canRevise
-      ? buildRevisePrompt({ supplement: composeSupplementsForRevise(supplements) })
+      ? buildRevisePrompt({
+          supplement: composeSupplementsForRevise(supplements),
+          existingTags,
+          currentTag: req.featureTag ?? null,
+        })
       : buildDocgenPrompt({
           reqDocText: fs.readFileSync(req.reqDoc.path, 'utf8'),
           supplements: req.supplements,
           projects: req.projects,
+          existingTags,
         });
     // 关键节点日志：docgen 真正起跑（模式/工程目录/参考目录/prompt 规模）——排查「一直生成中」时
     // 先看这条是否出现、随后 claude.js 的 ▶runClaude / init / result 三条是否跟上、耗时多少。
@@ -439,12 +447,16 @@ export async function runDocgen(req, payload = {}) {
         outputTokens: capturedTokens.outputTokens,
       },
     ];
-    updateRequirement(
-      req.id,
-      { devDoc: { versions }, docSession: capturedSession || req.docSession, busy: null },
-      `开发文档 v${v} 生成完成`,
-    );
-    logger.info('req-ops', 'docgen 生成完成', { reqId: req.id, v, ms: elapsed });
+    const featureTag = parseFeatureTag(resultText);
+    const updatePayload = {
+      devDoc: { versions },
+      docSession: capturedSession || req.docSession,
+      busy: null,
+      ...(featureTag ? { featureTag } : {}), // 仅解析到标签时才写入，不覆盖用户手动设置
+    };
+    const eventMsg = `开发文档 v${v} 生成完成${featureTag ? `（功能模块：${featureTag}）` : ''}`;
+    updateRequirement(req.id, updatePayload, eventMsg);
+    logger.info('req-ops', 'docgen 生成完成', { reqId: req.id, v, ms: elapsed, featureTag: featureTag || '无' });
     // 异步发送通知（不阻塞主流程）
     sendDocgenNotify(req, elapsed, capturedTokens.inputTokens, capturedTokens.outputTokens).catch((e) =>
       logger.warn('req-ops', 'docgen 通知异常（已捕获，不影响主流程）', { reqId: req.id, err: e?.message || String(e) }),

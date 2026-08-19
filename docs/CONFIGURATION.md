@@ -38,7 +38,7 @@ node --env-file=.env feishu.js
 | `LARK_APP_SECRET` | 飞书必填 | — | 同上，**密钥，切勿泄露** |
 | `OWNER_OPEN_IDS` | 建议 | 空 | 你的 open_id（完整能力）。首次留空启动，给 bot 发消息，终端打印 `sender_open_id`，复制回填再重启。多个用逗号分隔 |
 | `TRIAGE_OWNER_OPEN_ID` | 可选 | 空→沿用 owner | 「待处理/待办」流程专属白名单（单人）。填这里可用 guest 身份触发，避免被 owner 全量接管 |
-| `TRUSTED_OPEN_IDS` | 可选 | 空 | 可信提交人白名单：这些人提交的需求/故障**跳过 AI 评审**直接进自动开发队列（独立分支，合并仍需管理员确认）。多个用逗号分隔。机器人设置页可按机器人覆盖（可信提交人 open_id 列表），设置页非空时优先，留空回退本项。**`OWNER_OPEN_IDS` 里的人无需再填这里**——owner 用「提交需求：/提交故障：」强前缀提交时自动视为可信直通（其余消息仍走完整 Claude） |
+| ~~`TRUSTED_OPEN_IDS`~~ | **已废弃** | — | ⚠️ **当前版本不生效**：没有任何代码读取它，填了不会有效果、也不会有日志。可信提交人改由 web 设置页「我的飞书身份 → 我的飞书 open_id」单人指定，详见下方说明 |
 | `PORT` | 可选 | `3000` | Web 端口；服务固定绑 `127.0.0.1` |
 | `SCRIPTS_DIR` | 可选 | `scripts` | 动作脚本目录（该目录已被忽略，见第四节） |
 | `PYTHON_BIN` | 可选 | `python` | Python 解释器路径 |
@@ -48,6 +48,19 @@ node --env-file=.env feishu.js
 | `TRIAGE_TRIGGER` | 可选 | 内置正则 | 待处理触发词正则覆盖 |
 | `REACTION_EMOJIS` | 可选 | 5 个内置表情 | 处理中随机表情 |
 | `CLAUDE_PROJECT_ID` | 可选 | 按目录名推导 | 历史记录归属项目 ID |
+| `TRACKING_DB_HOST` / `TRACKING_DB_PORT` / `TRACKING_DB_NAME` / `TRACKING_DB_USER` / `TRACKING_DB_PASSWORD` | 埋点统计必填 | 见 `.env.example` | 生产埋点库连接（只读账号）。**密码只走环境变量，不得写进源码** |
+| `COMPASS_AGENT_DIR` | 可选 | 空 | compass-agent 仓库路径，仅埋点索引同步脚本 `node scripts/sync-event-dict.mjs` 使用 |
+
+### 关于「可信提交人」
+
+可信提交人的需求/故障**跳过 AI 评审**直接进自动开发队列（独立分支，合并仍需管理员确认）。
+
+**唯一来源**：web 管理台「设置 → 我的飞书身份 → 我的飞书 open_id」，**只支持一个人**；另外 `OWNER_OPEN_IDS`
+里的 owner 用「提交需求：/ 提交故障：」强前缀提交时同样视为可信直通（其余消息仍走完整 Claude）。
+
+环境变量 `TRUSTED_OPEN_IDS` 与机器人设置页的 per-bot 可信名单**都已废弃并从代码中移除**，
+现在没有任何代码读取它们。之所以特意写明：此前文档承诺「设置页优先、留空回退 env」，
+而实际两条路都断了 —— 一个「看起来在工作、实际没有」的开关，比没有这个开关更贵。
 
 ---
 

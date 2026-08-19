@@ -7,10 +7,9 @@ import path from 'node:path';
 import { listActiveRuns, isPidAlive } from '../../../store/active-runs.js';
 import { listHistorySessions } from '../../../store/history.js';
 import { getTasks } from '../../../store/tasks.js';
-import { getActiveBot } from '../../../store/settings.js';
-import { resolveTrustedOpenIds } from '../feedback/logic.js';
-import { matchesExactTrigger, isTrustedSubmitter } from '../trusted-trigger.js';
-import { config } from '../../../shared/config.js';
+import { getMyFeishuOpenId } from '../../../store/settings.js';
+import { resolveTrustedOpenIds, isTrustedSubmitter } from '../../../shared/trusted-ids.js';
+import { matchesExactTrigger } from '../trusted-trigger.js';
 import { logger } from '../../../shared/logger.js';
 import { STATUS_TRIGGERS, groupTasks, minutesSince, buildStatusReport } from './logic.js';
 
@@ -52,7 +51,7 @@ export default {
   // 全等比较在前，isTrusted 要读设置，别让每条消息都付这个成本
   match: (ctx) =>
     matchesExactTrigger(ctx.text, STATUS_TRIGGERS) &&
-    isTrustedSubmitter(ctx, resolveTrustedOpenIds(getActiveBot(), config.lark.trustedOpenIds)),
+    isTrustedSubmitter(ctx, resolveTrustedOpenIds(getMyFeishuOpenId())),
   handle: async (ctx) => {
     // pid 存活过滤：崩溃残留的孤儿条目不算「正在进行」（缺 pid 的旧条目同样排除）
     const runs = listActiveRuns().filter((e) => isPidAlive(e?.pid));

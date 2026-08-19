@@ -115,14 +115,13 @@ test('makeBotEntry：缺省值齐全（platform=feishu、messages 空对象、en
   assert.equal(e.updatedAt, 'T');
 });
 
-test('makeBotEntry：projectDir/projectNotes/autonomy/trustedOpenIds 显式透传（addBot 同签名，防新建丢字段回归）', () => {
+test('makeBotEntry：projectDir/projectNotes/autonomy 显式透传（addBot 同签名，防新建丢字段回归）', () => {
   const e = makeBotEntry({
-    id: 'b9', projectDir: 'C:/w/p', projectNotes: '后端: x', autonomy: 'full', trustedOpenIds: ['ou_x'], now: 'T',
+    id: 'b9', projectDir: 'C:/w/p', projectNotes: '后端: x', autonomy: 'full', now: 'T',
   });
   assert.equal(e.projectDir, 'C:/w/p');
   assert.equal(e.projectNotes, '后端: x');
   assert.equal(e.autonomy, 'full');
-  assert.deepEqual(e.trustedOpenIds, ['ou_x']);
 });
 
 test('makeBotEntry：autonomy 枚举透传、非法值归 light', () => {
@@ -151,14 +150,11 @@ test('makeBotEntry：setupScript 字符串收录，非字符串归空', () => {
   assert.equal(b.setupScript, '');
 });
 
-test('makeBotEntry：trustedOpenIds 数组透传且 trim+去空', () => {
-  const e = makeBotEntry({ id: 'b1', trustedOpenIds: [' ou_a ', '', 'ou_b'], now: 'T' });
-  assert.deepEqual(e.trustedOpenIds, ['ou_a', 'ou_b']);
-});
-
-test('makeBotEntry：trustedOpenIds 非数组（字符串/undefined）归为空数组', () => {
-  assert.deepEqual(makeBotEntry({ id: 'b2', trustedOpenIds: 'ou_a\nou_b', now: 'T' }).trustedOpenIds, []);
-  assert.deepEqual(makeBotEntry({ id: 'b3', now: 'T' }).trustedOpenIds, []);
+// per-bot 可信提交人白名单（trustedOpenIds）已删除：从未接通 API/UI，也无人读取。
+// 这里留一条反向断言守住「不要再悄悄长回来」——字段一旦复活却仍无人读，就是同一个坑。
+test('makeBotEntry：不再产出 trustedOpenIds 字段（已废弃删除）', () => {
+  const e = makeBotEntry({ id: 'b1', trustedOpenIds: ['ou_a'], now: 'T' });
+  assert.equal('trustedOpenIds' in e, false);
 });
 
 test('pickActiveBot：取第一个 enabled 的机器人；无启用返回 null', () => {

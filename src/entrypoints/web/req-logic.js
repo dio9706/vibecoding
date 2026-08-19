@@ -37,12 +37,17 @@ export function pickCwdAndDirs(projects) {
   };
 }
 
-/** docgen/revise 共用的输出契约段：只输出 markdown，两节固定结构。 */
-function docOutputContract() {
+/** docgen/revise 共用的输出契约段：只输出 markdown，三节固定结构（新增功能模块标签节）。 */
+function docOutputContract({ existingTags = [], currentTag = null } = {}) {
+  const tagLine = existingTags.length
+    ? `已有功能模块（从中选一个，或新建 2-4 字简短名称）：${existingTags.join('、')}`
+    : `（暂无已有模块，请新建一个 2-4 字简短名称，如「宝宝辅食」「盘子需求」）`;
+  const hint = currentTag ? `（当前已识别为「${currentTag}」，若无变化直接保持）` : '';
   return (
     `输出契约（严格遵守）：只输出 markdown 正文，不要任何解释性开场白。结构必须是——\n` +
     `## 一、说人话总结\n（用大白话概括要改什么、影响哪些地方，非技术人员能看懂）\n\n` +
-    `## 二、详细设计\n（逐【开发工程】列出：新增 / 删除 / 更新 的文件与内容要点，精确到文件路径；只读参考工程仅作依据引用）`
+    `## 二、详细设计\n（逐【开发工程】列出：新增 / 删除 / 更新 的文件与内容要点，精确到文件路径；只读参考工程仅作依据引用）\n\n` +
+    `## 三、功能模块标签${hint}\n${tagLine}\n本需求所属功能模块：`
   );
 }
 
@@ -61,7 +66,7 @@ function supplementLines(supplements) {
 }
 
 /** 评审期 docgen prompt：需求文档全文 + 补充说明（按时间序）+ 工程角色表 + 输出契约。 */
-export function buildDocgenPrompt({ reqDocText, supplements = [], projects }) {
+export function buildDocgenPrompt({ reqDocText, supplements = [], projects, existingTags = [] }) {
   const sup = supplements.length
     ? `\n补充说明（按时间序，后者优先级更高）：\n${supplementLines(supplements)}\n`
     : '';
@@ -69,17 +74,17 @@ export function buildDocgenPrompt({ reqDocText, supplements = [], projects }) {
     `你是资深架构师，请阅读需求文档并实际查证下列工程后，产出一份开发文档。\n\n` +
     `工程角色（只读查证，本次不做任何修改）：\n${projectRoleLines(projects).join('\n')}\n\n` +
     `需求文档全文：\n「${reqDocText}」\n${sup}\n` +
-    docOutputContract()
+    docOutputContract({ existingTags })
   );
 }
 
 /** 补充说明 → 增量修订 prompt：resume 同一 docgen session，在上一版基础上修订，输出契约同 docgen。 */
-export function buildRevisePrompt({ supplement }) {
+export function buildRevisePrompt({ supplement, existingTags = [], currentTag = null }) {
   const { text, files } = supplement || {};
   return (
     `用户对开发文档提出新的补充说明如下：\n「${text}」${attachmentsPart(files)}\n\n` +
     `请在你上一版开发文档基础上修订，输出完整新版文档。\n\n` +
-    docOutputContract()
+    docOutputContract({ existingTags, currentTag })
   );
 }
 
@@ -88,6 +93,21 @@ export function extractSummary(md) {
   const text = String(md ?? '');
   const m = text.match(/##\s*一、说人话总结\s*\n([\s\S]*?)(?:\n##\s|$)/);
   return m ? m[1].trim() : text.trim().slice(0, 300);
+}
+
+/**
+ * 从 docgen/revise 输出文本中解析「## 三、功能模块标签」节的标签值。
+ * 支持格式：`本需求所属功能模块：宝宝辅食` 或 `：「宝宝辅食」`。
+ * 解析失败（无该节或格式异常）返回 null。
+ */
+export function parseFeatureTag(docText) {
+  const m = String(docText ?? '').match(
+    /##\s*三、功能模块标签[\s\S]*?\n本需求所属功能模块[：:]\s*([^\n]+)/,
+  );
+  if (!m) return null;
+  // 移除各种引号和书名号
+  const raw = m[1].trim().replace(/[`'"「」【】（）()]/g, '').trim();
+  return raw || null;
 }
 
 /** 开发文档下一版本号：versions 空 → 1，否则 max(v)+1。 */
@@ -160,10 +180,13 @@ export function mergeBugs(oldBugs = [], incoming) {
 }
 
 /**
- * 子会话轻量种子：需求基本信息 + 工程角色 + 开发文档 + 设计准则（非空才附）。
- * 返回 200-300 token 左右的纯文本 prompt 前缀。
+ * 子会话轻量种子：需求基本信息 + 工程角色 + 开发文档 + 功能文件快照（有才注入）+ 设计准则。
+ * 返回 300-500 token 左右的纯文本 prompt 前缀。
+ * @param {object} req - 需求对象
+ * @param {object} options - 选项对象
+ * @param {object|null} options.featureSnapshot - 功能快照：{ tag: string, files: [{path, count}, ...] } | null
  */
-export function buildSeedPrompt(req) {
+export function buildSeedPrompt(req, { featureSnapshot = null } = {}) {
   const { cwd: reqCwd, addDirs } = pickCwdAndDirs(req.projects);
   const parts = [];
 
@@ -189,6 +212,18 @@ export function buildSeedPrompt(req) {
   const latest = req.devDoc?.versions?.at(-1);
   if (latest) {
     parts.push(`【开发文档】${latest.path}（需要时自行 Read）`);
+  }
+
+  // 功能文件快照（有才注入）——基于历史 git diff 收割，频次越高置信度越强
+  if (featureSnapshot?.files?.length) {
+    const fileLines = featureSnapshot.files
+      .map((f) => `- ${f.path}（出现 ${f.count} 次）`)
+      .join('\n');
+    parts.push(
+      `【功能快照·${featureSnapshot.tag}】基于历史开发记录，本功能模块涉及以下文件（按改动频次排序）：\n${fileLines}\n\n` +
+        `开发规范：先读快照文件定位实现，范围不足时再局部探索；禁止全局 glob/grep 扫整个工程。` +
+        `若快照中有文件不存在，请在首条回复标注「[快照过期]」并说明变动文件。`,
+    );
   }
 
   // 设计准则（非空才附）

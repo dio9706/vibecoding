@@ -12,6 +12,54 @@ import { logger } from '../shared/logger.js';
 export const CLASSIFY_TIMEOUT_MS = 30_000;
 
 /**
+ * 从模型回复里截出第一个完整的 JSON 对象（含嵌套），截不出返回 null。
+ *
+ * 为什么不能用正则：旧实现是 `out.match(/\{[\s\S]*?\}/)`，非贪婪匹配从第一个 `{` 停在
+ * **第一个** `}`。JSON 天生可嵌套，而正则没有配对计数能力 —— 贪婪 `/\{[\s\S]*\}/` 又会
+ * 一路吃到最后一个 `}`（把后面的说明文字或第二个对象也裹进来），两头都不对。
+ *
+ * 实测线索（2026-08-19 埋点统计端到端冒烟）：理解阶段的模型回复形如
+ * `{"range": {"start": "...", "end": "..."}, "target": "page", "keywords": [...]}`，
+ * 旧正则只截到 `{"range": {"start": "...", "end": "..."}`，JSON.parse 必抛 →
+ * runClassifierOnce 返回 null，日志里表现为「LLM 调用成功但阶段 A 无输出」。
+ * 同样形状的还有精选阶段的 `{"events":[{...}],"pages":[]}` 与 memory-bank 的 `{"items":[{...}]}`。
+ *
+ * 实现：找到第一个 `{`，逐字符扫描并对大括号计数，深度归零处即该对象结尾。
+ * 字符串字面量内的 `{`/`}` 必须跳过（`{"tip":"用 {} 包起来"}`），
+ * 且要认转义（`{"a":"he said \"hi\""}` 里的 `\"` 不能被当成字符串结束）。
+ *
+ * @param {unknown} text 模型原始输出
+ * @returns {string|null} 第一个完整 JSON 对象的原文；找不到 `{` 或扫到结尾仍未配平 → null
+ */
+export function extractFirstJsonObject(text) {
+  const s = typeof text === 'string' ? text : '';
+  const start = s.indexOf('{');
+  if (start < 0) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inString) {
+      // 转义只影响紧随其后的一个字符，处理完立刻复位（否则 `\\"` 这种「转义反斜杠 + 真引号」会判错）
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
+  }
+  // 扫到结尾还没配平 = 回复被截断，宁可返回 null 也不交一段残缺 JSON 给下游
+  return null;
+}
+
+/**
  * @param {object} opts
  * @param {string} opts.prompt        用户侧 prompt
  * @param {object} [opts.systemPrompt] 可选 system prompt（runClaude 透传格式）
@@ -55,10 +103,10 @@ export async function runClassifierOnce({ prompt, systemPrompt, model, logTag, t
   } finally {
     clearTimeout(timer);
   }
-  const m = out.match(/\{[\s\S]*?\}/);
-  if (!m) return null;
+  const block = extractFirstJsonObject(out);
+  if (!block) return null;
   try {
-    return JSON.parse(m[0]);
+    return JSON.parse(block);
   } catch {
     return null;
   }

@@ -16,9 +16,9 @@ import { runClassifierOnce } from '../../../features/llm-classify.js';
 import { reviewTask } from '../review/index.js';
 import { requestAutoDevelop } from '../auto-dev/index.js';
 import { createTask } from '../../../store/tasks.js';
-import { getActiveBot } from '../../../store/settings.js';
-import { resolveTrustedOpenIds } from '../feedback/logic.js';
-import { matchesExactTrigger, isTrustedSubmitter } from '../trusted-trigger.js';
+import { getMyFeishuOpenId } from '../../../store/settings.js';
+import { resolveTrustedOpenIds, isTrustedSubmitter } from '../../../shared/trusted-ids.js';
+import { matchesExactTrigger } from '../trusted-trigger.js';
 import { config } from '../../../shared/config.js';
 import { logger } from '../../../shared/logger.js';
 import {
@@ -54,7 +54,7 @@ export function hasPatrolPending(openId) {
 }
 
 function isTrusted(ctx) {
-  return isTrustedSubmitter(ctx, resolveTrustedOpenIds(getActiveBot(), config.lark.trustedOpenIds));
+  return isTrustedSubmitter(ctx, resolveTrustedOpenIds(getMyFeishuOpenId()));
 }
 
 /** Haiku 字段映射（自适应任意表结构，映射结果由 validateFieldMapping 硬校验） */

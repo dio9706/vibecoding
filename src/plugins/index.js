@@ -23,6 +23,11 @@ export const PLUGIN_MANIFEST = [
     description: '配置驱动的通用动作执行（脚本 + 槽位填充）',
     load: () => import('./action-runner/index.js'),
   },
+  {
+    id: 'tracking-stats',
+    description: '埋点统计：「帮我统计埋点: <自然语言>」→ 两阶段推理 → 查生产埋点库 → HTML 报告附件',
+    load: () => import('./tracking-stats/index.js'),
+  },
 ];
 
 /** 纯函数：core + 插件 feature 条目按 order 合并排序（sort 稳定：同 order 保持传入先后） */

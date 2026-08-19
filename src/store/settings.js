@@ -86,9 +86,7 @@ export function normalizeAutonomy(v) {
 }
 
 /** 纯函数：构造一个机器人条目。显式传 id/index/now 保持可测。 */
-export function makeBotEntry({ id, name, platform, appId, appSecret, persona, messages, projectDir, projectNotes, setupScript, autonomy, trustedOpenIds, enabled, index = 0, now }) {
-  // 与 makeMcpServerEntry 的 autoAllow 同款归一：非数组视为空，逐项 trim + 去空串
-  const strList = (v) => (Array.isArray(v) ? v.map((a) => String(a).trim()).filter(Boolean) : []);
+export function makeBotEntry({ id, name, platform, appId, appSecret, persona, messages, projectDir, projectNotes, setupScript, autonomy, enabled, index = 0, now }) {
   return {
     id,
     name: (name || '').trim() || `机器人 ${index + 1}`,
@@ -101,9 +99,10 @@ export function makeBotEntry({ id, name, platform, appId, appSecret, persona, me
     projectNotes: typeof projectNotes === 'string' ? projectNotes : '', // 工程说明（后端/前端/figma 等参考信息）
     setupScript: typeof setupScript === 'string' ? setupScript : '', // auto 工作区首建初始化脚本（如 npm install）
     autonomy: normalizeAutonomy(autonomy), // 托管程度
-    // 可信提交人 open_id 白名单：命中者提交的需求/故障跳过 AI 评审，直接进自动开发队列；
-    // per-bot 非空时优先生效，留空则由业务侧（feedback）回退读 env TRUSTED_OPEN_IDS
-    trustedOpenIds: strList(trustedOpenIds),
+    // 注：曾有 per-bot 的 trustedOpenIds（可信提交人白名单），已删除。
+    // 它从未接通过任何一端：routes-settings 的 cleanBotInput/botView 不收不吐、设置页没有输入框、
+    // 业务侧也早已改成只认基础设置的「我的飞书 open_id」。留一个只写不读的字段，
+    // 就是给下一个人埋「配置看起来在工作、实际没有」的坑。
     enabled: !!enabled,
     updatedAt: now,
   };
@@ -125,12 +124,12 @@ export function getActiveBot() {
 }
 
 /** 新增机器人；enabled=true 时互斥禁用其他机器人 */
-export function addBot({ name, platform, appId, appSecret, persona, messages, projectDir, projectNotes, setupScript, autonomy, trustedOpenIds, enabled }) {
+export function addBot({ name, platform, appId, appSecret, persona, messages, projectDir, projectNotes, setupScript, autonomy, enabled }) {
   let created = null;
   updateSettings((s) => {
     created = makeBotEntry({
       id: genId('bot_'),
-      name, platform, appId, appSecret, persona, messages, projectDir, projectNotes, setupScript, autonomy, trustedOpenIds, enabled,
+      name, platform, appId, appSecret, persona, messages, projectDir, projectNotes, setupScript, autonomy, enabled,
       index: s.bots.length,
       now: new Date().toISOString(),
     });

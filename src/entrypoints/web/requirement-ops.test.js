@@ -25,8 +25,10 @@ const {
   dispatch,
   finalizeRequirement,
   archiveRequirement,
+  runDocgen,
 } = await import('./requirement-ops.js');
 const { createRequirement, updateRequirement, getRequirement } = await import('../../store/requirements.js');
+const { parseFeatureTag } = await import('./req-logic.js');
 
 test('canDispatch：busy 空且 conv 无活跃 run 才放行', () => {
   assert.equal(canDispatch({ busy: null, convId: 'c1' }, () => false), true);
@@ -481,4 +483,55 @@ test('dispatch：develop/api-fix 即便 phase=dev 也被废弃', () => {
     after.history.at(-1).event.includes('废弃') || after.history.at(-1).event.includes('客户端'),
     'history 应记录废弃原因'
   );
+});
+
+test('parseFeatureTag：文档含§三标签时正确解析标签值', () => {
+  // 标准格式：「本需求所属功能模块：标签值」
+  const docWithTag = `## 一、说人话总结
+本需求实现了一个用户管理模块。
+
+## 二、详细设计
+新增文件 users.js，提供用户增删改查接口。
+
+## 三、功能模块标签
+本需求所属功能模块：用户管理`;
+
+  const parsed = parseFeatureTag(docWithTag);
+  assert.equal(parsed, '用户管理', 'parseFeatureTag 应提取标签值');
+
+  // 变体：使用「」书名号
+  const docWithQuote = `## 三、功能模块标签
+本需求所属功能模块：「用户管理」`;
+  const parsed2 = parseFeatureTag(docWithQuote);
+  assert.equal(parsed2, '用户管理', 'parseFeatureTag 应处理书名号');
+
+  // 变体：英文冒号
+  const docWithEnglishColon = `## 三、功能模块标签
+本需求所属功能模块: 宝宝辅食`;
+  const parsed3 = parseFeatureTag(docWithEnglishColon);
+  assert.equal(parsed3, '宝宝辅食', 'parseFeatureTag 应处理英文冒号');
+});
+
+test('parseFeatureTag：文档无§三标签时返回 null', () => {
+  // 完全缺少 §三 节
+  const docWithoutTag = `## 一、说人话总结
+补充了更多细节。
+
+## 二、详细设计
+文件调整如下...`;
+
+  const parsed = parseFeatureTag(docWithoutTag);
+  assert.equal(parsed, null, 'parseFeatureTag 应返回 null（无标签）');
+
+  // 有 §三 但缺少「本需求所属功能模块」行
+  const docMissingLine = `## 三、功能模块标签
+暂无已有模块，请新建...`;
+
+  const parsed2 = parseFeatureTag(docMissingLine);
+  assert.equal(parsed2, null, 'parseFeatureTag 应返回 null（缺少关键行）');
+
+  // 完全空文档
+  const empty = '';
+  const parsed3 = parseFeatureTag(empty);
+  assert.equal(parsed3, null, 'parseFeatureTag 应返回 null（空文档）');
 });

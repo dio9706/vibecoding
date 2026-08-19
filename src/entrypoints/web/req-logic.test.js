@@ -4,7 +4,7 @@ import {
   projectRoleLines, buildDocgenPrompt, buildRevisePrompt, extractSummary, nextDocVersion,
   buildDevelopPrompt, buildApiFixPrompt, buildBugFixPrompt,
   verdictToBug, mergeBugs, buildArchiveSummary, reqBranchName, pickCwdAndDirs,
-  buildSeedPrompt, extractPitfalls, splitPitfallsByProject, mergePitfalls,
+  buildSeedPrompt, extractPitfalls, splitPitfallsByProject, mergePitfalls, parseFeatureTag,
 } from './req-logic.js';
 
 const PROJECTS = {
@@ -263,4 +263,106 @@ test('mergePitfalls：超 30 条时截断，返回 truncated:true 与移除计�
 test('mergePitfalls：空输入默认为空数组', () => {
   const { items } = mergePitfalls(undefined, []);
   assert.deepEqual(items, []);
+});
+
+test('parseFeatureTag：标准格式解析成功', () => {
+  const doc = `## 一、说人话总结\n功能改造。\n\n## 二、详细设计\n文件清单。\n\n## 三、功能模块标签\n暂无模块，请新建。\n本需求所属功能模块：宝宝辅食`;
+  assert.equal(parseFeatureTag(doc), '宝宝辅食');
+});
+
+test('parseFeatureTag：带书名号也能解析', () => {
+  const doc = `## 三、功能模块标签\n已有模块列表。\n本需求所属功能模块：「宝宝辅食」`;
+  assert.equal(parseFeatureTag(doc), '宝宝辅食');
+});
+
+test('parseFeatureTag：混合引号和圆括号也能解析', () => {
+  const doc = `## 三、功能模块标签\n提示信息。\n本需求所属功能模块：【盘子需求】`;
+  assert.equal(parseFeatureTag(doc), '盘子需求');
+});
+
+test('parseFeatureTag：无 §三 返回 null', () => {
+  const doc = `## 一、说人话总结\n功能改造。\n\n## 二、详细设计\n文件清单。`;
+  assert.equal(parseFeatureTag(doc), null);
+});
+
+test('parseFeatureTag：值为空字符串返回 null', () => {
+  const doc = `## 三、功能模块标签\n已有模块。\n本需求所属功能模块：   `;
+  assert.equal(parseFeatureTag(doc), null);
+});
+
+test('parseFeatureTag：值为纯引号返回 null', () => {
+  const doc = `## 三、功能模块标签\n提示。\n本需求所属功能模块：「」`;
+  assert.equal(parseFeatureTag(doc), null);
+});
+
+test('buildDocgenPrompt：existingTags 注入到输出契约', () => {
+  const p = buildDocgenPrompt({
+    reqDocText: '需求正文',
+    supplements: [],
+    projects: PROJECTS,
+    existingTags: ['宝宝辅食', '盘子需求'],
+  });
+  assert.match(p, /宝宝辅食/);
+  assert.match(p, /盘子需求/);
+  assert.match(p, /## 三、功能模块标签/);
+  assert.match(p, /本需求所属功能模块：/);
+});
+
+test('buildDocgenPrompt：无 existingTags 显示新建提示', () => {
+  const p = buildDocgenPrompt({
+    reqDocText: '需求正文',
+    supplements: [],
+    projects: PROJECTS,
+    existingTags: [],
+  });
+  assert.match(p, /暂无已有模块/);
+  assert.match(p, /## 三、功能模块标签/);
+});
+
+test('buildRevisePrompt：currentTag 注入到输出契约 hint', () => {
+  const p = buildRevisePrompt({
+    supplement: { text: '新补充', files: [] },
+    existingTags: ['宝宝辅食'],
+    currentTag: '宝宝辅食',
+  });
+  assert.match(p, /当前已识别为「宝宝辅食」/);
+  assert.match(p, /若无变化直接保持/);
+});
+
+test('buildRevisePrompt：无 currentTag 时不显示已识别提示', () => {
+  const p = buildRevisePrompt({
+    supplement: { text: '新补充', files: [] },
+    existingTags: [],
+  });
+  assert.doesNotMatch(p, /当前已识别/);
+  assert.match(p, /## 三、功能模块标签/);
+});
+
+const mockReqWithSnapshot = {
+  id: 'r_babyFood',
+  title: '改宝宝辅食',
+  projects: { frontend: { dir: '/kxmall-app-ui', dev: true }, backend: null },
+  devDoc: { versions: [{ v: 1, path: '/data/req/r_abc/dev-doc-v1.md', summary: '', at: '' }] },
+  branches: [{ dir: '/kxmall-app-ui', branch: 'req/r_abc-babyFood', baseBranch: 'main' }],
+  designGuidelines: '',
+};
+
+test('buildSeedPrompt：无 featureSnapshot 时不包含快照节', () => {
+  const seed = buildSeedPrompt(mockReqWithSnapshot);
+  assert.ok(!seed.includes('功能快照'));
+});
+
+test('buildSeedPrompt：有 featureSnapshot 时注入快照及开发规范', () => {
+  const snapshot = {
+    tag: '宝宝辅食',
+    files: [
+      { path: 'src/views/BabyFood.vue', count: 3 },
+      { path: 'src/api/babyFood.js', count: 1 },
+    ],
+  };
+  const seed = buildSeedPrompt(mockReqWithSnapshot, { featureSnapshot: snapshot });
+  assert.ok(seed.includes('【功能快照·宝宝辅食】'));
+  assert.ok(seed.includes('src/views/BabyFood.vue（出现 3 次）'));
+  assert.ok(seed.includes('禁止全局 glob/grep'));
+  assert.ok(seed.includes('[快照过期]'));
 });

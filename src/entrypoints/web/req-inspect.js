@@ -13,7 +13,7 @@ import { runClassifierOnce } from '../../features/llm-classify.js';
 import { reviewTask } from '../../plugins/team-tools/review/index.js';
 import { getRequirement, updateRequirement } from '../../store/requirements.js';
 import { getMyFeishuOpenId } from '../../store/settings.js';
-import { resolveTrustedOpenIds } from '../../plugins/team-tools/feedback/logic.js';
+import { resolveTrustedOpenIds } from '../../shared/trusted-ids.js';
 import { config } from '../../shared/config.js';
 import { enqueueSystemTask, raceWithTimeoutFlag } from './requirement-ops.js';
 import { verdictToBug, mergeBugs } from './req-logic.js';

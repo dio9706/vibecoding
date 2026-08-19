@@ -19,7 +19,7 @@ export function scriptsDirFor(env = process.env) {
   return path.join(REPO_ROOT, 'scripts');
 }
 
-/** 逗号分隔 open_id 列表 → 数组（trim + 去空）；OWNER_OPEN_IDS / TRUSTED_OPEN_IDS 共用 */
+/** 逗号分隔 open_id 列表 → 数组（trim + 去空）；OWNER_OPEN_IDS 用 */
 export function parseOpenIdList(raw) {
   return String(raw || '')
     .split(',')
@@ -37,8 +37,9 @@ export const config = {
     appSecret: process.env.LARK_APP_SECRET,
     // owner 白名单（逗号分隔 open_id）→ 完整 Claude 能力
     ownerOpenIds: parseOpenIdList(process.env.OWNER_OPEN_IDS),
-    // 可信提交人白名单（逗号分隔 open_id）→ 需求/故障跳过 AI 评审门，直接进自动开发队列
-    trustedOpenIds: parseOpenIdList(process.env.TRUSTED_OPEN_IDS),
+    // 注：环境变量 TRUSTED_OPEN_IDS 已废弃并从此处移除。可信提交人的唯一来源是
+    // 基础设置里的「我的飞书 open_id」（见 shared/trusted-ids.js 的 resolveTrustedOpenIds）。
+    // 不保留成一个没人读的字段：留着它就等于继续对外承诺一个不生效的开关。
     // 收到消息时随机贴一个「处理中」表情（emoji_type，逗号分隔，可用 env 覆盖）
     // 依次为：稍等 / 在做了 / 敲键盘 / 背叛 / 汗
     reactionEmojis: (process.env.REACTION_EMOJIS || 'OneSecond,OnIt,Typing,BETRAYED,SWEAT')

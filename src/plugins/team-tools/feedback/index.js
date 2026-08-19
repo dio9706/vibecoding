@@ -1,7 +1,7 @@
 /**
  * feature: 需求 / 故障 记录（任何人提交，owner 用强前缀提交时 claude-exec 会让路）。
  * 意图确定后先发即时应答（ackBug/ackFeature，取代原「已收集」文案），让用户第一秒就有反馈。
- * owner / 可信提交人（机器人设置页优先，回退 TRUSTED_OPEN_IDS）：跳过评审与方案生成，
+ * owner / 可信提交人（唯一来源：基础设置的「我的飞书 open_id」，单人）：跳过评审与方案生成，
  *   直接进自动开发队列（不分托管等级）。
  * 轻度托管：即时应答 → 记 Task → 自动分析 → 补一句闭环回复（否则用户等不到任何后续）。
  * 中度/完全托管：先过 AI 评审门（review/）——
@@ -14,7 +14,7 @@ import { analyze, attachMaterialToRecentTask } from '../task-ops.js';
 import { addMaterial, drainMaterials, saveTextMaterial, materialDetailLine } from '../material-pool.js';
 import { reviewTask, recordOverride } from '../review/index.js';
 import { requestAutoDevelop } from '../auto-dev/index.js';
-import { getActiveBot } from '../../../store/settings.js';
+import { getActiveBot, getMyFeishuOpenId } from '../../../store/settings.js';
 import { logger } from '../../../shared/logger.js';
 import { config } from '../../../shared/config.js';
 import { msg } from '../../../shared/messages.js';
@@ -132,7 +132,7 @@ async function onVerdictCardAction(data) {
   if (!task) return done('⚠️ 任务不存在或已被清理。');
   if (
     !canOperateVerdict(parsed.operatorOpenId, task, {
-      trustedOpenIds: resolveTrustedOpenIds(getActiveBot(), config.lark.trustedOpenIds),
+      trustedOpenIds: resolveTrustedOpenIds(getMyFeishuOpenId()),
       ownerOpenIds: config.lark.ownerOpenIds,
     })
   ) {
@@ -250,10 +250,10 @@ export default {
     const autonomy = getActiveBot()?.autonomy || 'light';
     const matsNote = mats.length ? `（已带上材料 ${mats.length} 份）` : '';
 
-    // owner 与可信提交人（机器人设置页优先、回退 TRUSTED_OPEN_IDS）直通：不判断合理性，
+    // owner 与可信提交人（唯一来源：基础设置的「我的飞书 open_id」；env TRUSTED_OPEN_IDS 已废弃不读）直通：不判断合理性，
     // 跳过评审门与方案生成，直接进自动开发队列（独立任务分支改码，泵在 web 进程常驻；
     // 合并仍需管理员确认）。不分托管等级——「本人提的」本就不需要 AI 替我判断该不该做。
-    const trusted = resolveTrustedOpenIds(getActiveBot(), config.lark.trustedOpenIds);
+    const trusted = resolveTrustedOpenIds(getMyFeishuOpenId());
     if (ctx.user.role === 'owner' || trusted.includes(ctx.user.id)) {
       requestAutoDevelop(withMats.id, '可信提交人直通，自动开发');
       logger.info('feedback', '可信提交人直通 → 自动开发', { id: withMats.id, openId: ctx.user.id });

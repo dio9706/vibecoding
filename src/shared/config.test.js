@@ -37,7 +37,7 @@ test('config.autoDev 提供默认编译脚本名', () => {
   assert.equal(config.autoDev.compileScript, 'get_qrcode.py');
 });
 
-// ---- parseOpenIdList 单测（TRUSTED_OPEN_IDS 解析） ----
+// ---- parseOpenIdList 单测（OWNER_OPEN_IDS 解析） ----
 
 test('parseOpenIdList：逗号分隔 + trim + 去空', () => {
   assert.deepEqual(parseOpenIdList('ou_a, ou_b ,,ou_c'), ['ou_a', 'ou_b', 'ou_c']);
