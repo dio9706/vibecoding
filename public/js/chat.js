@@ -1145,6 +1145,9 @@ export function renderConvListNow() {
           } else if (kind === 'dir') {
             // 目录
             fragment.appendChild(makePathChip(match.path, 'dir'));
+          } else if (kind === 'markdown') {
+            // Markdown 文件
+            fragment.appendChild(makePathChip(match.path, 'markdown'));
           } else {
             // 文件（默认）
             fragment.appendChild(makePathChip(match.path, 'file'));
