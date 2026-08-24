@@ -945,6 +945,13 @@ export function renderConvListNow() {
       }
 
       /**
+       * 判断是否为 Markdown 文件扩展名
+       */
+      function isMarkdownPath(path) {
+        return /\.(md|markdown)$/i.test(path);
+      }
+
+      /**
        * 把本地绝对路径转成 WebView 能加载的 URL。
        *
        * convertFileSrc 在 Tauri v2 里属于 core 模块，旧代码写的 __TAURI__.path
