@@ -65,6 +65,7 @@ import {
 } from './routes-files.js';
 import { handleRequirementRoutes } from './routes-requirements.js';
 import { handleMemoryRoutes } from './routes-memory.js';
+import { handleOptimizeRoutes } from './routes-optimize.js';
 import { handleConvNotifyRoutes } from './routes-conv-notify.js';
 import { startConvNotify } from './conv-notify.js';
 import {
@@ -166,6 +167,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname.startsWith('/api/req/')) return handleRequirementRoutes(req, res, url);
   if (url.pathname.startsWith('/api/memory/')) return handleMemoryRoutes(req, res, url);
+  if (url.pathname.startsWith('/api/optimize/')) return handleOptimizeRoutes(req, res, url);
   if (url.pathname === '/api/settings') return handleSettings(req, res);
   if (url.pathname === '/api/settings/export') return handleSettingsExport(req, res);
   if (url.pathname === '/api/settings/import') return handleSettingsImport(req, res);

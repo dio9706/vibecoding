@@ -391,10 +391,14 @@ export function cancelPendingAsks(run) {
   fanout(run, 'ask', null);
 }
 /** done 广播公共字段：附带未消费的持有消息 id（前端标「未发送」）并清空持有区。
- *  ids 同时留存到 run.unsentIds：关页期间终结的 run，重连 attach 补发 done 时据此恢复标记 */
+ *  ids 同时留存到 run.unsentIds：关页期间终结的 run，重连 attach 补发 done 时据此恢复标记。
+ *  full message 保留到 run.unsentMsgs：conv-notify 的 onRunSettled 据此对 web UI 直发的插话
+ *  做自动重注入（entry.inbox 只有飞书注入的消息，web 插话只存在 heldMsgs 里）。 */
 function unsentField(run) {
   if (!run.heldMsgs || !run.heldMsgs.length) return {};
-  run.unsentIds = run.heldMsgs.splice(0).map((m) => m.id);
+  const msgs = run.heldMsgs.splice(0);
+  run.unsentIds = msgs.map((m) => m.id);
+  run.unsentMsgs = msgs; // 保留全量 {id,text}，供 onRunSettled 自动重注入时兜底
   return { unsent: run.unsentIds };
 }
 

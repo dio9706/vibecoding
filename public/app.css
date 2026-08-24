@@ -3761,3 +3761,51 @@
   background: var(--panel);
   border-color: var(--border);
 }
+
+/* ===== 项目优化面板 ===== */
+.opt-body { padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+
+.opt-picker { display: flex; align-items: center; gap: 8px; }
+.opt-picker label { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.opt-picker input { flex: 1; padding: 6px 10px; }
+
+.opt-score { display: flex; align-items: center; gap: 16px; }
+.opt-ring {
+  width: 96px; height: 96px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  border: 6px solid var(--faint);
+  transition: border-color .3s ease;
+}
+.opt-ring.is-healthy { border-color: var(--green); }
+.opt-ring.is-good { border-color: var(--accent-hi); }
+.opt-ring.is-needs-work { border-color: var(--amber); }
+.opt-ring.is-poor { border-color: var(--red); }
+.opt-ring-num { font-size: 28px; font-weight: 600; }
+
+.opt-score-side { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.opt-grade { font-size: 15px; font-weight: 600; }
+.opt-issue-count, .opt-last-at { color: var(--muted); font-size: 12px; }
+
+.opt-dims { display: flex; flex-direction: column; gap: 8px; }
+
+.opt-dim { border: 1px solid var(--faint); border-radius: 6px; padding: 10px 12px; }
+.opt-dim.is-disabled { opacity: .45; }
+.opt-dim-head { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.opt-dim-head input[type="checkbox"] { cursor: pointer; }
+.opt-dim-label { font-weight: 500; }
+.opt-dim-hint { color: var(--muted); font-size: 12px; flex: 1; }
+.opt-dim-score { font-size: 18px; font-weight: 600; min-width: 36px; text-align: right; }
+.opt-dim-badge { color: var(--muted); font-size: 12px; }
+
+.opt-issues { margin-top: 8px; display: none; flex-direction: column; gap: 4px; }
+.opt-dim.is-open .opt-issues { display: flex; }
+.opt-issue { display: flex; gap: 8px; font-size: 12px; align-items: baseline; }
+.opt-issue-sev { min-width: 40px; }
+.opt-issue-sev.sev-error { color: var(--red); }
+.opt-issue-sev.sev-warn { color: var(--amber); }
+.opt-issue-sev.sev-info { color: var(--muted); }
+.opt-issue-loc { color: var(--accent-hi); white-space: nowrap; }
+.opt-issue-msg { color: var(--muted); }
+
+.opt-actions { display: flex; align-items: center; gap: 12px; }
+.opt-phase-note { color: var(--muted); font-size: 12px; }

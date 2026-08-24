@@ -37,6 +37,7 @@ active-runs.json
 pending-resume.json
 conv-notify.json
 learned-keywords.json
+optimize.json
 
 # ---- 动作配置（本地运维配置 + 执行脚本）----
 # scripts/ 内含 reset_onboarding.py 等，可能硬编码后台账密，切勿入库

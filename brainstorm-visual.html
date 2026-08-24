@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>需求开发期 UI 优化 - 可视化设计</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        h1 { text-align: center; margin-bottom: 30px; color: #333; }
+
+        .comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 40px; }
+        .panel { background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); overflow: hidden; }
+        .panel-title { background: #f0f0f0; padding: 12px 16px; font-weight: bold; border-bottom: 1px solid #e0e0e0; }
+        .panel-content { padding: 16px; }
+
+        /* API 文档列表样式 */
+        .req-rail-sec { margin-bottom: 20px; }
+        .req-rail-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .req-rail-head b { font-size: 14px; font-weight: 600; }
+        .q-btn { padding: 6px 12px; border: none; background: #007bff; color: white; border-radius: 4px; cursor: pointer; font-size: 12px; }
+        .q-btn:hover { background: #0056b3; }
+        .q-btn.q-btn-text { background: transparent; color: #007bff; padding: 4px 8px; }
+        .q-btn.q-btn-text:hover { background: #f0f0f0; }
+
+        .req-apidoc-list { border: 1px solid #e0e0e0; border-radius: 4px; background: #fafafa; }
+        .req-apidoc-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #e0e0e0; }
+        .req-apidoc-item:last-child { border-bottom: none; }
+        .req-apidoc-item .name { flex: 1; font-family: monospace; font-size: 13px; color: #333; word-break: break-all; }
+        .req-apidoc-item .actions { display: flex; gap: 8px; align-items: center; }
+        .req-apidoc-item .actions button { padding: 4px 8px; font-size: 12px; background: transparent; border: 1px solid #ccc; border-radius: 3px; cursor: pointer; }
+        .req-apidoc-item .actions button:hover { background: #f0f0f0; }
+        .req-apidoc-item .actions .replace-btn { color: #666; }
+        .req-apidoc-item .actions .delete-btn { color: #d9534f; }
+
+        .req-rail-empty { padding: 20px 16px; text-align: center; color: #999; font-size: 13px; }
+
+        /* 设计准则样式 */
+        .req-guidelines-section { margin-bottom: 20px; }
+        .req-guidelines-section b { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 600; }
+        textarea { width: 100%; border: 1px solid #d0d0d0; border-radius: 4px; padding: 12px; font-size: 12px; font-family: monospace; resize: vertical; min-height: 100px; }
+        textarea:focus { outline: none; border-color: #007bff; }
+
+        .req-guidelines-confirm { display: block; width: 100%; margin-top: 8px; padding: 8px 12px; background: #28a745; color: white; border: none; border-radius: 4px; font-size: 12px; cursor: pointer; }
+        .req-guidelines-confirm:hover { background: #218838; }
+
+        .removed { opacity: 0.5; }
+        .removed-bg { background: #ffe0e0; }
+
+        .badge { display: inline-block; background: #e0e0e0; color: #666; padding: 2px 8px; border-radius: 3px; font-size: 11px; margin-left: 8px; }
+        .badge.new { background: #d4edda; color: #155724; }
+
+        /* 说明文字 */
+        .note { background: #e7f3ff; border-left: 4px solid #2196f3; padding: 12px 16px; margin-top: 16px; font-size: 13px; line-height: 1.6; color: #333; border-radius: 2px; }
+        .note strong { color: #1565c0; }
+
+        .section-title { font-size: 16px; font-weight: bold; margin: 30px 0 20px; color: #333; }
+
+        @media (max-width: 900px) {
+            .comparison { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📋 需求开发期 UI 优化设计</h1>
+
+        <!-- 功能 2: API 文档替换 -->
+        <div class="section-title">功能 1️⃣：API 文档管理 - 支持点击替换更新</div>
+        <div class="comparison">
+            <div class="panel">
+                <div class="panel-title">优化前 - 仅能新增</div>
+                <div class="panel-content">
+                    <div class="req-rail-sec">
+                        <div class="req-rail-head">
+                            <b>📚 后端 API 文档（3）</b>
+                            <button class="q-btn q-btn-text">＋上传</button>
+                        </div>
+                        <div class="req-apidoc-list">
+                            <div class="req-apidoc-item">
+                                <span class="name">user-api.yaml</span>
+                                <div class="actions">
+                                    <button class="delete-btn">✕</button>
+                                </div>
+                            </div>
+                            <div class="req-apidoc-item">
+                                <span class="name">order-api.yaml</span>
+                                <div class="actions">
+                                    <button class="delete-btn">✕</button>
+                                </div>
+                            </div>
+                            <div class="req-apidoc-item">
+                                <span class="name">payment-api.yaml</span>
+                                <div class="actions">
+                                    <button class="delete-btn">✕</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="note">
+                        <strong>问题：</strong>用户若要更新文档，只能先删除旧版本，再上传新版本。历史操作链条长，容易出错。
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">✨ 优化后 - 支持点击替换</div>
+                <div class="panel-content">
+                    <div class="req-rail-sec">
+                        <div class="req-rail-head">
+                            <b>📚 后端 API 文档（3）</b>
+                            <button class="q-btn q-btn-text">＋上传</button>
+                        </div>
+                        <div class="req-apidoc-list">
+                            <div class="req-apidoc-item">
+                                <span class="name">user-api.yaml</span>
+                                <div class="actions">
+                                    <button class="replace-btn" title="点击选择新文件替换">🔄</button>
+                                    <button class="delete-btn">✕</button>
+                                </div>
+                            </div>
+                            <div class="req-apidoc-item">
+                                <span class="name">order-api.yaml</span>
+                                <div class="actions">
+                                    <button class="replace-btn" title="点击选择新文件替换">🔄</button>
+                                    <button class="delete-btn">✕</button>
+                                </div>
+                            </div>
+                            <div class="req-apidoc-item">
+                                <span class="name">payment-api.yaml</span>
+                                <div class="actions">
+                                    <button class="replace-btn" title="点击选择新文件替换">🔄</button>
+                                    <button class="delete-btn">✕</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="note">
+                        <strong>改进：</strong>每条文档都有「🔄 替换」按钮，点击直接更新到最新版本，操作简洁。后端自动识别为"更新"而非"新增"，不产生重复。
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 功能 1: 设计准则移除 -->
+        <div class="section-title">功能 2️⃣：移除设计准则输入框和确认按钮</div>
+        <div class="comparison">
+            <div class="panel">
+                <div class="panel-title">优化前 - 包含设计准则</div>
+                <div class="panel-content">
+                    <div class="req-rail-sec">
+                        <div class="req-rail-head">
+                            <b>📚 后端 API 文档（3）</b>
+                            <button class="q-btn q-btn-text">＋上传</button>
+                        </div>
+                        <div class="req-apidoc-list" style="margin-bottom: 16px;">
+                            <div class="req-apidoc-item">
+                                <span class="name">api.yaml</span>
+                                <div class="actions">
+                                    <button class="delete-btn">✕</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="req-rail-sec">
+                        <b>🎨 设计准则</b>
+                        <textarea placeholder="主色、圆角、间距等约定，开发时注入给 AI…">主色：#007bff
+圆角半径：4px
+字体：系统字体，sans-serif
+间距：8px 为基础单位</textarea>
+                        <button class="req-guidelines-confirm">✓ 确认发送</button>
+                    </div>
+
+                    <div class="note">
+                        <strong>情况：</strong>用户可编辑设计准则，点击"确认发送"将内容发送给 Claude 参考。但实际使用中此功能鸡肋，用处不大。
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">✨ 优化后 - 移除设计准则UI</div>
+                <div class="panel-content">
+                    <div class="req-rail-sec">
+                        <div class="req-rail-head">
+                            <b>📚 后端 API 文档（3）</b>
+                            <button class="q-btn q-btn-text">＋上传</button>
+                        </div>
+                        <div class="req-apidoc-list">
+                            <div class="req-apidoc-item">
+                                <span class="name">api.yaml</span>
+                                <div class="actions">
+                                    <button class="replace-btn">🔄</button>
+                                    <button class="delete-btn">✕</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="note" style="margin-top: 30px;">
+                        <strong>改进：</strong>删除"🎨 设计准则"输入框和"✓ 确认发送"按钮，界面更简洁。若需要设计准则，可在会话中直接告诉 Claude（更自然）。
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 技术细节 -->
+        <div class="section-title">🔧 技术实现细节</div>
+        <div class="panel">
+            <div class="panel-title">实现要点</div>
+            <div class="panel-content">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div>
+                        <h4 style="margin-bottom: 12px; color: #333;">API 文档替换</h4>
+                        <ul style="font-size: 13px; line-height: 1.8; margin-left: 20px;">
+                            <li><strong>前端改动：</strong>每条文档加"🔄"按钮</li>
+                            <li><strong>参数化上传：</strong>替换时用 `doc.name`，新增用 `file.name`</li>
+                            <li><strong>后端识别：</strong>按 `name` 主键，自动判断"更新"或"新增"</li>
+                            <li><strong>复用流程：</strong>现有两段式上传、epoch 守卫、refreshRail</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h4 style="margin-bottom: 12px; color: #333;">设计准则移除</h4>
+                        <ul style="font-size: 13px; line-height: 1.8; margin-left: 20px;">
+                            <li><strong>前端改动：</strong>删除输入框+按钮（4-5 行）</li>
+                            <li><strong>后端保留：</strong>`designGuidelines` 字段、PUT 路由</li>
+                            <li><strong>提示词保留：</strong>历史值仍会注入给 Claude</li>
+                            <li><strong>数据风险：</strong>零——仅删除 UI，后端完全兼容</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 工作量估计 -->
+        <div class="section-title">📊 工作量估计</div>
+        <div class="panel">
+            <div class="panel-content">
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                    <tr style="border-bottom: 2px solid #e0e0e0;">
+                        <th style="text-align: left; padding: 12px; background: #f5f5f5;">任务</th>
+                        <th style="text-align: center; padding: 12px; background: #f5f5f5;">涉及文件</th>
+                        <th style="text-align: center; padding: 12px; background: #f5f5f5;">改动行数</th>
+                        <th style="text-align: center; padding: 12px; background: #f5f5f5;">预计时间</th>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #e0e0e0;">
+                        <td style="padding: 12px;">API 文档 - 替换按钮</td>
+                        <td style="text-align: center; padding: 12px;"><code>public/js/req-chat.js</code></td>
+                        <td style="text-align: center; padding: 12px;">~30 行</td>
+                        <td style="text-align: center; padding: 12px;">10-15 min</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #e0e0e0;">
+                        <td style="padding: 12px;">API 文档 - 参数化上传</td>
+                        <td style="text-align: center; padding: 12px;"><code>public/js/req-chat.js</code></td>
+                        <td style="text-align: center; padding: 12px;">~20 行</td>
+                        <td style="text-align: center; padding: 12px;">10 min</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #e0e0e0;">
+                        <td style="padding: 12px;">API 文档 - 单测更新</td>
+                        <td style="text-align: center; padding: 12px;"><code>public/js/req-chat.apidoc.test.js</code></td>
+                        <td style="text-align: center; padding: 12px;">~10 行</td>
+                        <td style="text-align: center; padding: 12px;">5 min</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #e0e0e0;">
+                        <td style="padding: 12px;">设计准则 - 删除 UI</td>
+                        <td style="text-align: center; padding: 12px;"><code>public/js/req-chat.js</code></td>
+                        <td style="text-align: center; padding: 12px;">~5 行</td>
+                        <td style="text-align: center; padding: 12px;">2 min</td>
+                    </tr>
+                    <tr style="background: #f9f9f9;">
+                        <td style="padding: 12px; font-weight: bold;">合计</td>
+                        <td style="text-align: center; padding: 12px;"></td>
+                        <td style="text-align: center; padding: 12px;">~65 行</td>
+                        <td style="text-align: center; padding: 12px;"><strong>30-35 min</strong></td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

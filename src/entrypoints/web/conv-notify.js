@@ -56,9 +56,17 @@ function onRunSettled(run) {
     const creds = { appId: bot.appId, appSecret: bot.appSecret };
 
     // 若有未发送的持有消息，自动重新注入
-    if (run.unsentIds && run.unsentIds.length && entry.inbox && entry.inbox.length) {
+    if (run.unsentIds && run.unsentIds.length) {
       const unsentSet = new Set(run.unsentIds);
-      const toResend = entry.inbox.filter((item) => unsentSet.has(item.id));
+
+      // 优先从 entry.inbox 找原文（飞书侧注入的消息 pushInjection 时已落盘）
+      let toResend = Array.isArray(entry.inbox) ? entry.inbox.filter((item) => unsentSet.has(item.id)) : [];
+
+      // 兜底：web UI 直发的插话只存在 run.unsentMsgs（未写入 entry.inbox），从这里补齐
+      if (!toResend.length && Array.isArray(run.unsentMsgs) && run.unsentMsgs.length) {
+        toResend = run.unsentMsgs.filter((m) => unsentSet.has(m.id));
+      }
+
       if (toResend.length) {
         // 将所有未发送的消息（可能是多条）拼接成一个 prompt 重新注入
         const combinedText = toResend.map((item) => item.text).join('\n\n');

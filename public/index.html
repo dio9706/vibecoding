@@ -58,6 +58,13 @@
               <span class="tool-item-desc">我的偏好 · 待确认与已生效</span>
             </span>
           </button>
+          <button class="tool-item" id="toolOptimize" data-tool="optimize">
+            <span class="tool-item-icon">🩺</span>
+            <span class="tool-item-body">
+              <span class="tool-item-title">项目优化</span>
+              <span class="tool-item-desc">体检并修复拖慢 AI 的配置问题</span>
+            </span>
+          </button>
           <button class="tool-item" id="toolMarkdown" data-tool="markdown">
             <span class="tool-item-icon">📄</span>
             <span class="tool-item-body">
@@ -470,6 +477,40 @@
             <button class="btn" id="memExportBtn">导出</button>
           </div>
           <div id="memBody"></div>
+        </div>
+
+        <div class="panel-page" data-view="optimize" hidden>
+          <div class="panel-head">
+            <h3>项目优化</h3>
+            <button class="panel-close" title="返回对话">✕</button>
+          </div>
+
+          <div class="opt-body">
+            <div class="opt-picker">
+              <label for="optDirInput">项目目录</label>
+              <input id="optDirInput" type="text" placeholder="选择或输入项目绝对路径" />
+              <button id="optPickDir" class="btn">浏览…</button>
+            </div>
+
+            <div class="opt-score">
+              <div class="opt-ring" id="optRing">
+                <span class="opt-ring-num" id="optScoreNum">--</span>
+              </div>
+              <div class="opt-score-side">
+                <div class="opt-grade" id="optGrade">未体检</div>
+                <div class="opt-issue-count" id="optIssueCount"></div>
+                <div class="opt-last-at" id="optLastAt"></div>
+              </div>
+              <button id="optRunCheckup" class="btn primary">体检</button>
+            </div>
+
+            <div class="opt-dims" id="optDims"></div>
+
+            <div class="opt-actions">
+              <button id="optFix" class="btn primary" disabled>一键优化</button>
+              <span class="opt-phase-note">阶段一仅支持体检，一键优化即将开放</span>
+            </div>
+          </div>
         </div>
 
         <div class="panel-page" data-view="json-tool" hidden>

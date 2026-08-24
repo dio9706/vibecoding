@@ -14,6 +14,7 @@ import { bindConvNotify } from './js/conv-notify.js';
 import { initReqView, refreshReqList, renderReqListLocal } from './js/req-view.js';
 import { initReqChat } from './js/req-chat.js';
 import { initMemoryPanel, refreshMemBadge } from './js/memory-view.js';
+import { initOptimizePanel } from './js/optimize-view.js';
 import toast from './js/toast.js';
 
 // 初始化 Toast 组件
@@ -52,6 +53,7 @@ bindConvNotify({ applyInjected: applyInjectedItems, getCurrentConvId }); // 🔔
         } else if (name === 'logs') loadLogs();
         else if (name === 'json-tool') initJsonTool();
         else if (name === 'memory') initMemoryPanel();
+        else if (name === 'optimize') initOptimizePanel();
         refreshAskChip(); // 视图切换后重新判定顶栏审批徽标是否显示
         // 视图切换时清除对方列表的选中态
         if (name === 'chat') {
@@ -102,6 +104,8 @@ bindConvNotify({ applyInjected: applyInjectedItems, getCurrentConvId }); // 🔔
         $('#toolJson')?.addEventListener('click', () => showView('json-tool'));
         // 工具项：记忆库 → 主区打开面板
         $('#toolMemory')?.addEventListener('click', () => showView('memory'));
+        // 工具项：项目优化 → 主区打开体检面板
+        $('#toolOptimize')?.addEventListener('click', () => showView('optimize'));
         // 工具项：Markdown 查看工具 → 主区打开面板（panelView 开关由 showView 统一管理）
         $('#toolMarkdown')?.addEventListener('click', () => showView('markdown'));
       })();
