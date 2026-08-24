@@ -1014,6 +1014,13 @@ export function renderConvListNow() {
         chip.appendChild(icon);
         chip.appendChild(name);
 
+        // Markdown 文件使用专属样式和 icon
+        if (kind === 'markdown') {
+          chip.classList.add('path-markdown');
+          icon.textContent = '📝';
+          chip.title = '点击用 Markdown 查看器打开';
+        }
+
         // 绑定点击事件
         chip.addEventListener('click', (e) => {
           e.stopPropagation();
