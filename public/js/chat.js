@@ -1037,6 +1037,18 @@ export function renderConvListNow() {
        * 那个写法在根目录、结尾带分隔符时会算出空串。
        */
       async function handlePathChipClick(path) {
+        // Markdown 文件快速打开：直接跳查看器
+        if (isMarkdownPath(path) && _openMarkdown) {
+          try {
+            _openMarkdown(path);
+            return;
+          } catch (err) {
+            console.error('打开 Markdown 失败:', err);
+            toast('打开 Markdown 失败：' + (err?.message || err));
+          }
+        }
+
+        // 后续原有逻辑（Tauri 定位 / Web 复制）
         if (!window.tauriApi?.revealPath) {
           // Web 模式：复制路径
           try {
