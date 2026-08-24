@@ -50,6 +50,12 @@ export function bindChatNav(goChat, isActiveFn) {
 let _reqConvHook = null;
 export function bindReqConvHook(fn) { _reqConvHook = fn; }
 
+// 视图桥：Markdown 打开逻辑（切换视图 + 打开文件）
+let _openMarkdown = null;
+export function bindMarkdownNav(fn) {
+  _openMarkdown = fn;
+}
+
       // ============================================================
       // 页面逻辑
       // ============================================================
