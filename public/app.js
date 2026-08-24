@@ -9,7 +9,7 @@ import './js/actions-panel.js'; // 副作用：动作配置面板自绑定
 import './js/bots-panel.js'; // 副作用：机器人面板自绑定（托管配置 tab）
 import './js/sidebar.js'; // 副作用：侧边栏展开/收起自初始化
 import { startTaskPolling, stopTaskPolling, requestNotifyPermission, refreshTaskBadge, bindTasksNav } from './js/tasks-panel.js';
-import { initChat, chatOnShow, bindChatNav, refreshAskChip, openConv, renderConvListNow, applyInjectedItems, getCurrentConvId } from './js/chat.js';
+import { initChat, chatOnShow, bindChatNav, bindMarkdownNav, refreshAskChip, openConv, renderConvListNow, applyInjectedItems, getCurrentConvId } from './js/chat.js';
 import { bindConvNotify } from './js/conv-notify.js';
 import { initReqView, refreshReqList, renderReqListLocal } from './js/req-view.js';
 import { initReqChat } from './js/req-chat.js';
@@ -157,5 +157,12 @@ bindConvNotify({ applyInjected: applyInjectedItems, getCurrentConvId }); // 🔔
       let markdownTool;
       document.addEventListener('DOMContentLoaded', () => {
         markdownTool = new MarkdownTool();
+
+        // 注入 Markdown 打开逻辑（视图桥）
+        bindMarkdownNav((path) => {
+          showView('markdown');
+          markdownTool.openFileByPath(path);
+        });
+
         console.log('Markdown 工具已初始化');
       });
