@@ -1066,6 +1066,7 @@ export function renderConvListNow() {
        */
       function classifyPath(path) {
         if (isImagePath(path)) return 'image';
+        if (isMarkdownPath(path)) return 'markdown';
         // 只看最后一段，且要求扩展名前有字符——否则 C:\Users\DELL\.uploads
         // 这种点开头的目录会被当成文件
         return /[^.\\/]\.[A-Za-z0-9]{1,8}$/.test(getPathName(path)) ? 'file' : 'dir';
