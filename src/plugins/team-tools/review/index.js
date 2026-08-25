@@ -31,8 +31,12 @@ export async function reviewTask(task) {
       {
         ...claudeAuthOpts(),
         cwd: projectDir,
-        permissionMode: 'default',
-        allowedTools: ['Read', 'Grep', 'Glob'], // 只读查证，物理上无法改码
+        // dontAsk + allowedTools 才是真正的只读闸。allowedTools 本身只是「免确认」，
+        // 不构成限制——文档原文：其余工具「still exist and fall through to the permission mode」。
+        // 之前是 default，未列出的工具靠「恰好没传 canUseTool 回调」才被拒；
+        // 哪天有人加了回调或改成 bypassPermissions，只读保证会静默失效。
+        permissionMode: 'dontAsk',
+        allowedTools: ['Read', 'Grep', 'Glob'], // 只读查证
         persistSession: false, // 内部一次性调用不落盘 session
         onText: (t) => (out += t),
         onResult: (i) => {

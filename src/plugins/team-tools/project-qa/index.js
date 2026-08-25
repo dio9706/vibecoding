@@ -70,8 +70,10 @@ export default {
         {
           ...claudeAuthOpts(), // 跟随备用账号轮换
           cwd,
-          permissionMode: 'default',
-          allowedTools: ['Read', 'Grep', 'Glob'], // 只读，物理上无法改码
+          // dontAsk：未列出的工具直接拒绝，不再依赖「没传 canUseTool 回调」这个隐含前提。
+          // allowedTools 单用只是免确认，挡不住 Write/Edit/Bash（见 review/index.js 注释）。
+          permissionMode: 'dontAsk',
+          allowedTools: ['Read', 'Grep', 'Glob'], // 只读
           persistSession: false, // 单轮问答不落盘 session
           abortController: abort,
           ...(append ? { systemPrompt: { type: 'preset', preset: 'claude_code', append } } : {}),

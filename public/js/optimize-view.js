@@ -6,10 +6,13 @@
  */
 import { $, lsGet, lsSet } from './util.js';
 import { dimListFrom } from './optimize-view.logic.js';
+import { openDirPickerFor } from './dir-popover.js';
 import toast from './toast.js';
 
 let inited = false;
 let currentReport = null;
+/** 当前选中的体检目录。单例状态而非从 DOM 读——选择器已改成弹层式按钮，没有可读的 input */
+let currentDir = '';
 
 const GRADE_LABEL = {
   healthy: '健康',
@@ -117,9 +120,37 @@ async function loadReport(dir) {
   render();
 }
 
+/** 同步目录按钮的文案：无目录给引导语；有目录显示全路径，超宽由 CSS 截断，title 兜住全路径 */
+function refreshDirLabel() {
+  const label = $('#optDirLabel');
+  const btn = $('#optDirBtn');
+  if (!label) return;
+  label.textContent = currentDir || '选择项目目录';
+  if (btn) btn.title = currentDir || '选择要体检的项目目录';
+}
+
+/** 应用一个新目录：落盘 lastDir + 刷新标签 + 拉该目录的历史报告 */
+function applyDir(p) {
+  currentDir = p || '';
+  if (currentDir) lsSet('optimize.lastDir', currentDir);
+  refreshDirLabel();
+  loadReport(currentDir);
+}
+
+/**
+ * 借用顶栏那套目录弹层。
+ * 不能直接复用 chat 注入的 selectDir——它带「一窗一项目」逻辑，选不同目录会开新窗口。
+ */
+function pickDir() {
+  openDirPickerFor({
+    getCwd: () => currentDir,
+    selectDir: applyDir,
+  });
+}
+
 async function runCheckup() {
-  const dir = $('#optDirInput').value.trim();
-  if (!dir) { toast.error('请先填写项目目录'); return; }
+  const dir = currentDir;
+  if (!dir) { toast.error('请先选择项目目录'); return; }
 
   const btn = $('#optRunCheckup');
   btn.disabled = true;
@@ -144,32 +175,15 @@ async function runCheckup() {
   }
 }
 
-/** 系统原生文件夹选择框：复用 /api/dirs/pick（GET，返回 {path}），与设置面板选目录同一接口 */
-async function pickDir() {
-  try {
-    const r = await fetch('/api/dirs/pick');
-    const data = await r.json();
-    if (!r.ok) { toast.error(data.error || '无法打开系统目录选择框'); return; }
-    if (data.path) {
-      $('#optDirInput').value = data.path;
-      lsSet('optimize.lastDir', data.path);
-      loadReport(data.path);
-    }
-  } catch (e) {
-    toast.error('无法打开系统目录选择框：' + (e?.message || e));
-  }
-}
-
 export function initOptimizePanel() {
   if (!inited) {
     inited = true;
     $('#optRunCheckup')?.addEventListener('click', runCheckup);
-    $('#optDirInput')?.addEventListener('change', (e) => loadReport(e.target.value.trim()));
-    $('#optPickDir')?.addEventListener('click', pickDir);
+    $('#optDirBtn')?.addEventListener('click', pickDir);
 
-    const last = lsGet('optimize.lastDir');
-    if (last) $('#optDirInput').value = last;
+    currentDir = lsGet('optimize.lastDir') || '';
   }
 
-  loadReport($('#optDirInput').value.trim());
+  refreshDirLabel(); // 面板每次打开都同步一次标签，避免 DOM 被重建后文案回退
+  loadReport(currentDir);
 }

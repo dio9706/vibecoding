@@ -35,10 +35,56 @@ promptEl?.addEventListener('paste', (e) => {
           .trim();
       }
       export function clearPrompt() {
+        cancelPendingDraft(); // 已发送/已丢弃：挂起的草稿写回作废，否则会把刚清掉的内容又存回去
         promptEl.querySelectorAll('.att-chip img').forEach((img) => {
           if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
         });
         promptEl.innerHTML = '';
+      }
+
+      // ---- 按会话隔离的草稿：#prompt 是页面级单例，切会话必须「存旧 → 清 → 回填新」----
+      let _draftTimer = null;
+      let _onDraftChange = null;
+
+      /** 取走当前输入框内容并清空，返回 HTML 快照（供调用方存进会话记录）。
+       *  不复用 clearPrompt：它会 revokeObjectURL 掉附件 chip 的缩略图 blob，
+       *  而草稿要能切回来继续看，blob 必须留活。此处只摘走 DOM，不动 blob 生命周期。 */
+      export function stashPrompt() {
+        cancelPendingDraft(); // 关键：挂起的写回会在切换后执行，那时 currentConvId 已是新会话 → 旧草稿串进新会话
+        const html = promptEl ? promptEl.innerHTML : '';
+        if (promptEl) promptEl.innerHTML = '';
+        return html;
+      }
+
+      /** 回填草稿快照。innerHTML 赋值不触发 input 事件，故不会反向触发一次草稿写回。 */
+      export function restorePrompt(html) {
+        if (!promptEl) return;
+        cancelPendingDraft();
+        promptEl.innerHTML = html || '';
+        // makeChip 的 onerror 只挂在新建节点上，innerHTML 重建的节点没有它。
+        // 页面刷新后 blob: URL 必然失效（跨刷新不存活），不补挂就是一排裂图；
+        // 与 makeChip 同策略：只把预览降级成 📄，dataset.path 与文件名原样保留。
+        promptEl.querySelectorAll('.att-chip img').forEach((img) => {
+          img.onerror = () => img.replaceWith(makeFileIcon());
+          if (img.complete && img.naturalWidth === 0) img.replaceWith(makeFileIcon()); // 已加载失败的不再触发 onerror
+        });
+      }
+
+      /** 注册草稿变更回调（debounce 300ms）。回调由 chat.js 注入，写入当前会话记录。 */
+      export function bindComposerDraft(onDraftChange) {
+        _onDraftChange = onDraftChange;
+        promptEl?.addEventListener('input', () => {
+          clearTimeout(_draftTimer);
+          _draftTimer = setTimeout(() => {
+            _draftTimer = null;
+            _onDraftChange?.(promptEl.innerHTML);
+          }, 300);
+        });
+      }
+
+      function cancelPendingDraft() {
+        clearTimeout(_draftTimer);
+        _draftTimer = null;
       }
       // 抽成函数是因为图片加载失败时要拿它替换掉裂图（见 makeChip 的 onerror），两处必须一致
       function makeFileIcon() {

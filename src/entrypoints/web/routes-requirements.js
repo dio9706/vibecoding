@@ -1,13 +1,14 @@
 /** web 入口：需求工作流 HTTP 路由 —— 单入口 handleRequirementRoutes 按 pathname+method 分发 */
 import fs from 'node:fs';
 import { getRequirement, getRequirements, updateRequirement, createRequirement, canTransition, normalizeSessions } from '../../store/requirements.js';
-import { enqueueSystemTask, finalizeRequirement, archiveRequirement, hasQueuedTasks, reqDir, DOCGEN_GUIDE } from './requirement-ops.js';
+import { enqueueSystemTask, finalizeRequirement, archiveRequirement, hasQueuedTasks, reqDir, readMapVersion, DOCGEN_GUIDE } from './requirement-ops.js';
 import { pickCwdAndDirs, buildSeedPrompt } from './req-logic.js';
 import { getTopFiles, getFeatureIndex } from '../../store/feature-index.js';
 import { writePitfalls, ensureClaudeMdRef } from './req-pitfalls.js';
 import { inspectBitable, confirmBug, ignoreBug, retryBug, currentInspectIdentity } from './req-inspect.js';
 import { parseBitableLink } from '../../plugins/team-tools/bug-patrol/logic.js';
 import { hasActiveRunForConv } from '../../store/runs.js';
+import { handleReqV2Routes } from './routes-req-v2.js';
 import { sendJson } from './http-util.js';
 import { withJsonBody } from './body.js';
 import { str } from './input.js';
@@ -69,6 +70,8 @@ function handleGet(url, res) {
   sendJson(res, 200, {
     ...r,
     devDocLatest,
+    // 地图一并带回，省掉前端「拿到需求再拉一次地图」的第二跳（busy 轮询每 3s 一次，多一跳就是多一倍请求）
+    mapLatest: readMapVersion(r),
     queued: hasQueuedTasks(id),
     devCwd: pickCwdAndDirs(r.projects).cwd,
     sessions: normalizeSessions(r),
@@ -614,6 +617,8 @@ function handleFeatureIndex(res) {
 export function handleRequirementRoutes(req, res, url) {
   const { pathname } = url;
   const { method } = req;
+  // 需求 v2（问卷/地图/变动/UI 规范）单独成文件，命中即返回；未命中落回下面的原分发表
+  if (handleReqV2Routes(req, res, url, pathname, method)) return;
   if (pathname === '/api/req/create' && method === 'POST') return handleCreate(req, res);
   if (pathname === '/api/req/list' && method === 'GET') return handleList(res);
   if (pathname === '/api/req/get' && method === 'GET') return handleGet(url, res);

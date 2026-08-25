@@ -3,10 +3,38 @@
 import { $ } from './util.js';
 import { toast } from './ui.js';
 
+let _defaults = { getCwd: () => '', selectDir: () => {} };
 let _getCwd = () => '';
 let _selectDir = () => {};
 /** 注入 cwd 读取器与目录应用回调（app.js 在 import 后立即调用） */
-export function bindDirPopover({ getCwd, selectDir }) { _getCwd = getCwd; _selectDir = selectDir; }
+export function bindDirPopover({ getCwd, selectDir }) {
+  _defaults = { getCwd, selectDir };
+  _getCwd = getCwd;
+  _selectDir = selectDir;
+}
+
+/** 恢复默认宿主（chat）的绑定 */
+function restoreDefaults() {
+  _getCwd = _defaults.getCwd;
+  _selectDir = _defaults.selectDir;
+}
+
+/**
+ * 供其它面板临时借用目录弹层。
+ *
+ * 为什么需要它：_getCwd/_selectDir 是模块级单例，chat.js 已经占用；
+ * 而 chat 的 selectDir 带「一窗一项目」逻辑（选不同目录会开新窗口），
+ * 其它面板直接复用会误触发。弹层是模态的，同一时刻只有一个宿主在用，
+ * 时序上安全；借用期结束必须恢复，否则顶栏的工作目录选择会坏掉。
+ */
+export function openDirPickerFor({ getCwd, selectDir }) {
+  _getCwd = getCwd || (() => '');
+  _selectDir = (p) => {
+    if (selectDir) selectDir(p);
+    closeDirModal(); // 内部会 restoreDefaults
+  };
+  openDirModal();
+}
 
       let browsePath = ''; // 目录弹层当前浏览路径
       // ---- 目录弹层 ----
@@ -17,6 +45,8 @@ export function bindDirPopover({ getCwd, selectDir }) { _getCwd = getCwd; _selec
       }
       export function closeDirModal() {
         $('#dirMask').hidden = true;
+        // 无论走「选定」、✕ 还是点遮罩，都在这里统一交还绑定给默认宿主
+        restoreDefaults();
       }
       async function loadSaved() {
         const list = document.querySelector('#savedList');

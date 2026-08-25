@@ -93,9 +93,9 @@ bindConvNotify({ applyInjected: applyInjectedItems, getCurrentConvId }); // 🔔
           if (convList) convList.hidden = on;
           if (toolsList) toolsList.hidden = !on;
           if (title) title.textContent = on ? '工具' : '对话';
-          // 「打开历史」是 Markdown 工具的附属区，切回会话态必须一起收起，
-          // 否则它会挂在会话列表底下；是否真有历史由 markdown-tool 自己判定
-          window._syncMdHistoryPanel?.();
+          // 工具态底栏（「打开…」按钮）是工具列表的附属区，切回会话态必须一起收起，
+          // 否则它会挂在会话列表底下
+          window._syncToolsFooter?.();
         }
         // 供 newConversation 等复位回「会话」态
         window._setSidebarToolsMode = setToolsMode;

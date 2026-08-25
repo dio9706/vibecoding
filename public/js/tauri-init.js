@@ -170,21 +170,21 @@ export function bindTauriNav({ showView, openConv }) {
               console.warn('[Notify] plugin-notification 本地加载失败，降级到 IPC:', e.message);
             }
 
-            // 存储最近通知的目标 convId，用于点击通知后导航
+            // 最近一条通知的目标 convId。
+            //
+            // ⚠️ 这里曾挂过一个 window 'focus' 监听：focus 时就 openConv(cid)，用来近似「用户点了通知」。
+            // 那是错的，已删除，不要加回来 ——
+            //   ① focus ≠ 点通知：alt-tab 回来、点任务栏图标、系统文件对话框关闭，全都触发 focus；
+            //   ② 写入无条件：notifyUser 一被调用就写（见下），而调用方正是「任务成功完成」
+            //      （chat.js endJob 分支），与通知是否真弹出/是否被点击无关；
+            //   ③ 槽位永不过期。
+            // 三条叠加的结果：任务跑完 → 用户继续在别的会话干活 → 一次 alt-tab 就被拽回旧会话。
+            // 这正是用户报的「任务完成后经常自动切会话」。
+            // 任务完成的提示改由三条非侵入通道承担（都已存在）：桌面通知、侧栏红点、顶栏徽标。
+            //
+            // 该字段暂留：将来若拿到真正的「通知被点击」事件（Tauri notification action），
+            // 由那个事件消费它才是正确的触发源。当前无任何消费方。
             window._pendingNotifyConvId = null;
-
-            // 窗口获得焦点时（用户点击通知弹出 → 应用前台）→ 导航到对应会话
-            window.addEventListener('focus', () => {
-              const cid = window._pendingNotifyConvId;
-              if (!cid) return;
-              window._pendingNotifyConvId = null;
-              setTimeout(() => {
-                // 同 show-view：openConv 在 chat.js 模块作用域，经视图桥调用
-                // （原先写成 typeof openConv === 'function' 恒为 false，点通知从来没跳过会话）
-                if (_nav.openConv) _nav.openConv(cid);
-                else console.warn('[Notify] 通知点击跳会话失败：视图桥未注入');
-              }, 150);
-            });
 
             window.notifyUser = async function(title, body, { icon = 'info', convId = null } = {}) {
               if (convId) window._pendingNotifyConvId = convId;

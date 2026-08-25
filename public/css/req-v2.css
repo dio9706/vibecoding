@@ -1,0 +1,322 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   需求 v2：分步问卷 / 需求地图 / 需求变动 / UI 规范
+   spec: docs/superpowers/specs/2026-08-25-req-v2-design.md
+
+   类名一律 rq- 前缀，不复用 .doc / .chip / .node 这类已被其它模块占用的通用名
+  （原型阶段踩过 .chip.doc 撞 .doc 的坑：横幅芯片被文档阅读器的 margin/padding 撑成整块）。
+   颜色全部走 app.css 的 token，不写死值。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.rq-add, .rq-sym.rq-add { color: var(--green); }
+.rq-mod, .rq-sym.rq-mod { color: var(--amber); }
+.rq-del, .rq-sym.rq-del { color: var(--red); }
+.rq-none { color: var(--faint); }
+
+/* ── 评审期双报告页签 ─────────────────────────────────────────────────── */
+.rq-report { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.rq-report-tabs {
+  display: flex; gap: 4px; align-items: center;
+  border-bottom: 1px solid var(--border-soft); margin-bottom: 12px;
+}
+.rq-report-tab {
+  padding: 8px 14px; font-size: 13px; color: var(--muted); background: none;
+  border: none; border-bottom: 2px solid transparent; cursor: pointer; transition: 0.15s;
+}
+.rq-report-tab:hover { color: var(--text); }
+.rq-report-tab.on { color: var(--text); border-bottom-color: var(--accent); }
+.rq-report-badge {
+  margin-left: 6px; font-size: 10.5px; padding: 1px 6px; border-radius: 9px;
+  background: var(--accent-soft); color: var(--accent-hi);
+}
+/* 地图要占满剩余高度才谈得上「画布」；600px 是窄屏下仍能看清两层节点的下限 */
+.rq-report-map { flex: 1; min-height: 600px; display: flex; }
+
+/* ── 分步问卷 ─────────────────────────────────────────────────────────── */
+.rq-quiz-wrap { display: flex; justify-content: center; padding: 28px 20px 60px; }
+.rq-quiz { width: min(720px, 100%); }
+.rq-qbar { height: 3px; background: var(--border-soft); border-radius: 2px; overflow: hidden; margin-bottom: 22px; }
+.rq-qbar i { display: block; height: 100%; background: var(--accent); transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1); }
+.rq-qmeta { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--faint); margin-bottom: 10px; }
+.rq-qwhy { color: var(--muted); text-align: right; }
+.rq-qtitle { font-size: 20px; font-weight: 600; line-height: 1.5; margin: 0 0 6px; }
+.rq-qhint { font-size: 12.5px; color: var(--muted); margin: 0 0 18px; }
+.rq-qopt {
+  display: flex; align-items: flex-start; gap: 11px; padding: 13px 15px; margin-bottom: 9px;
+  border: 1px solid var(--border-soft); border-radius: 10px; background: var(--panel);
+  cursor: pointer; transition: 0.15s;
+}
+.rq-qopt:hover { border-color: var(--faint); }
+.rq-qopt.on { border-color: var(--accent); background: var(--accent-ultra-soft); }
+.rq-dot {
+  flex: 0 0 auto; width: 15px; height: 15px; border-radius: 50%;
+  border: 1.5px solid var(--faint); margin-top: 3px; position: relative;
+}
+.rq-qopt.on .rq-dot { border-color: var(--accent); }
+.rq-qopt.on .rq-dot::after { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--accent); }
+.rq-qtxt { flex: 1; min-width: 0; }
+.rq-qlab { font-size: 13.5px; }
+.rq-guess {
+  display: inline-block; margin-left: 8px; font-size: 10.5px; padding: 1px 6px; border-radius: 4px;
+  background: rgba(155, 127, 224, 0.16); color: var(--purple); vertical-align: 1.5px;
+}
+.rq-qdesc { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.rq-qfree {
+  width: 100%; min-height: 64px; resize: vertical; margin-top: 4px; padding: 11px 13px;
+  border-radius: 10px; background: var(--panel); border: 1px solid var(--border-soft);
+  color: var(--text); font: inherit; font-size: 13px; outline: none;
+}
+.rq-qfree:focus { border-color: var(--accent); }
+.rq-qfoot { display: flex; align-items: center; gap: 10px; margin-top: 20px; }
+.rq-gap { flex: 1; }
+.rq-qnote { font-size: 12px; color: var(--faint); margin-top: 16px; text-align: center; }
+.rq-linkbtn {
+  background: none; border: none; color: var(--accent-hi); font: inherit; font-size: 12px;
+  cursor: pointer; text-decoration: underline; padding: 0;
+}
+.rq-empty-acts { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+
+/* ── 需求地图画布 ─────────────────────────────────────────────────────── */
+.rq-map { position: relative; flex: 1; min-height: 0; display: flex; overflow: hidden; border-radius: 12px; border: 1px solid var(--border-soft); }
+.rq-canvas-host {
+  position: absolute; inset: 0; overflow: hidden;
+  background: radial-gradient(circle at 1px 1px, var(--border-soft) 1px, transparent 0) 0 0 / 22px 22px, var(--bg);
+}
+.rq-canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; cursor: grab; }
+.rq-canvas.grabbing { cursor: grabbing; }
+.rq-edges { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.rq-edges path { fill: none; stroke: var(--border); stroke-width: 1.6; }
+.rq-edges circle { fill: var(--border); }
+.rq-elabel { fill: var(--faint); font-size: 10.5px; font-family: var(--mono, monospace); }
+
+.rq-tools {
+  position: absolute; left: 14px; top: 14px; z-index: 20;
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  padding: 6px 8px; border-radius: 10px;
+  background: rgba(22, 23, 31, 0.92); backdrop-filter: blur(8px); border: 1px solid var(--border);
+}
+.rq-fchip {
+  display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 7px;
+  font-size: 12px; color: var(--muted); background: var(--panel-2, #1b1c26);
+  border: 1px solid var(--border-soft); cursor: pointer; transition: 0.13s;
+}
+.rq-fchip:hover { color: var(--text); }
+.rq-fchip.on { color: var(--text); border-color: currentColor; }
+.rq-fchip.rq-f-add.on { color: var(--green); background: rgba(108, 195, 138, 0.1); }
+.rq-fchip.rq-f-mod.on { color: var(--amber); background: rgba(217, 164, 65, 0.1); }
+.rq-fchip.rq-f-del.on { color: var(--red); background: rgba(229, 104, 122, 0.1); }
+.rq-fchip.rq-f-flag.on { color: var(--accent-hi); background: var(--accent-soft); }
+.rq-sep { width: 1px; height: 18px; background: var(--border); }
+.rq-zoom { display: flex; align-items: center; gap: 4px; font-family: var(--mono, monospace); font-size: 11.5px; color: var(--muted); }
+.rq-zoom button {
+  min-width: 22px; height: 22px; padding: 0 6px; line-height: 1; border-radius: 5px;
+  border: 1px solid var(--border-soft); background: none; color: inherit; cursor: pointer;
+}
+.rq-zoom button:hover { background: var(--panel-2, #1b1c26); }
+.rq-zoom i { font-style: normal; min-width: 38px; text-align: center; }
+.rq-ver { display: flex; gap: 2px; }
+.rq-vbtn {
+  padding: 3px 10px; font-size: 11.5px; border-radius: 5px; color: var(--muted);
+  border: 1px solid var(--border-soft); background: var(--panel-2, #1b1c26); cursor: pointer;
+}
+.rq-vbtn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* ── 节点 ─────────────────────────────────────────────────────────────── */
+.rq-node {
+  position: absolute; width: 296px; border-radius: 12px;
+  background: var(--panel); border: 1px solid var(--border);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.35);
+  transition: border-color 0.15s, box-shadow 0.15s, opacity 0.2s;
+}
+.rq-node:hover { border-color: var(--faint); }
+.rq-node.sel { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ultra-soft), 0 6px 22px rgba(0, 0, 0, 0.35); }
+.rq-node.rq-untouched { opacity: 0.42; }
+.rq-node.rq-newpage { border-color: rgba(155, 127, 224, 0.45); }
+.rq-nhead { padding: 11px 13px 9px; cursor: pointer; border-bottom: 1px solid var(--border-soft); }
+.rq-ntop { display: flex; align-items: center; gap: 7px; }
+.rq-nname { font-size: 13.5px; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rq-nflag { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: rgba(155, 127, 224, 0.16); color: var(--purple); white-space: nowrap; }
+.rq-nflag.rq-figma { background: rgba(91, 141, 239, 0.16); color: var(--blue); }
+.rq-nfile { font-family: var(--mono, monospace); font-size: 10.5px; color: var(--faint); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rq-ncount { display: flex; gap: 7px; margin-top: 7px; font-size: 11px; font-family: var(--mono, monospace); }
+.rq-ncount i { font-style: normal; }
+.rq-npts { padding: 8px 9px; display: flex; flex-direction: column; gap: 5px; }
+.rq-pt {
+  display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: 7px;
+  background: var(--panel-2, #1b1c26); border: 1px solid transparent;
+  font-size: 12.5px; cursor: pointer; transition: 0.13s;
+}
+.rq-pt:hover { border-color: var(--border); }
+.rq-pt.sel { border-color: var(--accent); background: var(--accent-ultra-soft); }
+.rq-pt.fresh { box-shadow: inset 0 0 0 1px rgba(108, 195, 138, 0.45); }
+.rq-pt .rq-sym { flex: 0 0 auto; width: 14px; text-align: center; font-family: var(--mono, monospace); font-weight: 700; font-size: 12px; }
+.rq-pt .rq-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rq-pt.rq-del .rq-t { text-decoration: line-through; opacity: 0.7; }
+.rq-mk { flex: 0 0 auto; font-size: 11px; }
+.rq-mk.rq-wrong { color: var(--red); }
+.rq-mk.rq-ok { color: var(--green); }
+.rq-nempty { padding: 10px 12px; font-size: 12px; color: var(--faint); }
+
+/* ── 底部标注汇总条 ───────────────────────────────────────────────────── */
+.rq-foot {
+  position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 20;
+  display: flex; align-items: center; gap: 14px; padding: 9px 12px 9px 16px;
+  border-radius: 12px; background: rgba(22, 23, 31, 0.95); backdrop-filter: blur(10px);
+  border: 1px solid var(--border); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+.rq-foot[hidden] { display: none; }
+.rq-annot-sum { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+/* 抽屉是覆盖在画布右侧的，居中的汇总条会被压住 → 整体左移半个抽屉宽 */
+.rq-map.rq-drawer-open .rq-foot { transform: translateX(-50%) translateX(-200px); }
+
+/* ── 抽屉 ─────────────────────────────────────────────────────────────── */
+.rq-drawer {
+  position: absolute; right: 0; top: 0; bottom: 0; width: min(400px, 80%); z-index: 30;
+  display: flex; flex-direction: column;
+  background: var(--panel); border-left: 1px solid var(--border);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
+  animation: rq-slide 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.rq-drawer[hidden] { display: none; }
+@keyframes rq-slide { from { transform: translateX(100%); } }
+.rq-dhead { flex: 0 0 auto; display: flex; align-items: flex-start; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--border-soft); }
+.rq-dt { flex: 1; min-width: 0; }
+.rq-dhead h4 { margin: 0; font-size: 14.5px; font-weight: 600; line-height: 1.4; }
+.rq-dtype { display: inline-block; margin-top: 6px; font-size: 11px; padding: 2px 7px; border-radius: 5px; }
+.rq-dtype.rq-add { background: rgba(108, 195, 138, 0.15); }
+.rq-dtype.rq-mod { background: rgba(217, 164, 65, 0.15); }
+.rq-dtype.rq-del { background: rgba(229, 104, 122, 0.15); }
+.rq-dtype.rq-page { background: rgba(91, 141, 239, 0.15); color: var(--blue); }
+.rq-dbody { flex: 1; min-height: 0; overflow: auto; padding: 16px; }
+.rq-sec { margin-bottom: 18px; }
+.rq-lb { font-size: 11px; color: var(--faint); letter-spacing: 0.06em; margin-bottom: 6px; }
+.rq-ba { border: 1px solid var(--border-soft); border-radius: 9px; overflow: hidden; }
+.rq-row { padding: 10px 12px; font-size: 12.5px; line-height: 1.6; }
+.rq-row.rq-before { background: rgba(229, 104, 122, 0.06); color: #c9b7ba; }
+.rq-row.rq-after { background: rgba(108, 195, 138, 0.06); border-top: 1px solid var(--border-soft); }
+.rq-rl { font-size: 10.5px; color: var(--faint); font-family: var(--mono, monospace); margin-bottom: 3px; }
+.rq-src { display: flex; flex-wrap: wrap; gap: 6px; }
+.rq-src span {
+  font-size: 11.5px; padding: 3px 8px; border-radius: 6px;
+  background: var(--panel-2, #1b1c26); border: 1px solid var(--border-soft); color: var(--muted);
+}
+.rq-files { display: flex; flex-direction: column; gap: 4px; }
+.rq-files span {
+  font-family: var(--mono, monospace); font-size: 11.5px; color: var(--muted);
+  padding: 4px 8px; background: var(--panel-2, #1b1c26); border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+.rq-annot textarea {
+  width: 100%; min-height: 76px; resize: vertical; padding: 10px 12px; border-radius: 9px;
+  background: var(--panel-2, #1b1c26); border: 1px solid var(--border-soft);
+  color: var(--text); font: inherit; font-size: 12.5px; outline: none;
+}
+.rq-annot textarea:focus { border-color: var(--accent); }
+.rq-acts { display: flex; gap: 8px; margin-top: 9px; }
+.rq-acts .btn { flex: 1; justify-content: center; }
+.btn.rq-wrong.on { background: rgba(229, 104, 122, 0.16); border-color: var(--red); color: var(--red); }
+.btn.rq-okmark.on { background: rgba(108, 195, 138, 0.16); border-color: var(--green); color: var(--green); }
+.rq-jump { display: flex; flex-direction: column; gap: 4px; }
+.rq-jump-item {
+  display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 7px;
+  background: var(--panel-2, #1b1c26); font-size: 12.5px; cursor: pointer;
+}
+.rq-jump-item:hover { background: var(--border-soft); }
+.rq-jump-item i { font-style: normal; font-family: var(--mono, monospace); font-weight: 700; }
+
+/* ── 设计稿挂载 / 还原 ────────────────────────────────────────────────── */
+.rq-figrow { display: flex; gap: 8px; }
+.rq-figrow input {
+  flex: 1; min-width: 0; padding: 8px 11px; border-radius: 8px;
+  background: var(--panel-2, #1b1c26); border: 1px solid var(--border-soft);
+  color: var(--text); font-family: var(--mono, monospace); font-size: 12px; outline: none;
+}
+.rq-figrow input:focus { border-color: var(--accent); }
+.rq-tip { font-size: 12px; color: var(--faint); margin-top: 8px; line-height: 1.6; }
+.rq-figcard { border: 1px solid var(--border-soft); border-radius: 10px; overflow: hidden; }
+.rq-fh { display: flex; align-items: center; gap: 8px; padding: 9px 12px; background: var(--panel-2, #1b1c26); font-size: 12.5px; }
+.rq-fh .rq-ok { color: var(--green); }
+.rq-furl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.rq-fb { padding: 11px 12px; font-size: 12px; color: var(--muted); }
+.rq-restored { color: var(--green); margin-bottom: 9px; }
+.rq-facts { display: flex; gap: 8px; }
+
+/* ── 开发期右栏「需求管理」段 ─────────────────────────────────────────── */
+.rq-railbtn {
+  width: 100%; display: flex; align-items: center; gap: 9px; text-align: left;
+  padding: 10px 12px; margin-bottom: 7px; border-radius: 9px;
+  border: 1px solid var(--border-soft); background: var(--panel-2, #1b1c26);
+  color: var(--text); font: inherit; font-size: 13px; cursor: pointer; transition: 0.15s;
+}
+.rq-railbtn:hover:not(:disabled) { border-color: var(--faint); }
+.rq-railbtn:disabled { opacity: 0.45; cursor: not-allowed; }
+.rq-railbtn.hi { border-color: rgba(217, 119, 87, 0.4); background: var(--accent-ultra-soft); }
+.rq-railbtn.hi .rq-ri { color: var(--accent-hi); }
+.rq-ri { width: 18px; text-align: center; flex: 0 0 auto; }
+.rq-rt { flex: 1; min-width: 0; }
+.rq-rn { font-size: 11px; color: var(--faint); font-family: var(--mono, monospace); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── 需求变动弹框 ─────────────────────────────────────────────────────── */
+.rq-change-modal { width: min(600px, 94vw); }
+.rq-change-sub { margin: 0 0 12px; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+.rq-change-text {
+  width: 100%; min-height: 150px; resize: vertical; padding: 12px 14px; border-radius: 10px;
+  background: var(--panel-2, #1b1c26); border: 1px solid var(--border-soft);
+  color: var(--text); font: inherit; font-size: 13.5px; line-height: 1.7; outline: none;
+}
+.rq-change-text:focus { border-color: var(--accent); }
+.rq-impact {
+  margin-top: 12px; padding: 11px 13px; border-radius: 10px; font-size: 12.5px;
+  background: var(--panel-2, #1b1c26); border: 1px solid var(--border-soft);
+}
+.rq-impact[hidden] { display: none; }
+.rq-impact-title { color: var(--muted); margin-bottom: 7px; }
+.rq-impact-title.rq-impact-none { margin-bottom: 0; }
+.rq-impact-list { display: flex; flex-direction: column; gap: 5px; }
+.rq-impact-item { display: flex; gap: 7px; align-items: baseline; color: #cfcdc9; line-height: 1.5; }
+.rq-impact-item .rq-sym { font-style: normal; font-family: var(--mono, monospace); font-weight: 700; width: 12px; flex: 0 0 auto; }
+.rq-impact-item em { font-style: normal; color: var(--faint); font-size: 11.5px; }
+.rq-scope { display: flex; gap: 7px; margin-top: 12px; }
+.rq-scope button {
+  flex: 1; padding: 9px; border-radius: 9px; font: inherit; font-size: 12.5px;
+  border: 1px solid var(--border-soft); background: var(--panel-2, #1b1c26);
+  color: var(--muted); cursor: pointer;
+}
+.rq-scope button.on { border-color: var(--accent); background: var(--accent-ultra-soft); color: var(--accent-hi); }
+.rq-scope button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── UI 规范面板 ──────────────────────────────────────────────────────── */
+.rq-spec-modal { width: min(720px, 94vw); }
+.rq-spec-meta { font-family: var(--mono, monospace); font-size: 11.5px; color: var(--faint); margin-bottom: 10px; overflow-wrap: anywhere; }
+.rq-spec-text {
+  width: 100%; min-height: 360px; resize: vertical; padding: 12px 14px; border-radius: 10px;
+  background: var(--panel-2, #1b1c26); border: 1px solid var(--border-soft);
+  color: var(--text); font-family: var(--mono, monospace); font-size: 12.5px; line-height: 1.75; outline: none;
+}
+.rq-spec-text:focus { border-color: var(--accent); }
+.rq-spec-foot { align-items: center; }
+.rq-spec-gap { flex: 1; }
+
+/* ── 地图浮层（开发/测试期从右栏打开）─────────────────────────────────── */
+.rq-map-mask { padding: 24px; }
+.rq-map-overlay {
+  width: min(1480px, 100%); height: min(900px, 92vh);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+  animation: pop 0.18s ease;
+}
+.rq-map-obar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; border-bottom: 1px solid var(--border-soft);
+}
+.rq-map-obar b { font-size: 14px; }
+.rq-map-osub { flex: 1; font-size: 12px; color: var(--faint); font-family: var(--mono, monospace); }
+.rq-map-obody { flex: 1; min-height: 0; display: flex; padding: 12px; color: var(--muted); font-size: 13px; }
+
+/* ── 窄屏 ─────────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .rq-drawer { width: 100%; }
+  .rq-tools { left: 8px; top: 8px; }
+  .rq-report-map { min-height: 460px; }
+  /* 窄屏抽屉铺满，汇总条无处可让，直接收起（关掉抽屉即回来） */
+  .rq-map.rq-drawer-open .rq-foot { display: none; }
+}

@@ -401,91 +401,20 @@
   text-decoration: underline;
 }
 
-/* ===== 打开历史（侧栏底部） ===== */
-.md-history {
+/* ===== 工具态侧栏底栏：仅「打开…」按钮（打开历史区已移除） ===== */
+.tools-footer {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 45%; /* 历史攒满 10 条也不会把上面的工具列表顶掉 */
-  padding: 10px 8px 10px;
+  padding: 10px 8px;
   border-top: 1px solid var(--border-soft);
   background: rgba(0, 0, 0, 0.14);
 }
 
-.md-history[hidden] { display: none; }
+.tools-footer[hidden] { display: none; }
 
-.md-history-head {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  color: var(--faint);
-  padding: 0 4px;
-}
-
-.md-history-list {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  overflow-y: auto;
-  min-height: 0;
-}
-
-.md-history-list::-webkit-scrollbar { width: 6px; }
-.md-history-list::-webkit-scrollbar-track { background: transparent; }
-.md-history-list::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
-}
-
-/* 与目录项同因：原生 <button> 不重置就会顶着 UA 的浅灰底 + outset 边框 + Arial 渲染 */
-.md-history-item {
-  appearance: none;
-  -webkit-appearance: none;
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  text-align: left;
-  font: inherit;
-  font-size: 12px;
-  line-height: 1.45;
-  padding: 6px 9px;
-  color: var(--muted);
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.md-history-item:hover {
-  background: var(--panel);
-  border-color: var(--border);
-  color: var(--text);
-}
-
-.md-history-item.active {
-  background: var(--accent-soft, rgba(217, 119, 87, 0.14));
-  border-color: var(--accent);
-  color: var(--text);
-}
-
-.md-history-item .md-history-name {
-  display: block;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.md-history-item .md-history-time {
-  display: block;
-  font-size: 10px;
-  color: var(--faint);
-  margin-top: 2px;
-}
-
-/* 侧栏底部「打开…」按钮撑满一行（原 .block 类在 app.css 里并不存在） */
-.md-history .btn {
+/* 撑满一行（原 .block 类在 app.css 里并不存在） */
+.tools-footer .btn {
   width: 100%;
   flex-shrink: 0;
 }

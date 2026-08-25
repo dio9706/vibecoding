@@ -1,0 +1,1311 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   需求评审页工作台（rqw- = req workbench）
+   plan: docs/superpowers/plans/2026-08-25-req-workbench.md
+   原型: public/proto-req-review.html
+
+   替代 app.css 里评审期那套 .req-chips / .req-doc-empty / .req-notify-option
+   的布局。三件事：
+   1. 限宽 1280 + 居中 + 右侧 300px 辅助栏 —— 旧版 #reqPage 限宽 880 却没居中，
+      宽屏右侧一千多像素纯空。
+   2. 工程配置从横排 chips 提为配置阶段的主栏主角；文档产出后降为右栏只读树。
+   3. 问卷改模态（.rqw-mask），不再整页接管。
+
+   类名一律 rqw- 前缀，不复用 .req- / .rq-（两者已被旧布局与需求 v2 占用）。
+   颜色全部走 app.css 的 token，不写死值。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* app.css 的 `#reqPage { max-width: 880px }` 在此被整体接管 */
+#reqPage {
+  max-width: 1280px;
+  margin-inline: auto;
+}
+/* 头部要跟内容用同一栅格，否则标题贴左、内容居中会错位 */
+.app .panel-page[data-view='req'] > .panel-head {
+  max-width: 1280px;
+  margin-inline: auto;
+}
+
+.rqw-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 22px;
+  align-items: start;
+}
+.rqw-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.rqw-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: sticky;
+  top: 0;
+}
+/* 1180 以下右栏塌到主栏下方：300px 辅助栏再挤下去正文就没法读了 */
+@media (max-width: 1180px) {
+  .rqw-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .rqw-side {
+    position: static;
+  }
+}
+
+/* ── 顶部：元信息 + 阶段轨 ─────────────────────────────────────────────── */
+.rqw-top {
+  margin-bottom: 22px;
+}
+.rqw-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--faint);
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.rqw-phase-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent-hi);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+.rqw-phase-badge::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.rqw-meta .sep {
+  color: var(--border);
+}
+.rqw-meta b {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* 阶段轨：点在左、标签左对齐的时间线，比居中式步骤条更贴终端风。
+   三步而非四步 —— 问卷是「生成」动作里的一道闸，不是用户要规划的阶段。 */
+.rqw-steps {
+  display: flex;
+}
+.rqw-step {
+  flex: 1;
+  position: relative;
+  padding: 20px 14px 0 0;
+  min-width: 0;
+}
+.rqw-step::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1.5px solid var(--faint);
+  background: var(--bg);
+  z-index: 1;
+}
+.rqw-step::after {
+  content: '';
+  position: absolute;
+  top: 5px;
+  left: 11px;
+  right: 0;
+  height: 1px;
+  background: var(--border);
+}
+.rqw-step:last-child::after {
+  display: none;
+}
+.rqw-step-n {
+  font-size: 10.5px;
+  color: var(--faint);
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+}
+.rqw-step-t {
+  font-size: 12.5px;
+  color: var(--faint);
+  margin-top: 1px;
+}
+.rqw-step-s {
+  font-size: 10.5px;
+  color: var(--border);
+  margin-top: 2px;
+}
+.rqw-step.done::before {
+  border-color: var(--green);
+  background: var(--green);
+}
+.rqw-step.done::after {
+  background: linear-gradient(90deg, rgba(108, 195, 138, 0.5), var(--border));
+}
+.rqw-step.done .rqw-step-t {
+  color: var(--muted);
+}
+.rqw-step.done .rqw-step-s {
+  color: var(--green);
+  opacity: 0.75;
+}
+.rqw-step.now::before {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-ultra-soft);
+  animation: rqw-pulse 2.4s ease-in-out infinite;
+}
+@keyframes rqw-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 4px var(--accent-ultra-soft);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(217, 119, 87, 0.04);
+  }
+}
+.rqw-step.now::after,
+.rqw-step.todo::after {
+  background: repeating-linear-gradient(90deg, var(--border) 0 4px, transparent 4px 8px);
+}
+.rqw-step.todo::after {
+  background: repeating-linear-gradient(90deg, var(--border-soft) 0 4px, transparent 4px 8px);
+}
+.rqw-step.now .rqw-step-n {
+  color: var(--accent);
+}
+.rqw-step.now .rqw-step-t,
+.rqw-step.err .rqw-step-t {
+  color: var(--text);
+  font-weight: 600;
+}
+.rqw-step.now .rqw-step-s {
+  color: var(--accent-hi);
+}
+.rqw-step.err::before {
+  border-color: var(--red);
+  background: var(--red);
+  box-shadow: 0 0 0 4px rgba(229, 104, 122, 0.08);
+}
+.rqw-step.err .rqw-step-n,
+.rqw-step.err .rqw-step-s {
+  color: var(--red);
+}
+
+/* ── 通用卡片 / 按钮 ──────────────────────────────────────────────────── */
+.rqw-card {
+  border: 1px solid var(--border-soft);
+  border-radius: 11px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.rqw-card-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 13px;
+  font-size: 11.5px;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+  border-bottom: 1px solid var(--border-soft);
+}
+.rqw-card-h .ic {
+  font-size: 12px;
+  opacity: 0.85;
+}
+.rqw-card-h .gap,
+.rqw-slot-top .gap,
+.rqw-cfg-hd .gap,
+.rqw-prime-hd .gap {
+  flex: 1;
+}
+.rqw-card-b {
+  padding: 11px 13px;
+}
+.rqw-iconbtn {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--faint);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: 0.15s;
+}
+.rqw-iconbtn:hover {
+  color: var(--accent-hi);
+  border-color: var(--border);
+  background: var(--accent-extra-soft);
+}
+.rqw-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 9px 14px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+  font-family: inherit;
+  transition: 0.16s;
+}
+.rqw-btn.full {
+  width: 100%;
+}
+.rqw-btn.sm {
+  padding: 6px 11px;
+  font-size: 11.5px;
+}
+.rqw-btn:hover:not(:disabled) {
+  border-color: var(--faint);
+  background: #24252f;
+}
+.rqw-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a1109;
+  font-weight: 600;
+}
+.rqw-btn.primary:hover:not(:disabled) {
+  background: var(--accent-hi);
+  border-color: var(--accent-hi);
+  box-shadow: 0 4px 18px rgba(217, 119, 87, 0.24);
+}
+.rqw-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ══ 主栏 · 工程配置（配置阶段的主角）════════════════════════════════════
+   旧版把三个槽位压成一行 chips，未配置时只有「＋ 前端工程」一个虚框，看不出
+   配了什么、开发还是只读、工程当前什么状态。给每个槽位一张子卡，把「路径 /
+   读写模式 / 分支与未提交改动 / 解析结果」摊开 —— 这些正是「文档会不会生成
+   错」的判断依据，也顺带把宽屏的留白填成了有效信息。
+   ══════════════════════════════════════════════════════════════════════ */
+.rqw-cfg {
+  border: 1px solid var(--border-soft);
+  border-radius: 13px;
+  background:
+    radial-gradient(700px 220px at 30% 0%, var(--accent-extra-soft), transparent 70%),
+    var(--panel);
+  padding: 18px 18px 16px;
+}
+.rqw-cfg-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.rqw-cfg-hd h4 {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.rqw-cfg-hd .cnt {
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.rqw-cfg-note {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin-bottom: 16px;
+}
+.rqw-slots {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.rqw-slot {
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 12px 14px;
+  transition: 0.16s;
+}
+.rqw-slot:hover {
+  border-color: var(--border);
+}
+.rqw-slot.blank {
+  border-style: dashed;
+  border-color: rgba(217, 164, 65, 0.28);
+  background: rgba(217, 164, 65, 0.028);
+}
+.rqw-slot-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+.rqw-slot-ic {
+  font-size: 13px;
+  line-height: 1;
+}
+.rqw-slot-k {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.rqw-slot-opt {
+  font-size: 10px;
+  color: var(--faint);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-soft);
+}
+/* 读写模式二段开关：比一个孤零零的 checkbox 更能说明这是二选一 */
+.rqw-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.rqw-seg button {
+  padding: 3px 11px;
+  font-size: 10.5px;
+  background: none;
+  border: none;
+  color: var(--faint);
+  cursor: pointer;
+  font-family: inherit;
+  transition: 0.15s;
+}
+.rqw-seg button:hover:not(.on) {
+  color: var(--muted);
+  background: var(--panel);
+}
+.rqw-seg button.on[data-m='dev'] {
+  background: rgba(108, 195, 138, 0.16);
+  color: var(--green);
+}
+.rqw-seg button.on[data-m='ro'] {
+  background: rgba(90, 91, 104, 0.24);
+  color: var(--muted);
+}
+.rqw-slot-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.rqw-path {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 11.5px;
+  font-family: inherit;
+}
+.rqw-path:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.rqw-path::placeholder {
+  color: var(--faint);
+}
+/* 槽位脚注：分支 / 未提交改动 / 解析字数这类「配置是否可信」的证据 */
+.rqw-slot-ft {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 8px;
+  font-size: 10.5px;
+  color: var(--faint);
+  flex-wrap: wrap;
+}
+.rqw-slot-ft .br {
+  color: var(--border);
+}
+.rqw-slot-ft .warn {
+  color: var(--amber);
+}
+.rqw-slot-ft .ok {
+  color: var(--green);
+}
+.rqw-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--purple);
+  background: rgba(155, 127, 224, 0.13);
+  padding: 2px 9px;
+  border-radius: 5px;
+}
+.rqw-tag input {
+  width: 96px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 11px;
+  font-family: inherit;
+  padding: 1px 5px;
+}
+.rqw-tag input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ══ 主栏 · 生成前补充背景 ═══════════════════════════════════════════════
+   旧版刻意不在生成前放补充框，理由是「没有文档时提交没有意义，且会让首次流程
+   出现两个入口造成困惑」（req-view.js 原注释）。顾虑成立，但用户对需求的理解
+   确实能提升首版准确度。解法是不给它提交按钮：内容防抖自动存 req.prime，随
+   「生成开发文档」一并生效，所以它是生成表单的一部分而非第二个入口。
+   ══════════════════════════════════════════════════════════════════════ */
+.rqw-prime {
+  border: 1px solid var(--border-soft);
+  border-radius: 13px;
+  background: var(--panel);
+  padding: 16px 18px 15px;
+}
+.rqw-prime-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin-bottom: 4px;
+}
+.rqw-prime-hd h4 {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.rqw-prime-hd .opt {
+  font-size: 10px;
+  color: var(--faint);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-soft);
+}
+.rqw-prime-hd .cnt {
+  font-size: 10.5px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.rqw-prime-hd .cnt.over {
+  color: var(--amber);
+}
+.rqw-prime-note {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin-bottom: 11px;
+}
+/* 三条示例：空输入框最容易被跳过，给出「该写什么」的具体门类 */
+.rqw-prime-eg {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 11px;
+  font-size: 11px;
+  color: var(--faint);
+  line-height: 1.55;
+}
+.rqw-prime-eg div {
+  display: flex;
+  gap: 7px;
+}
+.rqw-prime-eg .n {
+  color: var(--border);
+  flex: 0 0 auto;
+}
+.rqw-prime-ft {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 9px;
+}
+.rqw-prime-ft .gap {
+  flex: 1;
+}
+.rqw-prime-ft .tip {
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.rqw-prime-ft .saved {
+  font-size: 10.5px;
+  color: var(--green);
+  opacity: 0;
+  transition: opacity 0.25s;
+}
+.rqw-prime-ft .saved.on {
+  opacity: 0.85;
+}
+.rqw-ta {
+  width: 100%;
+  min-height: 74px;
+  resize: vertical;
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.65;
+  font-family: inherit;
+}
+.rqw-ta::placeholder {
+  color: var(--faint);
+}
+.rqw-ta:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.rqw-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 9px;
+}
+.rqw-chips:empty {
+  margin-top: 0;
+}
+.rqw-fchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 11px;
+}
+.rqw-fchip.uploading {
+  opacity: 0.55;
+}
+.rqw-fchip .rm {
+  background: none;
+  border: none;
+  color: var(--faint);
+  font-size: 11px;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+.rqw-fchip .rm:hover {
+  color: var(--red);
+}
+
+/* ── 状态条：busy / error ─────────────────────────────────────────────── */
+.rqw-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 12px 15px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  border: 1px solid;
+}
+.rqw-bar.busy {
+  border-color: rgba(217, 119, 87, 0.3);
+  background: var(--accent-ultra-soft);
+  color: var(--text);
+  position: relative;
+  overflow: hidden;
+}
+/* 扫光：docgen 动辄十几分钟，静态文案会被当成假死，需要持续在动的信号 */
+.rqw-bar.busy::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 20%, rgba(217, 119, 87, 0.09) 50%, transparent 80%);
+  background-size: 220% 100%;
+  animation: rqw-sweep 2.6s linear infinite;
+  pointer-events: none;
+}
+@keyframes rqw-sweep {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
+}
+.rqw-spin {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  margin-top: 3px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  border-top-color: transparent;
+  animation: rqw-spin 0.85s linear infinite;
+}
+@keyframes rqw-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.rqw-bar.busy .el {
+  color: var(--accent-hi);
+  font-variant-numeric: tabular-nums;
+}
+.rqw-bar.err {
+  border-color: rgba(229, 104, 122, 0.32);
+  background: rgba(229, 104, 122, 0.07);
+  align-items: center;
+}
+.rqw-bar.err .ic {
+  color: var(--red);
+}
+.rqw-bar.err .tx {
+  flex: 1;
+}
+
+/* ── 右栏：行动区 / 流程预告 / 只读树 / 版本 / 统计 / 通知 ─────────────── */
+.rqw-act {
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: linear-gradient(180deg, var(--accent-extra-soft), transparent 70%), var(--panel);
+  padding: 13px;
+}
+.rqw-act-t {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+.rqw-act-d {
+  font-size: 11.5px;
+  color: var(--faint);
+  line-height: 1.55;
+  margin-bottom: 11px;
+}
+.rqw-precheck {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--faint);
+}
+.rqw-precheck div {
+  display: flex;
+  gap: 6px;
+}
+.rqw-precheck .ok {
+  color: var(--green);
+}
+.rqw-precheck .no {
+  color: var(--amber);
+}
+/* 流程预告：点生成后会经历什么、大概多久，先说清楚 */
+.rqw-flow {
+  display: flex;
+  flex-direction: column;
+}
+.rqw-flow-i {
+  display: flex;
+  gap: 9px;
+  font-size: 11.5px;
+  position: relative;
+  padding-bottom: 12px;
+}
+.rqw-flow-i:last-child {
+  padding-bottom: 0;
+}
+.rqw-flow-i .n {
+  flex: 0 0 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--faint);
+  font-size: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+}
+.rqw-flow-i:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 15px;
+  bottom: 0;
+  width: 1px;
+  background: repeating-linear-gradient(180deg, var(--border) 0 3px, transparent 3px 6px);
+}
+.rqw-flow-i .tx {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.rqw-flow-i .tx em {
+  display: block;
+  font-style: normal;
+  color: var(--faint);
+  font-size: 10.5px;
+  margin-top: 1px;
+}
+/* 文档已产出后配置不再是主角，收缩为树形摘要 */
+.rqw-tree {
+  display: flex;
+  flex-direction: column;
+}
+.rqw-trow {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 4px 0;
+  font-size: 11.5px;
+}
+.rqw-trow .br {
+  color: var(--border);
+  flex: 0 0 auto;
+}
+.rqw-trow .k {
+  color: var(--faint);
+  flex: 0 0 42px;
+}
+.rqw-trow .v {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rqw-trow .t {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.rqw-trow .t.dev {
+  background: rgba(108, 195, 138, 0.14);
+  color: var(--green);
+}
+.rqw-trow .t.ro {
+  background: rgba(90, 91, 104, 0.2);
+  color: var(--faint);
+}
+/* 标记哪几题附了自主补充：用户想确认「我写的那段到底进没进去」 */
+.rqw-trow .t.note {
+  background: rgba(91, 141, 239, 0.14);
+  color: var(--blue);
+}
+.rqw-trow.blank .v {
+  color: var(--faint);
+}
+.rqw-vlist {
+  display: flex;
+  flex-direction: column;
+}
+.rqw-vrow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 13px;
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: 0.15s;
+}
+.rqw-vrow:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+.rqw-vrow.on {
+  border-left-color: var(--accent);
+  background: var(--accent-ultra-soft);
+  color: var(--text);
+}
+.rqw-vrow .v {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  flex: 0 0 26px;
+}
+.rqw-vrow.on .v {
+  color: var(--accent-hi);
+}
+.rqw-vrow .at {
+  flex: 1;
+  color: var(--faint);
+  font-size: 10.5px;
+}
+.rqw-vrow .now-tag {
+  font-size: 9.5px;
+  color: var(--green);
+  letter-spacing: 0.03em;
+}
+.rqw-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rqw-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+}
+.rqw-stat .k {
+  color: var(--faint);
+  flex: 1;
+}
+.rqw-stat .v {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.rqw-stat .u {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+.rqw-notify {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.rqw-sel {
+  width: 100%;
+  margin-top: 9px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 11.5px;
+  font-family: inherit;
+}
+.rqw-sel:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ── 主栏 · 文档态 ────────────────────────────────────────────────────── */
+.rqw-docbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.rqw-vtab {
+  padding: 4px 11px;
+  font-size: 11.5px;
+  border-radius: 7px;
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  font-family: inherit;
+  transition: 0.15s;
+}
+.rqw-vtab:hover {
+  color: var(--text);
+  background: var(--panel);
+}
+.rqw-vtab.on {
+  border-color: var(--accent);
+  color: var(--accent-hi);
+  background: var(--accent-ultra-soft);
+}
+.rqw-docbar .gap {
+  flex: 1;
+}
+.rqw-docbar .hint {
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.rqw-sum {
+  border: 1px solid var(--border-soft);
+  border-left: 2px solid var(--accent);
+  border-radius: 3px 10px 10px 3px;
+  background: var(--accent-extra-soft);
+  padding: 12px 15px;
+}
+.rqw-sum-l {
+  font-size: 11px;
+  color: var(--accent-hi);
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+.rqw-sum-b {
+  font-size: 12.5px;
+  color: var(--text);
+  line-height: 1.7;
+}
+/* 正文交给既有的 .req-doc-content（renderMarkdown 的样式契约），这里只给容器
+   加壳，避免复制一整套 markdown 排版规则造成两处维护 */
+.rqw-doc {
+  border: 1px solid var(--border-soft);
+  border-radius: 11px;
+  background: var(--panel);
+  padding: 20px 24px 24px;
+}
+.rqw-doc .req-doc-content > h2:first-child {
+  margin-top: 0;
+}
+.rqw-docarea {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* 复用既有的 .rq-report-*（页签）与 .req-supplement-*（补充说明框），只在新布局下
+   微调间距：主栏已用 flex gap 提供块间距，旧样式那份 margin-top + border-top 会叠加
+   成一道过宽的分隔。 */
+.rqw-main > .req-supplement-box {
+  margin-top: 0;
+}
+.rqw-main > .rq-report {
+  flex: none;
+}
+
+/* ══ 问卷模态 ═══════════════════════════════════════════════════════════
+   问卷是「点生成之后」才发生的事，不是独立阶段，所以做覆盖层而非整页接管：
+   底层配置页仍在，用户清楚这是生成流程中的一道闸。
+
+   必答规则：每题都要选，未选时「下一题」禁用。逃生口不是整体跳过，而是每题
+   末尾的「不确定」—— 用户至少被迫看过一遍这些点，而看一遍本身就常常触发
+   「哦这个不对」。
+   ══════════════════════════════════════════════════════════════════════ */
+.rqw-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(8, 9, 12, 0.72);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 5vh 20px 20px;
+  overflow-y: auto;
+  animation: rqw-fade 0.2s ease;
+}
+@keyframes rqw-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.rqw-modal {
+  width: min(680px, 100%);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 26px 80px rgba(0, 0, 0, 0.62);
+  overflow: hidden;
+  animation: rqw-pop 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes rqw-pop {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rqw-mhead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 17px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.rqw-mhead .t {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.rqw-mhead .s {
+  font-size: 11px;
+  color: var(--faint);
+}
+.rqw-mhead .gap {
+  flex: 1;
+}
+.rqw-mclose {
+  background: none;
+  border: none;
+  color: var(--faint);
+  font-size: 13px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: 0.15s;
+}
+.rqw-mclose:hover {
+  color: var(--red);
+  background: rgba(229, 104, 122, 0.1);
+}
+.rqw-mbody {
+  padding: 17px 20px 20px;
+}
+/* 题目是后端异步产出的（quiz 202 + 轮询 ready），点「生成」到题目出现之间有
+   十几秒空档，必须有等待态，否则模态弹出来是空的 */
+.rqw-qload {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 13px;
+  padding: 44px 20px 46px;
+  text-align: center;
+}
+.rqw-qload .sp {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: rqw-spin 0.8s linear infinite;
+}
+.rqw-qload .t {
+  font-size: 13px;
+  color: var(--text);
+}
+.rqw-qload .s {
+  font-size: 11.5px;
+  color: var(--faint);
+  line-height: 1.6;
+  max-width: 380px;
+}
+/* 进度分段而非连续条：一眼看出总共几题、答了几题、哪几题是蒙的 */
+.rqw-qsegs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+}
+.rqw-qseg {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border-soft);
+  transition: 0.25s;
+}
+.rqw-qseg.answered {
+  background: var(--green);
+}
+.rqw-qseg.unsure {
+  background: var(--purple);
+}
+.rqw-qseg.cur {
+  background: var(--accent);
+}
+.rqw-qmeta {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 11px;
+  color: var(--faint);
+  margin-bottom: 11px;
+}
+.rqw-qmeta .why {
+  text-align: right;
+  color: var(--muted);
+  flex: 1;
+  min-width: 0;
+}
+.rqw-qt {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.5;
+  margin-bottom: 6px;
+  letter-spacing: 0.01em;
+}
+.rqw-qh {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.65;
+  margin-bottom: 17px;
+}
+.rqw-qopt {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg);
+  cursor: pointer;
+  font-family: inherit;
+  transition: 0.15s;
+}
+.rqw-qopt:hover {
+  border-color: var(--faint);
+}
+.rqw-qopt.on {
+  border-color: var(--accent);
+  background: var(--accent-ultra-soft);
+}
+/* 「不确定」与实质选项拉开距离并降调：它是兜底不是备选 */
+.rqw-qopt.unsure {
+  margin-top: 14px;
+  border-style: dashed;
+  background: transparent;
+}
+.rqw-qopt.unsure.on {
+  border-style: solid;
+  border-color: var(--purple);
+  background: rgba(155, 127, 224, 0.07);
+}
+.rqw-qopt.unsure.on .rqw-qdot {
+  border-color: var(--purple);
+}
+.rqw-qopt.unsure.on .rqw-qdot::after {
+  background: var(--purple);
+}
+.rqw-qopt.unsure .rqw-qlab {
+  color: var(--muted);
+}
+.rqw-qopt.unsure.on .rqw-qlab {
+  color: var(--text);
+}
+.rqw-qdot {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1.5px solid var(--faint);
+  margin-top: 3px;
+  position: relative;
+}
+.rqw-qopt.on .rqw-qdot {
+  border-color: var(--accent);
+}
+.rqw-qopt.on .rqw-qdot::after {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.rqw-qtx {
+  flex: 1;
+  min-width: 0;
+}
+.rqw-qlab {
+  font-size: 13px;
+}
+.rqw-guess {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(155, 127, 224, 0.16);
+  color: var(--purple);
+  vertical-align: 1.5px;
+}
+.rqw-qdesc {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-top: 3px;
+  line-height: 1.55;
+  display: block;
+}
+/* 选「不确定」后摊开模型的默认判断 —— 这是最后一次纠正机会，很多人正是在这里
+   发现默认值不对，然后回头改选实质选项 */
+.rqw-fallback {
+  margin-top: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(155, 127, 224, 0.24);
+  background: rgba(155, 127, 224, 0.06);
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.rqw-fallback b {
+  color: var(--purple);
+  font-weight: 400;
+}
+/* 每题补充：默认收起成一行链接不加视觉负担 */
+.rqw-note-tog {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 5px 2px;
+  background: none;
+  border: none;
+  color: var(--faint);
+  font-size: 11.5px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: 0.15s;
+}
+.rqw-note-tog:hover {
+  color: var(--accent-hi);
+}
+.rqw-note-tog .cnt {
+  color: var(--green);
+}
+.rqw-note-box {
+  margin-top: 7px;
+}
+.rqw-note-ta {
+  width: 100%;
+  min-height: 56px;
+  resize: vertical;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: inherit;
+}
+.rqw-note-ta::placeholder {
+  color: var(--faint);
+}
+.rqw-note-ta:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.rqw-note-box.urge .rqw-note-ta {
+  border-color: rgba(155, 127, 224, 0.4);
+}
+.rqw-note-hint {
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-top: 5px;
+  line-height: 1.5;
+}
+.rqw-mfoot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px 15px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--panel-2);
+}
+.rqw-mfoot .gap {
+  flex: 1;
+}
+.rqw-mfoot .req {
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.rqw-mfoot .req.blocked {
+  color: var(--amber);
+}

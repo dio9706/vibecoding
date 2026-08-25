@@ -3,13 +3,10 @@
  * 功能：文件打开、内容渲染、目录导航、搜索、导出
  */
 
-const MD_HISTORY_KEY = 'md-tool-history';
-const MD_HISTORY_MAX = 10;
-// 浏览器安全模型下拿不到本地绝对路径，历史要能「点开即看」只能把正文一起缓存。
-// localStorage 常见配额 5MB，这里单篇 512KB / 总量 2MB 封顶，超限的条目只留元信息，
-// 点击时降级为「重新选文件」，不至于把整个 localStorage 撑爆连累其他功能。
-const MD_CACHE_MAX_ONE = 512 * 1024;
-const MD_CACHE_MAX_TOTAL = 2 * 1024 * 1024;
+// 一次性清理：「打开历史」功能已移除（2026-08-25），但它曾按 2MB 上限把文档正文缓存在这个 key 里。
+// localStorage 总配额通常 5MB，且与 claude_convs（会话记录 + 未发送草稿）共享——不清掉，
+// 老用户那 2MB 死数据会永久挤压会话存储。若干版本后可删掉这行。
+try { localStorage.removeItem('md-tool-history'); } catch { /* 隐私模式等 */ }
 
 class MarkdownTool {
   constructor() {
@@ -17,9 +14,8 @@ class MarkdownTool {
     this.els = {
       // 工具入口
       toolBtn: document.getElementById('toolMarkdown'),
-      openHistoryPanel: document.getElementById('mdHistory'),
+      toolsFooter: document.getElementById('toolsFooter'),
       openFileBtn2: document.getElementById('mdOpenFileBtn2'),
-      historyList: document.getElementById('mdHistoryList'),
 
       // 工具面板（id 与 index.html 中 markdownContainer 对齐）
       container: document.getElementById('markdownContainer'),
@@ -53,9 +49,6 @@ class MarkdownTool {
       searchCurrentIndex: -1,
     };
 
-    // 历史记录
-    this.history = this.loadHistory();
-
     // 目录滚动联动的内部状态
     this._activeTocId = null;
     this._spySuppressUntil = 0;
@@ -66,12 +59,9 @@ class MarkdownTool {
     // 绑定事件
     this.bindEvents();
 
-    // 冷启动就把已存历史铺出来：原来只在 updateHistory() 里渲染，
-    // 导致重开应用后侧栏历史一直是空的
-    this.renderHistory();
-
-    // 侧栏「会话 / 工具」切换时由 app.js 回调，决定历史面板是否露出
-    window._syncMdHistoryPanel = () => this.syncHistoryPanel();
+    // 侧栏「会话 / 工具」切换时由 app.js 回调，决定工具态底栏是否露出
+    window._syncToolsFooter = () => this.syncToolsFooter();
+    this.syncToolsFooter();
   }
 
   // ===== 事件绑定 =====
@@ -96,9 +86,6 @@ class MarkdownTool {
 
     // 目录树点击跳转
     this.els.tocTree?.addEventListener('click', (e) => this.handleTocClick(e));
-
-    // 历史点击
-    this.els.historyList?.addEventListener('click', (e) => this.handleHistoryClick(e));
 
     // 内容区滚动 → 目录高亮联动
     this.setupScrollSpy();
@@ -201,16 +188,15 @@ class MarkdownTool {
     const hasFile = !!this.state.currentFile;
     if (this.els.empty) this.els.empty.hidden = hasFile;
     if (this.els.container) this.els.container.hidden = !hasFile;
-    this.syncHistoryPanel();
+    this.syncToolsFooter();
   }
 
-  // 历史面板只在「侧栏处于工具态」且「确实有历史」时露出。
-  // 之前它只跟当前是否打开了文件走，结果切回会话列表后仍挂在侧栏底部
-  syncHistoryPanel() {
-    const panel = this.els.openHistoryPanel;
+  // 工具态底栏（「打开…」按钮）只在侧栏处于工具态时露出，
+  // 否则它会挂在会话列表底下。原实现还要求「确实有历史」，历史功能移除后该条件已无意义。
+  syncToolsFooter() {
+    const panel = this.els.toolsFooter;
     if (!panel) return;
-    const inToolsMode = document.getElementById('toolsList')?.hidden === false;
-    panel.hidden = !inToolsMode || this.history.length === 0;
+    panel.hidden = document.getElementById('toolsList')?.hidden !== false;
   }
 
   promptOpenFile() {
@@ -226,8 +212,7 @@ class MarkdownTool {
     input.click();
   }
 
-  // 取路径末段。history 持久化在 localStorage，老条目的 name 存的是全路径，
-  // 所以短名一律渲染时现算，不改存储结构，老数据自动兼容。
+  // 取路径末段（标题栏展示与导出文件名共用）：存的是全路径，短名一律现算。
   baseName(p) {
     return String(p || '').split(/[/\\]/).filter(Boolean).pop() || String(p || '');
   }
@@ -260,10 +245,10 @@ class MarkdownTool {
   }
 
   /**
-   * Tauri 模式：按绝对路径打开。
+   * Tauri 模式 / 聊天气泡里的 md chip：按绝对路径打开（走 /api/fs/read 读盘）。
    *
-   * 与 openFile(File) 的区别是拿得到真实路径，于是历史条目在正文缓存被配额挤掉之后
-   * 仍能重新读盘——Web 模式做不到这点（浏览器不给绝对路径），只能请用户重选。
+   * 与 openFile(File) 的区别是拿得到真实路径；Web 模式的拖拽/选择拿不到绝对路径，
+   * 只能走 File 对象读内容。
    */
   async openFileByPath(absPath) {
     const name = this.baseName(absPath);
@@ -289,12 +274,11 @@ class MarkdownTool {
     }
   }
 
-  // 装载一份文档：磁盘打开与历史回看共用这一条路径，保证两边行为一致
+  // 装载一份文档（磁盘打开 / 聊天气泡里的 md chip 点击共用这一条路径，保证行为一致）
   loadDocument({ path, content, modifiedTime, size }) {
     this.state.currentFile = { path, content, modifiedTime, size };
     this.els.content.scrollTop = 0; // 换文档回到顶部，否则会停在上一篇的滚动位置
     this.renderContent();
-    this.updateHistory();
     this.showTool();
   }
 
@@ -520,140 +504,6 @@ class MarkdownTool {
       // 长目录里被联动选中的项可能在可视区外，滚动它自己的面板把它带回来。
       // block:'nearest' 保证已经可见时不做任何滚动，避免目录跟着乱跳
       if (isActive && revealInToc) item.scrollIntoView({ block: 'nearest' });
-    });
-  }
-
-  // ===== 历史记录 =====
-  loadHistory() {
-    try {
-      const json = localStorage.getItem(MD_HISTORY_KEY);
-      const list = json ? JSON.parse(json) : [];
-      return Array.isArray(list) ? list : [];
-    } catch (err) {
-      console.error('历史记录加载失败', err);
-      return [];
-    }
-  }
-
-  saveHistory() {
-    // 从最旧的一条开始逐条丢正文重试：宁可退化成「点击重新选文件」，
-    // 也不能让写入失败导致整份历史（含文件名/时间）都存不下
-    const attempt = (list) => {
-      localStorage.setItem(MD_HISTORY_KEY, JSON.stringify(list));
-    };
-    try {
-      attempt(this.history);
-      return;
-    } catch (err) {
-      console.warn('历史写入超配额，开始丢弃正文缓存', err);
-    }
-
-    for (let i = this.history.length - 1; i >= 0; i--) {
-      if (!this.history[i].content) continue;
-      delete this.history[i].content;
-      try {
-        attempt(this.history);
-        return;
-      } catch { /* 继续丢下一条 */ }
-    }
-
-    try {
-      attempt(this.history);
-    } catch (err) {
-      console.error('历史记录保存失败，已放弃', err);
-    }
-  }
-
-  updateHistory() {
-    const file = this.state.currentFile;
-    if (!file) return;
-
-    // 同名视为同一份文档：先摘掉旧记录再插到队首
-    this.history = this.history.filter((h) => h.path !== file.path);
-    this.history.unshift({
-      path: file.path,
-      name: file.path,
-      time: file.modifiedTime,
-      size: file.size,
-      // 超过单篇上限就不缓存正文，点击时降级
-      content: file.content.length <= MD_CACHE_MAX_ONE ? file.content : undefined,
-    });
-    this.history = this.history.slice(0, MD_HISTORY_MAX);
-
-    // 总量封顶：从最旧的开始摘正文，直到落回预算内
-    let total = this.history.reduce((n, h) => n + (h.content ? h.content.length : 0), 0);
-    for (let i = this.history.length - 1; i >= 0 && total > MD_CACHE_MAX_TOTAL; i--) {
-      if (!this.history[i].content) continue;
-      total -= this.history[i].content.length;
-      delete this.history[i].content;
-    }
-
-    this.saveHistory();
-    this.renderHistory();
-  }
-
-  renderHistory() {
-    const list = this.els.historyList;
-    if (!list) return;
-
-    list.textContent = '';
-    const currentPath = this.state.currentFile?.path;
-
-    this.history.forEach((item) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'md-history-item';
-      btn.classList.toggle('active', item.path === currentPath);
-      btn.setAttribute('data-path', item.path);
-
-      // 文件名来自用户磁盘，走 textContent 而非 innerHTML，避免带标签的文件名注入侧栏
-      const name = document.createElement('span');
-      name.className = 'md-history-name';
-      name.textContent = this.baseName(item.name);
-
-      const time = document.createElement('span');
-      time.className = 'md-history-time';
-      const stamp = new Date(item.time).toLocaleString('zh-CN');
-      time.textContent = item.content ? stamp : `${stamp} · 需重新选择`;
-
-      btn.append(name, time);
-      // 列表只显示短名，完整路径留给悬停
-      btn.title = item.content ? item.path : `${item.path}（正文未缓存，点击后需重新选择文件）`;
-      list.appendChild(btn);
-    });
-
-    this.syncHistoryPanel();
-  }
-
-  handleHistoryClick(e) {
-    const el = e.target.closest('.md-history-item');
-    if (!el) return;
-
-    const path = el.getAttribute('data-path');
-    const item = this.history.find((h) => h.path === path);
-    if (!item) return;
-
-    if (!item.content) {
-      // 正文没缓存（超限或被配额挤掉）。Tauri 下 path 是真实绝对路径，可直接重读盘。
-      // 但 Web 模式存进 history 的 path 是裸文件名（浏览器不给绝对路径），
-      // 而 dev 模式下 webview 与浏览器同源、共享 localStorage，桌面版完全可能读到这种老条目——
-      // 拿裸文件名去 /api/fs/read 只会换回一句「仅支持绝对路径」的天书，不如直接请用户重选。
-      // 正则覆盖 Windows 盘符 / UNC / Unix 三种形态，与后端 path.isAbsolute 的判定对齐，不更严。
-      const reReadable = window.tauriApi?.isTauri && /^([a-zA-Z]:[\\/]|\\\\|\/)/.test(item.path);
-      if (reReadable) {
-        this.openFileByPath(item.path);
-      } else {
-        this.showToast(`「${this.baseName(item.name)}」正文未缓存，请重新选择该文件`);
-        this.promptOpenFile();
-      }
-      return;
-    }
-
-    this.loadDocument({
-      path: item.path,
-      content: item.content,
-      modifiedTime: item.time,
-      size: item.size ?? item.content.length,
     });
   }
 

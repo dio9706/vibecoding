@@ -295,6 +295,39 @@ test('parseFeatureTag：值为纯引号返回 null', () => {
   assert.equal(parseFeatureTag(doc), null);
 });
 
+test('buildDocgenPrompt：prime 单独成节，且不与 supplements 混排', () => {
+  const p = buildDocgenPrompt({
+    reqDocText: '需求正文',
+    prime: { text: '旧版本地筛选卡死过，务必走后端', files: [{ name: '复盘.md', path: '/t/复盘.md' }] },
+    supplements: [{ text: '补充1', files: [] }],
+    projects: PROJECTS,
+  });
+  assert.match(p, /旧版本地筛选卡死过/);
+  assert.match(p, /复盘\.md/);
+  // prime 是"文档之外的已知背景"，supplements 是"对已有文档提的调整"，
+  // 两节标题必须不同，否则模型分不清哪个是背景哪个是修订意见
+  assert.match(p, /背景与理解/);
+  assert.match(p, /补充说明/);
+  // prime 必须排在 supplements 之前：背景是前提，修订意见是在前提之上的增量
+  assert.ok(p.indexOf('背景与理解') < p.indexOf('补充说明'));
+});
+
+test('buildDocgenPrompt：无 prime 时不产出空背景节', () => {
+  const p = buildDocgenPrompt({ reqDocText: '需求正文', projects: PROJECTS });
+  assert.doesNotMatch(p, /背景与理解/);
+});
+
+test('buildDocgenPrompt：prime 只有附件没正文时仍要输出', () => {
+  // 用户可能只拖一份复盘文档进来、一个字不写，这时附件路径必须进 prompt
+  const p = buildDocgenPrompt({
+    reqDocText: '需求正文',
+    prime: { text: '', files: [{ name: '复盘.md', path: '/t/复盘.md' }] },
+    projects: PROJECTS,
+  });
+  assert.match(p, /背景与理解/);
+  assert.match(p, /复盘\.md/);
+});
+
 test('buildDocgenPrompt：existingTags 注入到输出契约', () => {
   const p = buildDocgenPrompt({
     reqDocText: '需求正文',

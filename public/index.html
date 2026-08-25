@@ -6,6 +6,9 @@
     <title>VIBE CODING</title>
     <link rel="stylesheet" href="/app.css" />
     <link rel="stylesheet" href="/css/markdown-tool.css" />
+    <link rel="stylesheet" href="/css/req-v2.css" />
+    <!-- 评审期工作台布局：放在最后，用于接管 app.css 里 #reqPage 的限宽 -->
+    <link rel="stylesheet" href="/css/req-workbench.css" />
   </head>
   <body>
     <!-- 启动罩：后端冷启动期间盖住整个 UI（boot-gate.js 探到 /api/ping 通即撤）。
@@ -73,10 +76,8 @@
             </span>
           </button>
         </div>
-        <!-- Markdown 工具的打开历史 -->
-        <div class="md-history" id="mdHistory" hidden>
-          <div class="md-history-head">打开历史</div>
-          <div id="mdHistoryList" class="md-history-list"></div>
+        <!-- 工具态底栏：仅「打开…」快捷入口（原 Markdown 打开历史区已移除） -->
+        <div class="tools-footer" id="toolsFooter" hidden>
           <button class="btn" id="mdOpenFileBtn2">📄 打开…</button>
         </div>
       </aside>
@@ -487,9 +488,11 @@
 
           <div class="opt-body">
             <div class="opt-picker">
-              <label for="optDirInput">项目目录</label>
-              <input id="optDirInput" type="text" placeholder="选择或输入项目绝对路径" />
-              <button id="optPickDir" class="btn">浏览…</button>
+              <button class="dir-selector" id="optDirBtn" title="选择要体检的项目目录">
+                <span class="folder">📁</span>
+                <span class="dir-label" id="optDirLabel">选择项目目录</span>
+                <span class="caret">▾</span>
+              </button>
             </div>
 
             <div class="opt-score">

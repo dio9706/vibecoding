@@ -55,8 +55,10 @@ export async function analyze(task) {
       {
         ...claudeAuthOpts(), // 跟随备用账号轮换（与 web run 同一 token 池）
         cwd: botCtx.cwd,
-        permissionMode: 'default',
-        allowedTools: ['Read', 'Grep', 'Glob'], // 只读，物理上无法改码/执行
+        // dontAsk：未列出的工具直接拒绝，不再依赖「没传 canUseTool 回调」这个隐含前提。
+        // allowedTools 单用只是免确认，挡不住 Write/Edit/Bash（见 review/index.js 注释）。
+        permissionMode: 'dontAsk',
+        allowedTools: ['Read', 'Grep', 'Glob'], // 只读
         // 只累加为兜底；最终以 result（模型的最终回复）为准，避免把边查边说的探索过程写进摘要
         onText: (t) => (streamed += t),
         onResult: (i) => {

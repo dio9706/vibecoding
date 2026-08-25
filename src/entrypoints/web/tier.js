@@ -30,7 +30,9 @@ export async function classifyTier(prompt) {
       permissionMode: 'default',
       persistSession: false, // 内部一次性调用不落盘——否则在左栏历史里生成与真会话同标题的伪会话，极易误点
       abortController: ac,
-      disallowedTools: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
+      // 通配符禁全部工具（同 llm-classify.js）：列名黑名单补不全，
+      // 且这里原本连 Agent/Task 都漏了——判档模型一旦起子代理就会吃掉整轮。
+      disallowedTools: ['*'],
       systemPrompt: {
         type: 'custom',
         custom:

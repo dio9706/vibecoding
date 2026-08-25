@@ -65,15 +65,47 @@ function supplementLines(supplements) {
     .join('\n');
 }
 
-/** 评审期 docgen prompt：需求文档全文 + 补充说明（按时间序）+ 工程角色表 + 输出契约。 */
-export function buildDocgenPrompt({ reqDocText, supplements = [], projects, existingTags = [] }) {
+/**
+ * 生成前背景（prime）→ prompt 片段。
+ *
+ * 与 supplements 分开成节而不是混排：prime 是「需求文档之外用户已知的前提」（历史坑、
+ * 约束、优先级），supplements 是「对已产出文档提的调整意见」。混在一节里模型分不清
+ * 哪个是前提哪个是增量。只有附件没正文也要输出——用户可能只拖一份复盘文档进来。
+ */
+function primePart(prime) {
+  const text = String(prime?.text ?? '').trim();
+  const files = prime?.files || [];
+  if (!text && !files.length) return '';
+  return (
+    `\n用户补充的背景与理解（需求文档之外的已知前提，优先级高于文档原文）：\n` +
+    `${text}${attachmentsPart(files)}\n`
+  );
+}
+
+/**
+ * 评审期 docgen prompt：需求文档全文 + 生成前背景 + 补充说明（按时间序）+ 问卷答复
+ * + 工程角色表 + 输出契约。
+ *
+ * 顺序有讲究：prime 排在 supplements 之前（背景是前提，修订意见是前提之上的增量）；
+ * quizPart 必须排在输出契约**之前**——契约后面追加内容会让模型把它当成正文的一部分，
+ * 破坏三节结构。
+ */
+export function buildDocgenPrompt({
+  reqDocText,
+  prime = null,
+  supplements = [],
+  projects,
+  existingTags = [],
+  quizPart = '',
+}) {
+  const pri = primePart(prime);
   const sup = supplements.length
     ? `\n补充说明（按时间序，后者优先级更高）：\n${supplementLines(supplements)}\n`
     : '';
   return (
     `你是资深架构师，请阅读需求文档并实际查证下列工程后，产出一份开发文档。\n\n` +
     `工程角色（只读查证，本次不做任何修改）：\n${projectRoleLines(projects).join('\n')}\n\n` +
-    `需求文档全文：\n「${reqDocText}」\n${sup}\n` +
+    `需求文档全文：\n「${reqDocText}」\n${pri}${sup}${quizPart}\n` +
     docOutputContract({ existingTags })
   );
 }

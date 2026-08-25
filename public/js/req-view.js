@@ -3,8 +3,10 @@
 import { $, fmtTime, renderMarkdown, dirTail } from './util.js';
 import { confirmDialog, promptDialog, textareaDialog } from './ui.js';
 import { loadConvs } from './conv-store.js';
-import { openConv, createReqConv, isConvRunning } from './chat.js';
+import { openConv, createReqConv, isConvRunning, getCurrentConvId, sendMessageProgrammatically } from './chat.js';
 import { convSetTitle, convDelete } from './conv-store.js';
+import { startGenerateFlow, resetQuizState } from './req-quiz.js';
+import { mountMap } from './req-map.js';
 
 let _showView = () => {};
 
@@ -27,13 +29,35 @@ let reqEpoch = 0;
 let busyTimer = null; // 3s 轮询：仅在打开的需求 busy 非空时存在
 let wasBusy = false; // 上一次已知的 busy 状态：true→false 的边沿用于回到最新版
 let docOverride = null; // { v, content } | null：用户手动切到非最新版本时的展示态
+let reportTab = 'doc'; // 评审期双报告页签：'doc' 开发文档 | 'map' 需求地图
 let supplementHistoryExpanded = false;
 // 补充说明草稿：busy 轮询 / 版本页签切换 / 历史折叠都会触发 renderReqPage 整页重建，
 // 若草稿只是 renderSupplementBox 内的局部变量，每次重建都会悄悄清空用户还没提交的输入。
 // 提到模块级持久化，重建时原样回填；仅在「打开另一个需求」或「提交成功」时才清空。
 let supplementDraftText = '';
 let supplementPendingFiles = []; // [{ name, path: string|null }]，path 待上传完成才回填
+// 生成前背景（req.prime）草稿：同 supplementDraftText 思路，busy 轮询触发的整页重建不能清空。
+// null 表示「本需求还没回填过」，首次渲染时从 req.prime 取值；之后一律以草稿为准，
+// 否则 3s 轮询回来的旧 prime 会把用户正在打的字覆盖掉。
+let primeDraft = null;
+let primeFiles = []; // [{ name, path: string|null }]
+let primeSaveTimer = null;
+let primeSavedAt = 0; // 上次保存成功的时刻，用于「已保存」微提示
 let archiveNoteDraft = ''; // 归档备注草稿：同 supplementDraftText 思路，busy/轮询触发的整页重建不清空
+
+// ---- 优化汇总（retro）进度 ----
+// map-reduce 全程在前端编排，req.busy 永远不会被写（busy 只由服务端系统任务落盘），
+// 所以归档页没有任何进度可看——用户点完「优化汇总」只能靠 toast 猜进度。
+// 提到模块级：归档页会因轮询/重渲整页重建，进度不能只活在渲染函数的局部变量里（同 archiveNoteDraft 思路）。
+let retroProgress = { phase: 'idle', total: 0, current: 0, title: '', failed: 0, reqId: null };
+function setRetroProgress(patch) {
+  Object.assign(retroProgress, patch);
+  renderRetroProgress(); // 就地更新进度块，不整页重渲——否则会打断用户正在填的归档备注
+}
+function bumpRetroFailed() {
+  retroProgress.failed += 1;
+  renderRetroProgress();
+}
 
 const PHASE_META = {
   review: { label: '评审', cls: 'review' },
@@ -81,6 +105,7 @@ function isReqViewActive() {
   const p = document.querySelector('.panel-page[data-view="req"]');
   return !!p && !p.hidden;
 }
+
 
 // ============================================================
 // 侧栏需求列表
@@ -660,7 +685,10 @@ async function fetchRequirement(id) {
  *   自身这一次网络往返——从 openRequirement 发起的调用会显式传入更早捕获的 epoch，
  *   从而也能感知「往返期间用户已经点开了别的需求」这类更早发生的竞态）。
  */
-async function loadAndRenderReq(id, epoch = reqEpoch) {
+async function loadAndRenderReq(id, epoch = reqEpoch, { allowNav = true } = {}) {
+  // allowNav 默认 true 而 applyFetchedReq 默认 false，是刻意相反的：本函数的调用方全是用户手势
+  //（点开需求 / 定稿成功 / 归档完成 / 配置保存 / 补充提交），这些必须导航；而 applyFetchedReq
+  // 还会被后台 3s 轮询直调，那条路径默认不许导航。新增自动调用方时记得显式传 allowNav:false。
   const { ok, data } = await fetchRequirement(id);
   if (epoch !== reqEpoch) return; // 过期响应：等待期间已经翻到别的需求，丢弃不渲染
   if (!ok || !data) {
@@ -668,11 +696,31 @@ async function loadAndRenderReq(id, epoch = reqEpoch) {
     renderReqError((data && data.error) || '需求不存在或加载失败');
     return;
   }
-  applyFetchedReq(id, data);
+  applyFetchedReq(id, data, { allowNav });
 }
 
-/** 落地一次成功的详情拉取：更新缓存态 + 渲染 + 就地刷新侧栏 + 管理 busy 轮询定时器。 */
-function applyFetchedReq(id, data) {
+/** 落地一次成功的详情拉取：更新缓存态 + 渲染 + 就地刷新侧栏 + 管理 busy 轮询定时器。
+ *
+ * @param {{allowNav?: boolean}} [opts] allowNav=true 表示「这是用户手势触发的」，必须导航到该需求
+ *   （点开需求、定稿成功、归档完成等）。默认 false 是给后台 3s busy 轮询用的：那条路径只有在
+ *   isReqContextActive() 成立时才允许导航，否则仅就地更新侧栏。两个默认值刻意相反，见
+ *   loadAndRenderReq 的 allowNav 默认 true。 */
+function applyFetchedReq(id, data, { allowNav = false } = {}) {
+  // ★ 两个导航闸门，必须在下面改写 currentReqId 之前算（改写后 onDocPage 恒真，守卫就废了）。
+  //   后台 3s 轮询走 allowNav=false，此时：
+  //   - onDocPage：用户此刻确实开着本需求的文档页 → phase 推进时跟着走是期望行为
+  //   - inThisConv：用户待在本需求的寄生会话里 → 允许把会话切过去接流
+  //   两者都不成立 = 用户早点开了别的会话/别的视图，只更新侧栏，绝不把他拽回来
+  //   （这是「任务完成后自动切会话」的第二个来源；不能只查 reqEpoch——它仅由
+  //    openRequirement 自增，用户点侧栏别的会话根本不改它）。
+  const onDocPage = isReqViewActive() && currentReqId === id;
+  const inThisConv = !!(data.convId && getCurrentConvId() === data.convId);
+  // 允许切换会话：用户在本需求上下文里（文档页或它的会话里）就算，为的是让会话能接上实时流
+  const mayTouchConv = allowNav || onDocPage || inThisConv;
+  // 允许接管视图。刻意不认 inThisConv：用户在本需求会话里但视图停在设置/任务面板时，
+  // 不该被抢视图。反之 onDocPage 必须认——dev/test 期 #reqPage 已不再渲染，把人留在
+  // 文档页上等于让他盯着一个空占位（这正是用例③逮到的过严 bug）。
+  const mayTakeOverView = allowNav || onDocPage;
   // docgen 202 只代表入队，busy 要等后端泵（5s tick）派发时才写入，窗口期 get 返回 queued=true。
   // 把它合成为 busy 展示，busy 条 / 按钮禁用 / 3s 轮询全部立即生效——否则 202 后立刷拿到
   // busy=null，页面静止在旧态，用户重开需求才能看到「生成中」。
@@ -686,6 +734,15 @@ function applyFetchedReq(id, data) {
     supplementDraftText = '';
     supplementPendingFiles = [];
     archiveNoteDraft = '';
+    // 背景草稿归位到「未回填」：下一次渲染会从新需求的 req.prime 取值。
+    // 顺带取消在途的防抖保存，否则它会把上一个需求的正文写进这个需求。
+    primeDraft = null;
+    primeFiles = [];
+    if (primeSaveTimer) {
+      clearTimeout(primeSaveTimer);
+      primeSaveTimer = null;
+    }
+    resetQuizState(); // 换需求：上一份问卷的答案与游标不该跟过来
     // 切到另一个需求：旧需求的 busy 轮询立即失效。不清掉的话 busyTimer 仍非空，
     // 下面「data.busy && !busyTimer」会误判为「已在轮询」而跳过新需求的轮询重建——
     // 双 busy 需求 A→B 场景下，B 将永远等不到轮询（A 的旧定时器只会在下一拍自证失效后清空，
@@ -701,19 +758,23 @@ function applyFetchedReq(id, data) {
 
   if (data.phase === 'dev' || data.phase === 'test') {
     // 开发/测试期（Task 10）：寄生进聊天视图，#reqPage 不渲染，也不调 _showView('req')——
-    // openRequirementChat 最终调用的 chat.js openConv() 内部会经 _goChat() 切到聊天视图，
-    // 无论这次是用户点开需求（本函数首次进入），还是 finalize/dev-done 等「原地刷新」路径
-    // 调 loadAndRenderReq 触发，效果一致。
+    // 由 openRequirementChat 里的 openConv 负责切到聊天视图（仅在允许导航时）。
     // 文档模式的 busy 轮询在此阶段没有意义（#reqPage 不再展示），必须显式收掉，否则一个
     // 「评审期 busy→定稿→开发期」的需求会在后台留一个永远不会再被清理的 3s 轮询。
     if (busyTimer) {
       clearInterval(busyTimer);
       busyTimer = null;
     }
-    openRequirementChat(id, data);
+    // 用户已经走开（既不在本需求文档页、也不在它的会话里）：只更新侧栏，绝不把他拽过来。
+    // 上面的 patchListEntry(data) 已经把最新状态画进侧栏了。
+    if (!mayTouchConv) return;
+    // nav=false 的情形：用户待在本需求会话里、但视图停在设置/任务面板 —— 会话该切（接流），
+    // 视图不该抢。
+    openRequirementChat(id, data, { nav: mayTakeOverView });
     return;
   }
 
+  if (!mayTakeOverView) return; // 后台刷新不得把用户从他正在看的东西上拽回需求文档页
   _showView('req');
   if (wasBusy && !data.busy) docOverride = null; // 生成刚结束：回到最新版展示
   wasBusy = !!data.busy;
@@ -729,8 +790,10 @@ function applyFetchedReq(id, data) {
  * 开发/测试期：确保该需求有寄生 conv 再交给 chat.js 打开——横幅/右栏由 req-chat.js 经
  * bindReqConvHook 挂载（依赖方向 req-view → chat.js，单向，本模块不直接碰 #reqBanner/#reqRail）。
  * record.convId 存在且本地 conv 仍在（用户可能清过 localStorage）才复用，否则新建并回填。
+ *
+ * @param {{nav?: boolean}} [opts] nav=false（后台刷新）时只切会话不抢视图，见 openConv 的 nav 说明。
  */
-async function openRequirementChat(id, data) {
+async function openRequirementChat(id, data, { nav = true } = {}) {
   try {
     const list = loadConvs();
     let convId = data.convId && list.some((c) => c.id === data.convId) ? data.convId : null;
@@ -752,7 +815,7 @@ async function openRequirementChat(id, data) {
         window.toast.error('网络错误，conv 绑定失败');
       }
     }
-    openConv(convId);
+    openConv(convId, { nav });
   } catch (e) {
     window.toast.error('打开开发会话失败：' + (e?.message || e));
   }
@@ -771,6 +834,9 @@ function startBusyPolling(id) {
     const { ok, data } = await fetchRequirement(id);
     if (epoch !== reqEpoch) return; // await 期间已翻到别的需求：丢弃这次响应，不渲染
     if (!ok || !data) return; // 瞬时错误：跳过本轮，下次再试
+    // await 期间用户可能已点侧栏切走（那既不改 epoch 也不改 currentReqId，头部的自杀检查逮不到）。
+    // applyFetchedReq 的 allowNav 默认 false，其内部闸门会据「用户是否还在本需求上下文」决定
+    // 是否导航——这里不再重复判定，只把「这是后台刷新」的语义如实传下去。
     applyFetchedReq(id, data);
   }, 3000);
 }
@@ -799,15 +865,7 @@ function renderReqPage(req) {
   const savedScroll = scrollHost ? scrollHost.scrollTop : 0;
   box.innerHTML = '';
   if (req.phase === 'review') {
-    box.appendChild(renderChipsBar(req));
-    const err = renderErrorBanner(req);
-    if (err) box.appendChild(err);
-    const busyBar = renderBusyBar(req);
-    if (busyBar) box.appendChild(busyBar);
-    box.appendChild(renderDocArea(req));
-    // 首次未生成开发文档前，底部仅有文档区空态的 [生成开发文档] 按钮；生成出 v1 后才出现补充说明框
-    //（补充说明是「对已有文档提出调整」，没有文档时提交没有意义，也会让首次流程出现两个入口造成困惑）。
-    if ((req.devDoc?.versions || []).length) box.appendChild(renderSupplementBox(req));
+    box.appendChild(renderWorkbench(req));
   } else if (req.phase === 'archiving') {
     box.appendChild(renderArchivingPage(req));
   } else if (req.phase === 'archived') {
@@ -829,6 +887,803 @@ function renderPlaceholderBar() {
   return bar;
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 评审期工作台（双栏）
+// plan: docs/superpowers/plans/2026-08-25-req-workbench.md
+//
+// 主栏永远放「当前阶段的主角」：没有文档时是工程配置（它决定文档正确性），
+// 有文档时是文档本身、配置降级为右栏只读树。右栏常驻行动区与辅助信息，
+// 顺带把旧版宽屏右侧一千多像素的空白填成有效内容。
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 小工具：建元素。本文件其余部分用 createElement 直写，这里高频建节点故收一个。 */
+function e(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+/** 配置是否够开工：与后端 pickCwdAndDirs 同判据 —— 任一工程非空 + 有需求文档。 */
+function cfgReady(req) {
+  const dirs = [req.projects?.frontend?.dir, req.projects?.backend?.dir].filter(Boolean);
+  return dirs.length > 0 && !!req.reqDoc;
+}
+
+function hasDevDoc(req) {
+  return (req.devDoc?.versions || []).length > 0;
+}
+
+/** 最后一条历史是否为失败事件（错误条与阶段轨共用同一判据，免得两处说法不一致）。 */
+function lastEventFailed(req) {
+  const last = (req.history || []).at(-1);
+  return !!last && /失败|被拒|中断/.test(last.event);
+}
+
+function renderWorkbench(req) {
+  const wrap = e('div', 'rqw');
+  wrap.appendChild(renderTopBar(req));
+  const body = e('div', 'rqw-body');
+  body.appendChild(renderMainCol(req));
+  body.appendChild(renderSideCol(req));
+  wrap.appendChild(body);
+  return wrap;
+}
+
+// ---- 顶部：元信息 + 三步阶段轨 ----
+
+function renderTopBar(req) {
+  const top = e('div', 'rqw-top');
+
+  const meta = e('div', 'rqw-meta');
+  meta.appendChild(e('span', 'rqw-phase-badge', '评审期'));
+  meta.appendChild(e('span', 'sep', '·'));
+  const created = e('span');
+  created.append('创建于 ', Object.assign(e('b'), { textContent: fmtTime(req.createdAt) }));
+  meta.appendChild(created);
+  if (req.reqDoc) {
+    meta.appendChild(e('span', 'sep', '·'));
+    const doc = e('span');
+    doc.append('需求文档 ', Object.assign(e('b'), { textContent: req.reqDoc.name }));
+    meta.appendChild(doc);
+  }
+  meta.appendChild(e('span', 'sep', '·'));
+  const versions = req.devDoc?.versions || [];
+  meta.appendChild(
+    e(
+      'span',
+      null,
+      versions.length
+        ? `开发文档 v${Math.max(...versions.map((v) => v.v))} · 共 ${versions.length} 版`
+        : req.busy
+          ? '开发文档生成中'
+          : '尚未生成开发文档',
+    ),
+  );
+  top.appendChild(meta);
+  top.appendChild(renderStepsBar(req));
+  return top;
+}
+
+/**
+ * 阶段轨：配置 → 生成文档 → 定稿。三步而非四步 —— 问卷是「生成」动作里的一道闸，
+ * 不是用户需要规划的阶段，给它一格会让人以为那是个必经的独立环节。
+ */
+function renderStepsBar(req) {
+  const ready = cfgReady(req);
+  const hasDoc = hasDevDoc(req);
+  const busy = !!req.busy;
+  const failed = !hasDoc && !busy && lastEventFailed(req);
+
+  const dirs = [req.projects?.frontend?.dir, req.projects?.backend?.dir].filter(Boolean).length;
+  const slots = dirs + (req.reqDoc ? 1 : 0);
+
+  let s2 = ['todo', ''];
+  if (hasDoc) s2 = busy ? ['now', '修订中'] : ['done', `已出 v${Math.max(...(req.devDoc.versions || []).map((v) => v.v))}`];
+  else if (busy) s2 = ['now', '模型阅读代码中'];
+  else if (failed) s2 = ['err', '生成失败'];
+  else if (ready) s2 = ['now', '待生成'];
+
+  const rows = [
+    ready ? ['done', `${slots}/3 已配置`] : ['now', `${slots}/3 已配置`],
+    s2,
+    hasDoc && !busy ? ['now', '待定稿'] : ['todo', ''],
+  ];
+  const defs = [
+    ['01', '配置工程与文档'],
+    ['02', '生成开发文档'],
+    ['03', '定稿进开发期'],
+  ];
+
+  const bar = e('div', 'rqw-steps');
+  rows.forEach(([cls, sub], i) => {
+    const step = e('div', 'rqw-step ' + cls);
+    step.appendChild(e('div', 'rqw-step-n', defs[i][0]));
+    step.appendChild(e('div', 'rqw-step-t', defs[i][1]));
+    const s = e('div', 'rqw-step-s');
+    s.innerHTML = sub ? '' : '&nbsp;'; // 占位保持三步等高，否则有副标题的那格会把轨道顶歪
+    if (sub) s.textContent = sub;
+    step.appendChild(s);
+    bar.appendChild(step);
+  });
+  return bar;
+}
+
+// ---- 左主栏 ----
+
+function renderMainCol(req) {
+  const col = e('div', 'rqw-main');
+  const err = renderErrorBanner(req);
+  if (err) col.appendChild(err);
+  const busyBar = renderBusyBar(req);
+  if (busyBar) col.appendChild(busyBar);
+
+  if (hasDevDoc(req)) {
+    col.appendChild(renderReportArea(req));
+    // 补充说明是「对已有文档提调整」，没有文档时提交没有意义。
+    // 地图页签下不出：那是「对文档提意见」的入口，与地图标注是两条不同的回流路径。
+    if (reportTab === 'doc') col.appendChild(renderSupplementBox(req));
+    return col;
+  }
+
+  // 还没有文档：配置是主角，背景补充紧随其后
+  col.appendChild(renderConfigCard(req));
+  col.appendChild(renderPrimeBox(req));
+  return col;
+}
+
+/**
+ * 工程配置卡（配置阶段主栏主角）。
+ *
+ * 旧版把三个槽位压成一行 chips：未配置时只有「＋ 前端工程」一个虚框，看不出配了
+ * 什么、开发还是只读、完整路径是什么。这里每槽一张子卡把这些摊开——它们正是
+ * 「文档会不会生成错」的判断依据。
+ *
+ * 路径与需求文档的编辑仍走 openConfigModal（那里有目录选择器与文件上传，已验证），
+ * 只有读写模式开关就地生效：它高频、低风险，为它开一次弹层不划算。
+ */
+function renderConfigCard(req) {
+  const card = e('div', 'rqw-cfg');
+
+  const dirs = [req.projects?.frontend?.dir, req.projects?.backend?.dir].filter(Boolean).length;
+  const hd = e('div', 'rqw-cfg-hd');
+  hd.appendChild(e('h4', null, '工程配置'));
+  hd.appendChild(e('span', 'cnt', `${dirs + (req.reqDoc ? 1 : 0)} / 3 已配置`));
+  hd.appendChild(e('span', 'gap'));
+  const editAll = e('button', 'rqw-iconbtn', '✏️ 编辑全部');
+  editAll.type = 'button';
+  editAll.onclick = () => openConfigModal(req);
+  hd.appendChild(editAll);
+  card.appendChild(hd);
+
+  const note = e('div', 'rqw-cfg-note');
+  note.append(
+    '开发文档会基于这些工程的',
+    Object.assign(e('b'), { textContent: '实际代码' }),
+    '生成，配置错了文档就是错的。只读工程仅供模型阅读，不会产生任何改动。',
+  );
+  card.appendChild(note);
+
+  const slots = e('div', 'rqw-slots');
+  slots.appendChild(makeProjSlot(req, 'frontend', '前端工程', '🖥'));
+  slots.appendChild(makeProjSlot(req, 'backend', '后端工程', '🗄'));
+  slots.appendChild(makeDocSlot(req));
+  // 功能模块标签由 docgen 自动识别，没文档时还没有值，展示它只会是个空槽
+  if (req.featureTag) slots.appendChild(makeTagSlot(req));
+  card.appendChild(slots);
+  return card;
+}
+
+function makeProjSlot(req, key, label, icon) {
+  const p = req.projects?.[key];
+  const slot = e('div', 'rqw-slot' + (p ? '' : ' blank'));
+
+  const top = e('div', 'rqw-slot-top');
+  top.appendChild(e('span', 'rqw-slot-ic', icon));
+  top.appendChild(e('span', 'rqw-slot-k', label));
+  // 后端可空是刻意的：只有前端改动的需求很常见，不该拿一个红叉逼用户填
+  if (key === 'backend' && !p) top.appendChild(e('span', 'rqw-slot-opt', '可留空'));
+  top.appendChild(e('span', 'gap'));
+  if (p) top.appendChild(makeDevSeg(req, key, p));
+  slot.appendChild(top);
+
+  const row = e('div', 'rqw-slot-row');
+  if (p) {
+    const path = e('input', 'rqw-path');
+    path.value = p.dir;
+    path.readOnly = true; // 改路径走弹层（那里有目录选择器），这里只作展示与全路径查看
+    path.title = p.dir;
+    row.appendChild(path);
+    const change = e('button', 'rqw-btn sm', '更改');
+    change.type = 'button';
+    change.onclick = () => openConfigModal(req);
+    row.appendChild(change);
+  } else {
+    const btn = e('button', 'rqw-btn sm', '选择工程目录');
+    btn.type = 'button';
+    btn.onclick = () => openConfigModal(req);
+    row.appendChild(btn);
+  }
+  slot.appendChild(row);
+
+  const ft = e('div', 'rqw-slot-ft');
+  if (p) {
+    ft.appendChild(
+      e('span', p.dev ? 'ok' : null, p.dev ? '✓ 开发态：本次改动会落在这个工程' : '只读：仅供模型阅读，不会产生改动'),
+    );
+  } else if (key === 'backend') {
+    ft.appendChild(e('span', null, '未配置时模型看不到后端代码，接口契约只能依据需求文档推断'));
+  } else {
+    ft.appendChild(e('span', 'warn', '至少要配一个工程才能生成开发文档'));
+  }
+  slot.appendChild(ft);
+  return slot;
+}
+
+/** 读写模式二段开关。就地保存：projects 是全量替换，故要把另一侧原样带上。 */
+function makeDevSeg(req, key, p) {
+  const seg = e('span', 'rqw-seg');
+  const mk = (mode, text) => {
+    const b = e('button', p.dev === (mode === 'dev') ? 'on' : '', text);
+    b.type = 'button';
+    b.dataset.m = mode;
+    b.onclick = async () => {
+      const want = mode === 'dev';
+      if (p.dev === want) return;
+      const projects = {
+        frontend: req.projects?.frontend ? { ...req.projects.frontend } : null,
+        backend: req.projects?.backend ? { ...req.projects.backend } : null,
+      };
+      if (!projects[key]) return;
+      projects[key].dev = want;
+      try {
+        const r = await fetch('/api/req/config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: req.id, projects }),
+        });
+        const d = await r.json();
+        if (!r.ok) return window.toast.error(d.error || '保存失败');
+        await loadAndRenderReq(req.id);
+      } catch {
+        window.toast.error('网络错误');
+      }
+    };
+    return b;
+  };
+  seg.append(mk('dev', '开发'), mk('ro', '只读'));
+  return seg;
+}
+
+function makeDocSlot(req) {
+  const d = req.reqDoc;
+  const slot = e('div', 'rqw-slot' + (d ? '' : ' blank'));
+  const top = e('div', 'rqw-slot-top');
+  top.appendChild(e('span', 'rqw-slot-ic', '📄'));
+  top.appendChild(e('span', 'rqw-slot-k', '需求文档'));
+  top.appendChild(e('span', 'gap'));
+  const btn = e('button', 'rqw-iconbtn', d ? '重新上传' : '上传');
+  btn.type = 'button';
+  btn.onclick = () => openConfigModal(req);
+  top.appendChild(btn);
+  slot.appendChild(top);
+
+  const row = e('div', 'rqw-slot-row');
+  if (d) {
+    const path = e('input', 'rqw-path');
+    path.value = d.name;
+    path.readOnly = true;
+    path.title = d.path || d.name;
+    row.appendChild(path);
+  } else {
+    const pick = e('button', 'rqw-btn sm', '粘贴文本或上传文件');
+    pick.type = 'button';
+    pick.onclick = () => openConfigModal(req);
+    row.appendChild(pick);
+  }
+  slot.appendChild(row);
+
+  const ft = e('div', 'rqw-slot-ft');
+  ft.appendChild(
+    d
+      ? e('span', 'ok', '✓ 已就绪，生成时会通读全文')
+      : e('span', 'warn', '必填：没有需求文档无法生成开发文档'),
+  );
+  slot.appendChild(ft);
+  return slot;
+}
+
+function makeTagSlot(req) {
+  const slot = e('div', 'rqw-slot');
+  const top = e('div', 'rqw-slot-top');
+  top.appendChild(e('span', 'rqw-slot-ic', '🏷'));
+  top.appendChild(e('span', 'rqw-slot-k', '功能模块'));
+  top.appendChild(e('span', 'gap'));
+  top.appendChild(makeTagEditor(req));
+  slot.appendChild(top);
+  const ft = e('div', 'rqw-slot-ft');
+  ft.appendChild(e('span', null, '用于归档检索与避坑规则归类，docgen 自动识别，可随时改'));
+  slot.appendChild(ft);
+  return slot;
+}
+
+/** 功能模块标签：展示态 ↔ 就地编辑态。复用 /api/req/feature-tag。 */
+function makeTagEditor(req) {
+  const host = e('span', 'rqw-tag');
+  const show = (tag) => {
+    host.innerHTML = '';
+    host.append(tag || '未识别');
+    const ed = e('button', 'rqw-iconbtn', '✏️');
+    ed.type = 'button';
+    ed.title = '修改功能模块标签';
+    ed.onclick = () => edit(tag);
+    host.appendChild(ed);
+  };
+  const edit = (tag) => {
+    host.innerHTML = '';
+    const input = e('input');
+    input.type = 'text';
+    input.value = tag || '';
+    input.maxLength = 20;
+    input.placeholder = '如：宝宝辅食';
+    host.appendChild(input);
+    const save = e('button', 'rqw-iconbtn', '保存');
+    save.type = 'button';
+    save.onclick = async () => {
+      const next = input.value.trim();
+      try {
+        const r = await fetch('/api/req/feature-tag', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: req.id, tag: next }),
+        });
+        if (!r.ok) throw new Error(await r.text().catch(() => '未知错误'));
+        show(next || null);
+      } catch (err) {
+        window.toast?.error('保存失败：' + (err?.message || err));
+      }
+    };
+    const cancel = e('button', 'rqw-iconbtn', '取消');
+    cancel.type = 'button';
+    cancel.onclick = () => show(tag);
+    host.append(save, cancel);
+    input.focus();
+    input.select();
+  };
+  show(req.featureTag);
+  return host;
+}
+
+/**
+ * 生成前背景补充（req.prime）。
+ *
+ * 旧版刻意不在生成前放补充框，理由是「没有文档时提交没有意义，且会让首次流程出现
+ * 两个入口造成困惑」。顾虑成立，所以这里**不给提交按钮**：内容防抖自动存 req.prime，
+ * 随「生成开发文档」一并生效 —— 它是生成表单的一部分，不是第二个提交入口。
+ */
+function renderPrimeBox(req) {
+  if (primeDraft === null) primeDraft = req.prime?.text || '';
+  if (!primeFiles.length && req.prime?.files?.length) primeFiles = req.prime.files.map((f) => ({ ...f }));
+
+  const box = e('div', 'rqw-prime');
+  const hd = e('div', 'rqw-prime-hd');
+  hd.appendChild(e('h4', null, '你对这个需求的理解'));
+  hd.appendChild(e('span', 'opt', '可选'));
+  hd.appendChild(e('span', 'gap'));
+  const cnt = e('span', 'cnt' + (primeDraft.length > PRIME_MAX ? ' over' : ''), `${primeDraft.length} / ${PRIME_MAX}`);
+  hd.appendChild(cnt);
+  box.appendChild(hd);
+
+  const note = e('div', 'rqw-prime-note');
+  note.append(
+    '需求文档之外你知道的事。会和文档一起交给模型，',
+    Object.assign(e('b'), { textContent: '不用单独提交' }),
+    ' —— 点右侧「生成开发文档」时一并带上。',
+  );
+  box.appendChild(note);
+
+  // 空输入框最容易被跳过，给出「该写什么」的具体门类而不是一句泛泛的提示
+  const eg = e('div', 'rqw-prime-eg');
+  for (const [n, t] of [
+    ['①', '文档没写但你知道的背景：为什么要做、给谁用、上游依赖谁'],
+    ['②', '已知的技术约束或历史坑：这块去年改崩过、那个接口不能动'],
+    ['③', '希望模型特别注意的地方：优先保证什么、什么可以先不做'],
+  ]) {
+    const row = e('div');
+    row.appendChild(e('span', 'n', n));
+    row.appendChild(e('span', null, t));
+    eg.appendChild(row);
+  }
+  box.appendChild(eg);
+
+  const ta = e('textarea', 'rqw-ta');
+  ta.placeholder =
+    '例：这个页面去年做过一版本地筛选，因为数据量涨到 3 万条后卡死才下线的，这次务必走后端查询。';
+  ta.value = primeDraft;
+  const savedTip = e('span', 'saved', '已保存');
+  ta.addEventListener('input', () => {
+    primeDraft = ta.value;
+    cnt.textContent = `${primeDraft.length} / ${PRIME_MAX}`;
+    cnt.classList.toggle('over', primeDraft.length > PRIME_MAX);
+    schedulePrimeSave(req.id, savedTip);
+  });
+  box.appendChild(ta);
+
+  const chips = e('div', 'rqw-chips');
+  for (const f of primeFiles) {
+    const chip = e('span', 'rqw-fchip' + (f.path ? '' : ' uploading'), f.name);
+    const rm = e('button', 'rm', '✕');
+    rm.type = 'button';
+    rm.title = '移除';
+    rm.onclick = () => {
+      const i = primeFiles.indexOf(f);
+      if (i >= 0) primeFiles.splice(i, 1);
+      chip.remove();
+      schedulePrimeSave(req.id, savedTip);
+    };
+    chip.appendChild(rm);
+    chips.appendChild(chip);
+  }
+  box.appendChild(chips);
+
+  const ft = e('div', 'rqw-prime-ft');
+  const fileInput = e('input');
+  fileInput.type = 'file';
+  fileInput.multiple = true;
+  fileInput.hidden = true;
+  const attach = e('button', 'rqw-btn sm', '📎 附件');
+  attach.type = 'button';
+  attach.onclick = () => fileInput.click();
+  fileInput.addEventListener('change', async () => {
+    const files = [...fileInput.files];
+    fileInput.value = '';
+    for (const f of files) {
+      const entry = { name: f.name, path: null };
+      primeFiles.push(entry);
+      const chip = e('span', 'rqw-fchip uploading', f.name);
+      chips.appendChild(chip);
+      try {
+        const r = await fetch('/api/upload?name=' + encodeURIComponent(f.name), { method: 'POST', body: f });
+        const d = await r.json();
+        if (!d.path) throw new Error(d.error || '上传失败');
+        entry.path = d.path;
+        entry.name = d.name || f.name;
+        chip.classList.remove('uploading');
+        schedulePrimeSave(req.id, savedTip);
+      } catch (err) {
+        const i = primeFiles.indexOf(entry);
+        if (i >= 0) primeFiles.splice(i, 1);
+        chip.remove();
+        window.toast.error('文件上传失败：' + (err?.message || err));
+      }
+    }
+  });
+  ft.append(attach, fileInput);
+  ft.appendChild(e('span', 'tip', '写了会同时影响下一步的不确定点分析 —— 说清楚的地方就不会再问你'));
+  ft.appendChild(e('span', 'gap'));
+  ft.appendChild(savedTip);
+  box.appendChild(ft);
+  return box;
+}
+
+const PRIME_MAX = 5000; // 与 routes-req-v2.js 的 PRIME_TEXT_MAX 一致（超出后端会截断）
+const PRIME_SAVE_DEBOUNCE = 800;
+
+/** 防抖保存背景草稿。不写 history、不触发生成，纯落盘（见 PUT /api/req/prime）。 */
+function schedulePrimeSave(reqId, tipEl) {
+  if (primeSaveTimer) clearTimeout(primeSaveTimer);
+  primeSaveTimer = setTimeout(async () => {
+    primeSaveTimer = null;
+    // 只提交已上传完成的附件：path 为空的还在途，下一次保存会带上
+    const files = primeFiles.filter((f) => f.path).map(({ name, path }) => ({ name, path }));
+    try {
+      const r = await fetch('/api/req/prime', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: reqId, text: primeDraft, files }),
+      });
+      if (!r.ok) return; // 静默失败：草稿还在内存里，下次输入会重试，不打扰用户
+      primeSavedAt = Date.now();
+      if (tipEl) {
+        tipEl.classList.add('on');
+        setTimeout(() => tipEl.classList.remove('on'), 1400);
+      }
+    } catch {
+      /* 同上：网络抖动不提示 */
+    }
+  }, PRIME_SAVE_DEBOUNCE);
+}
+
+// ---- 右栏 ----
+
+function renderSideCol(req) {
+  const col = e('div', 'rqw-side');
+  const hasDoc = hasDevDoc(req);
+
+  col.appendChild(renderActionCard(req, hasDoc));
+  if (!hasDoc && !req.busy) col.appendChild(renderFlowCard(req));
+  if (hasDoc) col.appendChild(renderCfgSummaryCard(req));
+  if (req.quiz?.questions?.length) col.appendChild(renderQuizSummaryCard(req));
+  if (hasDoc) {
+    col.appendChild(renderVersionCard(req));
+    const stats = renderStatsCard(req);
+    if (stats) col.appendChild(stats);
+  }
+  col.appendChild(renderNotifyCard(req));
+  return col;
+}
+
+/** 行动区：配置态是「生成」，文档态是「定稿」。评审期唯一的不可逆动作放这里最醒目。 */
+function renderActionCard(req, hasDoc) {
+  const card = e('div', 'rqw-act');
+
+  if (req.busy) {
+    card.appendChild(e('div', 'rqw-act-t', hasDoc ? '正在修订' : '正在生成'));
+    card.appendChild(e('div', 'rqw-act-d', '可以关掉页面去做别的，完成后回来查看，或勾上机器人通知。'));
+    const b = e('button', 'rqw-btn full', '生成中…');
+    b.type = 'button';
+    b.disabled = true;
+    card.appendChild(b);
+    return card;
+  }
+
+  if (hasDoc) {
+    card.appendChild(e('div', 'rqw-act-t', '下一步'));
+    card.appendChild(e('div', 'rqw-act-d', '定稿后配置与文档冻结，将建需求分支并自动开始开发。'));
+    const b = e('button', 'rqw-btn primary full', '✓ 定稿，进入开发期');
+    b.type = 'button';
+    b.onclick = () => startFinalizeFlow(req.id);
+    card.appendChild(b);
+    return card;
+  }
+
+  const ready = cfgReady(req);
+  const failed = lastEventFailed(req);
+  card.appendChild(e('div', 'rqw-act-t', failed ? '生成失败' : '下一步'));
+  card.appendChild(
+    e(
+      'div',
+      'rqw-act-d',
+      failed
+        ? '问卷结论已保留，重试不必重答。也可以先补上工程配置再重试。'
+        : ready
+          ? '配置已满足最低要求，可以开始生成开发文档。'
+          : '先补齐上方标黄的配置项，然后才能生成。',
+    ),
+  );
+  const gen = e('button', 'rqw-btn primary full', failed ? '重新生成' : '生成开发文档 →');
+  gen.type = 'button';
+  gen.disabled = !ready;
+  gen.onclick = () =>
+    startGenerateFlow({
+      req,
+      fetchReq: fetchRequirement,
+      onRefresh: () => loadAndRenderReq(req.id),
+    });
+  card.appendChild(gen);
+
+  const pre = e('div', 'rqw-precheck');
+  const addLine = (ok, text) => {
+    const row = e('div');
+    row.appendChild(e('span', ok ? 'ok' : 'no', ok ? '✓' : '!'));
+    row.appendChild(e('span', null, text));
+    pre.appendChild(row);
+  };
+  const f = req.projects?.frontend;
+  const b = req.projects?.backend;
+  if (f) addLine(true, `前端工程已配置（${f.dev ? '开发' : '只读'}）`);
+  if (b) addLine(true, `后端工程已配置（${b.dev ? '开发' : '只读'}）`);
+  else addLine(false, '后端未配置，接口契约将靠推断');
+  if (!f && !b) addLine(false, '尚未配置任何工程');
+  addLine(!!req.reqDoc, req.reqDoc ? '需求文档已就绪' : '需求文档缺失');
+  card.appendChild(pre);
+  return card;
+}
+
+/** 流程预告：点下去会经历什么、大概多久，先说清楚。 */
+function renderFlowCard(req) {
+  const card = e('div', 'rqw-card');
+  const hd = e('div', 'rqw-card-h');
+  hd.appendChild(e('span', 'ic', '◈'));
+  hd.appendChild(e('span', null, '点击后会发生什么'));
+  card.appendChild(hd);
+
+  const body = e('div', 'rqw-card-b');
+  const flow = e('div', 'rqw-flow');
+  const steps = [
+    ['1', '找出需求里的不确定点', req.prime?.text ? '会结合你写的背景 · 你说清的不会再问 · 约十几秒' : '通读需求文档 · 约十几秒'],
+    ['2', '逐题确认', '需全部作答 · 每题可选「不确定」或自主补充 · 约 1 分钟'],
+    ['3', '模型阅读工程实际代码', '可离开页面 · 3~10 分钟'],
+    ['4', '产出开发文档', '可多轮修订，首版不是终稿'],
+  ];
+  for (const [n, t, sub] of steps) {
+    const row = e('div', 'rqw-flow-i');
+    row.appendChild(e('span', 'n', n));
+    const tx = e('span', 'tx', t);
+    tx.appendChild(e('em', null, sub));
+    row.appendChild(tx);
+    flow.appendChild(row);
+  }
+  body.appendChild(flow);
+  card.appendChild(body);
+  return card;
+}
+
+/** 文档产出后配置降级为只读树：此时它已不是主角，但仍要能一眼核对。 */
+function renderCfgSummaryCard(req) {
+  const card = e('div', 'rqw-card');
+  const hd = e('div', 'rqw-card-h');
+  hd.appendChild(e('span', 'ic', '⚙'));
+  hd.appendChild(e('span', null, '工程配置'));
+  hd.appendChild(e('span', 'gap'));
+  const edit = e('button', 'rqw-iconbtn', '编辑');
+  edit.type = 'button';
+  edit.onclick = () => openConfigModal(req);
+  hd.appendChild(edit);
+  card.appendChild(hd);
+
+  const body = e('div', 'rqw-card-b');
+  const tree = e('div', 'rqw-tree');
+  const rows = [
+    ['前端', req.projects?.frontend],
+    ['后端', req.projects?.backend],
+  ];
+  const items = [];
+  for (const [k, p] of rows) {
+    items.push({ k, v: p ? dirTail(p.dir) : '未配置', title: p?.dir, tag: p ? (p.dev ? 'dev' : 'ro') : null, blank: !p });
+  }
+  items.push({ k: '文档', v: req.reqDoc?.name || '未上传', title: req.reqDoc?.name, blank: !req.reqDoc });
+  if (req.featureTag) items.push({ k: '模块', v: req.featureTag });
+
+  items.forEach((it, i) => {
+    const row = e('div', 'rqw-trow' + (it.blank ? ' blank' : ''));
+    row.appendChild(e('span', 'br', i === items.length - 1 ? '└' : '├'));
+    row.appendChild(e('span', 'k', it.k));
+    const v = e('span', 'v', it.v);
+    if (it.title) v.title = it.title;
+    row.appendChild(v);
+    if (it.tag) row.appendChild(e('span', 't ' + it.tag, it.tag === 'dev' ? '开发' : '只读'));
+    tree.appendChild(row);
+  });
+  body.appendChild(tree);
+  card.appendChild(body);
+  return card;
+}
+
+/**
+ * 问卷结论回看。用户填了东西必须能看到它被用了，否则不会填第二次 ——
+ * 「＋说明」标记就是回答「我写的那段到底进没进去」。
+ */
+function renderQuizSummaryCard(req) {
+  const questions = req.quiz.questions || [];
+  const answers = req.quiz.answers || {};
+  const answered = req.quiz.status === 'answered';
+
+  const card = e('div', 'rqw-card');
+  const hd = e('div', 'rqw-card-h');
+  hd.appendChild(e('span', 'ic', '◈'));
+  hd.appendChild(e('span', null, answered ? '本版问卷结论' : '待答问卷'));
+  hd.appendChild(e('span', 'gap'));
+  if (!req.busy) {
+    const btn = e('button', 'rqw-iconbtn', answered ? '重答' : '去作答');
+    btn.type = 'button';
+    btn.onclick = () =>
+      startGenerateFlow({
+        req,
+        fetchReq: fetchRequirement,
+        onRefresh: () => loadAndRenderReq(req.id),
+        forceNewQuiz: answered, // 重答要新题；「去作答」沿用已出的题
+      });
+    hd.appendChild(btn);
+  }
+  card.appendChild(hd);
+
+  const body = e('div', 'rqw-card-b');
+  const tree = e('div', 'rqw-tree');
+  questions.forEach((q, i) => {
+    const a = answers[q.id];
+    const unsure = a?.v === UNSURE_TAG;
+    const picked = a?.v && !unsure ? q.opts.find((o) => o.v === a.v) : null;
+    const row = e('div', 'rqw-trow' + (picked ? '' : ' blank'));
+    row.appendChild(e('span', 'br', i === questions.length - 1 ? '└' : '├'));
+    row.appendChild(e('span', 'k', 'Q' + (i + 1)));
+    const v = e('span', 'v', picked ? picked.lab : unsure ? '不确定' : '未作答');
+    v.title = q.title;
+    row.appendChild(v);
+    if ((a?.note || '').trim()) row.appendChild(e('span', 't note', '＋说明'));
+    tree.appendChild(row);
+  });
+  body.appendChild(tree);
+  card.appendChild(body);
+  return card;
+}
+
+/** 与 req-quiz.js / req-quiz.logic.js 的 UNSURE_VALUE 同值，改动时三处一起改。 */
+const UNSURE_TAG = '__unsure__';
+
+function renderVersionCard(req) {
+  const versions = (req.devDoc?.versions || []).slice().sort((a, b) => b.v - a.v);
+  const latestV = Math.max(...versions.map((v) => v.v));
+  const activeV = docOverride && versions.some((v) => v.v === docOverride.v) ? docOverride.v : latestV;
+
+  const card = e('div', 'rqw-card');
+  const hd = e('div', 'rqw-card-h');
+  hd.appendChild(e('span', 'ic', '🗂'));
+  hd.appendChild(e('span', null, '版本历史'));
+  card.appendChild(hd);
+
+  const list = e('div', 'rqw-vlist');
+  for (const v of versions) {
+    const row = e('div', 'rqw-vrow' + (v.v === activeV ? ' on' : ''));
+    row.appendChild(e('span', 'v', 'v' + v.v));
+    row.appendChild(e('span', 'at', fmtTime(v.at)));
+    if (v.v === latestV) row.appendChild(e('span', 'now-tag', '最新'));
+    row.onclick = () => selectDocVersion(req, v.v, latestV);
+    list.appendChild(row);
+  }
+  card.appendChild(list);
+  return card;
+}
+
+/** 生成开销。只在最新版有耗时数据时出：老版本没记录过 ms/tokens。 */
+function renderStatsCard(req) {
+  const versions = req.devDoc?.versions || [];
+  const latest = versions.find((v) => v.v === Math.max(...versions.map((x) => x.v)));
+  if (!latest?.ms) return null;
+
+  const card = e('div', 'rqw-card');
+  const hd = e('div', 'rqw-card-h');
+  hd.appendChild(e('span', 'ic', '📊'));
+  hd.appendChild(e('span', null, '本版生成开销'));
+  card.appendChild(hd);
+
+  const body = e('div', 'rqw-card-b');
+  const stats = e('div', 'rqw-stats');
+  const add = (k, v, u) => {
+    const row = e('div', 'rqw-stat');
+    row.appendChild(e('span', 'k', k));
+    row.appendChild(e('span', 'v', v));
+    if (u) row.appendChild(e('span', 'u', u));
+    stats.appendChild(row);
+  };
+  add('耗时', formatDocgenDuration(latest.ms));
+  add('输入', ((latest.inputTokens || 0) / 1000).toFixed(1), 'k tokens');
+  add('输出', ((latest.outputTokens || 0) / 1000).toFixed(1), 'k tokens');
+  body.appendChild(stats);
+  card.appendChild(body);
+  return card;
+}
+
+/** 完成通知。空态也要能勾：不然首次生成完成的通知收不到。 */
+function renderNotifyCard(req) {
+  const card = e('div', 'rqw-card');
+  const hd = e('div', 'rqw-card-h');
+  hd.appendChild(e('span', 'ic', '🔔'));
+  hd.appendChild(e('span', null, '完成通知'));
+  card.appendChild(hd);
+
+  const body = e('div', 'rqw-card-b');
+  const label = e('label', 'rqw-notify');
+  const chk = e('input');
+  chk.type = 'checkbox';
+  chk.className = 'pretty-check';
+  chk.checked = !!req.notifyBotId;
+  const dropdown = e('select', 'rqw-sel');
+  dropdown.hidden = !req.notifyBotId;
+  dropdown.onchange = () => saveNotifyBotId(req.id, dropdown.value || null);
+  chk.onchange = () => {
+    dropdown.hidden = !chk.checked;
+    if (!chk.checked) saveNotifyBotId(req.id, null);
+    else if (!dropdown._bots) loadBotsForNotify(dropdown, req.notifyBotId);
+  };
+  label.append(chk, e('span', null, '生成完成后通过机器人通知我'));
+  body.appendChild(label);
+  body.appendChild(dropdown);
+  if (req.notifyBotId) loadBotsForNotify(dropdown, req.notifyBotId);
+  card.appendChild(body);
+  return card;
+}
+
 function renderReadonlyDoc(req) {
   const box = document.createElement('div');
   box.className = 'req-doc-content req-doc-readonly';
@@ -839,8 +1694,9 @@ function renderReadonlyDoc(req) {
 
 // ---- 归档期：只读芯片条（复用评审期芯片条的展示样式，去掉可点击/编辑入口） ----
 
-// 图标与评审期 makeProjectChip 保持一致：前后端统一 🖥（评审期两个工程从不区分图标），
-// 不采用开发/测试期横幅 renderBanner 的 🖥/🗄 区分方案——本视图借用的是评审期芯片条的展示风格。
+// 图标改为 🖥/🗄 区分前后端，与评审期工作台的 makeProjSlot、以及开发/测试期横幅
+// renderBanner 三处对齐。原先此处统一用 🖥，是为了跟已删除的评审期芯片条一致；
+// 那条链断了之后，同一份工程数据在不同页面显示不同图标只会让人以为看错了需求。
 function renderReadonlyChipsBar(req) {
   const bar = document.createElement('div');
   bar.className = 'req-chips';
@@ -854,7 +1710,7 @@ function renderReadonlyChipsBar(req) {
   const f = req.projects?.frontend;
   const b = req.projects?.backend;
   if (f) addChip(`🖥 ${dirTail(f.dir)} · ${f.dev ? '开发' : '只读'}`, f.dir);
-  if (b) addChip(`🖥 ${dirTail(b.dir)} · ${b.dev ? '开发' : '只读'}`, b.dir);
+  if (b) addChip(`🗄 ${dirTail(b.dir)} · ${b.dev ? '开发' : '只读'}`, b.dir);
   if (req.reqDoc) addChip(`📄 ${req.reqDoc.name}`, req.reqDoc.name);
   return bar;
 }
@@ -916,7 +1772,14 @@ function renderArchivingPage(req) {
   });
   wrap.appendChild(ta);
 
-  // 按钮行：[优化汇总] 和 [确认归档]
+  // 汇总进度块（idle 时为空占位；由 setRetroProgress 就地填充，不整页重渲）
+  const progressHost = document.createElement('div');
+  progressHost.className = 'req-retro-progress';
+  progressHost.id = 'reqRetroProgress';
+  wrap.appendChild(progressHost);
+  renderRetroProgress(progressHost); // 回填已有进度：归档页会因轮询/重开而整页重建
+
+  // 按钮行：[优化汇总] [查看汇总会话] [确认归档]
   const btnRow = document.createElement('div');
   btnRow.className = 'req-archive-button-row';
 
@@ -926,6 +1789,18 @@ function renderArchivingPage(req) {
   retroBtn.textContent = '✨ 优化汇总';
   retroBtn.onclick = () => startRetroSummary(req.id);
   btnRow.appendChild(retroBtn);
+
+  // 「查看汇总会话」：汇总过程/结果全在 retro 会话里，之前没有任何入口能回看
+  //（跑完后 run 注册表被 GC、busy 恒为 null，两条既有补救通道都不认 retro）。
+  const retroSession = pickRetroSession(req);
+  if (retroSession) {
+    const viewBtn = document.createElement('button');
+    viewBtn.type = 'button';
+    viewBtn.className = 'btn req-retro-view-btn';
+    viewBtn.textContent = '🔍 查看汇总会话';
+    viewBtn.onclick = () => openRetroConv(req, retroSession);
+    btnRow.appendChild(viewBtn);
+  }
 
   const confirmBtn = document.createElement('button');
   confirmBtn.type = 'button';
@@ -937,6 +1812,77 @@ function renderArchivingPage(req) {
   wrap.appendChild(btnRow);
 
   return wrap;
+}
+
+const RETRO_PHASE_LABEL = {
+  map: '逐会话小结中',
+  reduce: '聚合提炼中',
+  done: '汇总完成',
+  failed: '汇总中断',
+};
+
+/** 就地渲染汇总进度块（不整页重渲，避免打断用户正在填的归档备注）。
+ *  @param {HTMLElement} [hostEl] 归档页首次构建时元素还没进 DOM，由 renderArchivingPage 直接传入 */
+function renderRetroProgress(hostEl) {
+  const host = hostEl || document.getElementById('reqRetroProgress');
+  if (!host) return; // 不在归档页（用户可能已切走），进度仍留在模块级状态里，回来时重建
+  const p = retroProgress;
+  host.innerHTML = '';
+  if (p.phase === 'idle') return;
+  // 别把上一个需求的进度画到这个需求的归档页上
+  if (p.reqId && currentReqId && p.reqId !== currentReqId) return;
+
+  const line = document.createElement('div');
+  line.className = 'req-retro-progress-line';
+  const label = RETRO_PHASE_LABEL[p.phase] || p.phase;
+  const counter = p.phase === 'map' && p.total ? ` [${p.current}/${p.total}]` : '';
+  const who = p.phase === 'map' && p.title ? ` 《${p.title}》` : '';
+  line.textContent = `${p.phase === 'done' || p.phase === 'failed' ? '' : '⏳ '}${label}${counter}${who}`;
+  host.appendChild(line);
+
+  if (p.total) {
+    const bar = document.createElement('div');
+    bar.className = 'req-retro-progress-bar';
+    const fill = document.createElement('div');
+    fill.className = 'req-retro-progress-fill';
+    const ratio = p.phase === 'done' ? 1 : Math.min(1, p.current / Math.max(1, p.total));
+    fill.style.width = Math.round(ratio * 100) + '%';
+    bar.appendChild(fill);
+    host.appendChild(bar);
+  }
+
+  if (p.failed) {
+    const warn = document.createElement('div');
+    warn.className = 'req-retro-progress-failed';
+    warn.textContent = `${p.failed} 个会话处理失败（已跳过）`;
+    host.appendChild(warn);
+  }
+}
+
+/** 取该需求最近一条 retro 会话（可能汇总过多次，取最后建的那条）。 */
+function pickRetroSession(req) {
+  const retros = (req?.sessions || []).filter((s) => s.kind === 'retro' && s.convId);
+  return retros.length ? retros[retros.length - 1] : null;
+}
+
+/**
+ * 打开汇总会话回看。
+ * 过程若曾实时落库（当时有人看着）直接就能看到；若没有——系统 run 的输出只在客户端挂着流时
+ * 才写 localStorage——就从磁盘 Claude 转录回放（sessionId 已由 SSE session 事件回填到
+ * requirements.json 的 sessions[kind==='retro']，GET /api/history/:sid 可读）。
+ */
+async function openRetroConv(req, session) {
+  await openConv(session.convId); // 用户手势：跳视图
+  if (!session.sessionId) return; // 汇总刚起、还没拿到 session id：实时流会自己把内容画出来
+  const cwd = req.devCwd || req.projects?.frontend?.dir || req.projects?.backend?.dir || '';
+  try {
+    const { loadReqTranscript } = await import('./chat.js');
+    // loadReqTranscript 自带护栏：有实时流或会话已有内容就不动，避免覆盖正在跑的汇总
+    await loadReqTranscript(session.convId, session.sessionId, cwd);
+  } catch (e) {
+    console.error('[openRetroConv] 转录回放失败', e);
+    window.toast.warn('汇总会话转录回放失败：' + (e?.message || e));
+  }
 }
 
 async function confirmArchive(id, btn) {
@@ -983,11 +1929,17 @@ async function startRetroSummary(reqId) {
     window.toast.error('仅在归档期可启动汇总');
     return;
   }
+  // 同一需求重复点：正在跑就别再起一轮（map-reduce 是长流程，两轮并发会互相抢 waitForRunCompletion）
+  if (retroProgress.reqId === reqId && (retroProgress.phase === 'map' || retroProgress.phase === 'reduce')) {
+    window.toast.info('汇总正在进行中');
+    return;
+  }
 
   // 获取工程目录（前后端优先）
   const cwd = req.projects?.frontend?.dir || req.projects?.backend?.dir || '';
 
   try {
+    setRetroProgress({ phase: 'map', reqId, total: 0, current: 0, title: '准备中', failed: 0 });
     // 拉取现有的避坑清单（前后端）
     const existingPitfalls = await fetchExistingPitfalls(
       req.projects?.frontend?.dir,
@@ -1014,10 +1966,11 @@ async function startRetroSummary(reqId) {
     if (!r.ok) {
       const d = await r.json().catch(() => ({}));
       window.toast.error(d.error || '注册会话失败');
+      setRetroProgress({ phase: 'idle', reqId: null });
       return;
     }
 
-    // 打开 retro 会话
+    // 打开 retro 会话（用户手势发起，跳视图；map 步骤的气泡随后就画在这里）
     openConv(retroConvId);
 
     // 重渲侧栏树
@@ -1028,6 +1981,7 @@ async function startRetroSummary(reqId) {
   } catch (e) {
     window.toast.error('启动汇总失败：' + (e?.message || e));
     console.error('[startRetroSummary]', e);
+    setRetroProgress({ phase: 'failed' });
   }
 }
 
@@ -1102,9 +2056,11 @@ async function runRetroMapReduce(reqId, retroConvId, cwd, existingPitfalls = {})
 
   // ★ MAP 阶段：逐会话拉转录、生成小结
   const mapMessages = [];
+  setRetroProgress({ phase: 'map', total: validSessions.length, current: 0, title: '', failed: 0 });
   for (let i = 0; i < validSessions.length; i++) {
     const session = validSessions[i];
     const progress = `[${i + 1}/${validSessions.length}]`;
+    setRetroProgress({ current: i + 1, title: session.title || '未命名会话' });
 
     try {
       // 拉转录
@@ -1117,6 +2073,7 @@ async function runRetroMapReduce(reqId, retroConvId, cwd, existingPitfalls = {})
       const hist = await histRes.json();
       if (!histRes.ok || !hist.data?.messages) {
         window.toast.warn(`${progress} 拉转录失败，跳过该会话`);
+        bumpRetroFailed();
         continue;
       }
 
@@ -1127,26 +2084,27 @@ async function runRetroMapReduce(reqId, retroConvId, cwd, existingPitfalls = {})
 
       // 截断保护：超 30000 字符时首尾各取 15000
       const TRUNCATE_LIMIT = 30000;
-      if (transcript.length > TRUNCATE_LIMIT) {
-        const truncated = Math.floor(TRUNCATE_LIMIT / 2);
-        const ellipsis = `…（已截断 ${transcript.length - TRUNCATE_LIMIT} 字符）…`;
-        transcript = transcript.slice(0, truncated) + ellipsis + transcript.slice(-truncated);
-
-        // 提示用户
-        window.toast.info(`${progress} 转录已截断，详见 retro 会话消息`);
-
-        // 在 retro 会话里显示截断提示
-        addMessage(retroConvId, {
-          role: 'system',
-          content: `[提示] 会话"${session.title}"转录超 30KB，已截断`,
-        });
+      let truncatedNote = '';
+      const rawLen = transcript.length; // 先记原长：截断后再反推会把 ellipsis 的长度算进去
+      if (rawLen > TRUNCATE_LIMIT) {
+        const half = Math.floor(TRUNCATE_LIMIT / 2);
+        const dropped = rawLen - TRUNCATE_LIMIT;
+        const ellipsis = `…（已截断 ${dropped} 字符）…`;
+        transcript = transcript.slice(0, half) + ellipsis + transcript.slice(-half);
+        // 截断信息写进用户气泡本身，而不是另插一条系统消息（旧做法字段名写错且从未落盘，
+        // 且单独插一条只落库不上屏的消息会破坏「存储索引 = DOM 索引」不变量）
+        truncatedNote = `（原转录 ${Math.round(rawLen / 1000)}KB 超限，已截断中段 ${dropped} 字符）`;
+        window.toast.info(`${progress} 转录已截断，详情见会话内该步骤气泡`);
       }
 
       // 生成 map 提示词（调用服务端生成或客户端拼装）
       const mapPrompt = buildClientRetroMapPrompt(session.title, transcript, i + 1, validSessions.length);
 
-      // 发送 map 消息到 retro 会话
-      await sendMessageToConv(retroConvId, mapPrompt);
+      // 发送 map 消息到 retro 会话。displayText 只放简短说明——真正发出去的 mapPrompt 里塞着
+      // 整份转录（可达 30KB），直接进气泡会把对话区撑爆
+      await sendMessageToConv(retroConvId, mapPrompt, {
+        displayText: `${progress} 汇总会话《${session.title || '未命名会话'}》${truncatedNote}`,
+      });
 
       // 等待 run 完成，收集 assistant 回复
       const mapResult = await waitForRunCompletion(retroConvId);
@@ -1157,18 +2115,23 @@ async function runRetroMapReduce(reqId, retroConvId, cwd, existingPitfalls = {})
     } catch (e) {
       window.toast.warn(`${progress} 处理失败：${e?.message || e}`);
       console.error(`[MAP ${i + 1}]`, e);
+      bumpRetroFailed();
     }
   }
 
   if (mapMessages.length === 0) {
     window.toast.error('未能收集任何会话小结，汇总中止');
+    setRetroProgress({ phase: 'failed' });
     return;
   }
 
   // ★ REDUCE 阶段：聚合分析
   try {
+    setRetroProgress({ phase: 'reduce' });
     const reducePrompt = buildClientRetroReducePrompt(mapMessages, existingPitfalls);
-    await sendMessageToConv(retroConvId, reducePrompt);
+    await sendMessageToConv(retroConvId, reducePrompt, {
+      displayText: `[汇总] 聚合 ${mapMessages.length} 份会话小结，提炼避坑清单`,
+    });
 
     const reduceResult = await waitForRunCompletion(retroConvId);
 
@@ -1185,25 +2148,28 @@ async function runRetroMapReduce(reqId, retroConvId, cwd, existingPitfalls = {})
       window.toast.info('本次开发未提炼出新避坑项（可能都是已知问题）');
     }
 
+    setRetroProgress({ phase: 'done' });
     // 预览确认（即使 pitfallsText 为空也弹出，让用户看到"无新内容"并确认或手动编辑）
     await showPitfallsPreviewDialog(reqId, pitfallsText || '');
   } catch (e) {
     window.toast.error('reduce 阶段失败：' + (e?.message || e));
     console.error('[REDUCE]', e);
+    setRetroProgress({ phase: 'failed' });
   }
 }
 
 /**
- * 向会话发送消息（后台发送，不产生用户气泡）。
- * Task 5.4：改为调用真实 API（chat.js 的 sendMessageBackground）。
+ * 向会话发送消息（服务端起 run；目标会话正被查看时会画出气泡与流式输出）。
  * @param {string} convId 会话 ID
- * @param {string} text 消息文本
+ * @param {string} text 真正发给模型的提示词
+ * @param {{displayText?: string}} [opts] 见 chat.js sendMessageBackground：给出简短说明用于气泡展示，
+ *   避免把整份转录塞进对话区
  * @returns {Promise<void>}
  */
-async function sendMessageToConv(convId, text) {
+async function sendMessageToConv(convId, text, opts = {}) {
   try {
     const { sendMessageBackground } = await import('./chat.js');
-    return await sendMessageBackground(convId, text);
+    return await sendMessageBackground(convId, text, opts);
   } catch (err) {
     console.error('Failed to send message to conversation:', err);
     throw err;
@@ -1232,7 +2198,10 @@ async function waitForRunCompletion(convId) {
         // 找最后一条 assistant 消息
         for (let i = conv.messages.length - 1; i >= 0; i--) {
           if (conv.messages[i].role === 'assistant') {
-            resolve(conv.messages[i].content);
+            // 字段名是 text 不是 content（见 conv-store.js convPushMessage）。原来写 .content
+            // 恒取到 undefined → map 结果全是 undefined → reduce 提示词拼成「1. undefined」→
+            // extractPitfallsBlock(undefined) 抛 TypeError，导致每一次汇总都在最后一步失败。
+            resolve(conv.messages[i].text);
             return;
           }
         }
@@ -1248,23 +2217,12 @@ async function waitForRunCompletion(convId) {
   });
 }
 
-/**
- * 向会话添加系统消息（不通过聊天界面）。
- * @param {string} convId 会话 ID
- * @param {object} msg 消息对象 { role, content, timestamp? }
- */
-function addMessage(convId, msg) {
-  const list = loadConvs();
-  const conv = list.find((c) => c.id === convId);
-  if (!conv) return;
-
-  conv.messages.push({
-    ...msg,
-    timestamp: msg.timestamp || Date.now(),
-  });
-
-  // 不调 saveConvs，由上层调用者决定是否保存
-}
+// 原本这里有个局部 addMessage(convId, {role, content})，用来往 retro 会话塞「转录已截断」提示。
+// 它有两处硬伤：① 写的字段名是 content，而 conv-store 存的是 text（渲染侧读 m.text）；
+// ② 注释说「不调 saveConvs 由上层决定」，而唯一的调用方从没保存过。
+// 所以 toast 里那句「详见 retro 会话消息」指向的消息从来不存在——这正是用户说"找不到入口"的原因。
+// 现在截断提示直接并进 map 步骤的 displayText（见 runRetroMapReduce），一并解决了另一个问题：
+// 单独插一条「只落库不上屏」的消息会破坏「存储索引 = DOM 索引」不变量（本仓的既有铁律）。
 
 /**
  * 客户端生成 map 阶段提示词。
@@ -1341,6 +2299,9 @@ function buildClientRetroReducePrompt(mapMessages, existingPitfalls = {}) {
  * @returns {object} { report, pitfallsText } 或 { report, pitfallsText: null }
  */
 function extractPitfallsBlock(text) {
+  // 空值防御：reduce 结果拿不到时（run 异常/超时/会话被删）原来会在 text.match 直接抛 TypeError，
+  // 把一个「没结果」变成一个看不懂的崩栈
+  if (typeof text !== 'string' || !text) return { report: '', pitfallsText: null };
   const match = text.match(/<!-- PITFALLS-BEGIN -->([\s\S]*?)<!-- PITFALLS-END -->/);
 
   let report = text;
@@ -1537,163 +2498,37 @@ function renderDiscardedPage(req) {
   return wrap;
 }
 
-// ---- 评审期：顶部芯片条 ----
-
-function renderChipsBar(req) {
-  const bar = document.createElement('div');
-  bar.className = 'req-chips';
-  bar.appendChild(makeProjectChip(req, 'frontend', req.projects?.frontend));
-  bar.appendChild(makeProjectChip(req, 'backend', req.projects?.backend));
-  bar.appendChild(makeReqDocChip(req, req.reqDoc));
-
-  // 功能标签 chip（仅在 devDoc 至少有一版后才显示——docgen 完成才有标签）
-  if (req.devDoc?.versions?.length) {
-    bar.appendChild(makeFeatureTagChip(req));
-  }
-
-  const editBtn = document.createElement('button');
-  editBtn.type = 'button';
-  editBtn.className = 'btn req-edit-config-btn';
-  editBtn.textContent = '✏️ 编辑配置';
-  editBtn.onclick = () => openConfigModal(req);
-  bar.appendChild(editBtn);
-  return bar;
-}
-
-// 三处 chip 点击都统一传本次渲染闭包里的 req（而非读取模块级 currentReq）——
-// 保证弹层打开的永远是「用户当前正看着的这份数据」，不受后续异步刷新提前改写 currentReq 影响。
-function makeProjectChip(req, key, p) {
-  const chip = document.createElement('button');
-  chip.type = 'button';
-  chip.className = 'req-chip' + (p ? '' : ' req-chip-empty');
-  if (p) {
-    chip.textContent = `🖥 ${dirTail(p.dir)} · ${p.dev ? '开发' : '只读'}`;
-    chip.title = p.dir;
-  } else {
-    chip.textContent = key === 'frontend' ? '＋ 前端工程' : '＋ 后端工程';
-  }
-  chip.onclick = () => openConfigModal(req);
-  return chip;
-}
-
-function makeReqDocChip(req, reqDoc) {
-  const chip = document.createElement('button');
-  chip.type = 'button';
-  chip.className = 'req-chip' + (reqDoc ? '' : ' req-chip-empty');
-  chip.textContent = reqDoc ? `📄 ${reqDoc.name}` : '＋ 需求文档';
-  if (reqDoc) chip.title = reqDoc.name;
-  chip.onclick = () => openConfigModal(req);
-  return chip;
-}
-
-/** 功能模块标签 chip：展示模式 + 编辑模式 */
-function makeFeatureTagChip(req) {
-  const chip = document.createElement('div');
-  chip.className = 'req-chip req-chip--tag';
-  chip.dataset.reqId = req.id;
-
-  function renderTagChip(tag) {
-    chip.innerHTML = '';
-    const label = document.createElement('span');
-    label.className = 'req-chip__label';
-    label.textContent = `功能模块：${tag || '未识别'}`;
-    chip.appendChild(label);
-
-    const editBtn = document.createElement('button');
-    editBtn.type = 'button';
-    editBtn.className = 'req-chip__edit';
-    editBtn.title = '修改功能模块标签';
-    editBtn.textContent = '✏️';
-    editBtn.onclick = (e) => {
-      e.stopPropagation();
-      showTagEditMode(tag);
-    };
-    chip.appendChild(editBtn);
-  }
-
-  function showTagEditMode(currentTag) {
-    chip.innerHTML = '';
-    const input = document.createElement('input');
-    input.className = 'req-chip__input';
-    input.type = 'text';
-    input.value = currentTag || '';
-    input.placeholder = '如：宝宝辅食';
-    input.maxLength = 20;
-    chip.appendChild(input);
-
-    const saveBtn = document.createElement('button');
-    saveBtn.type = 'button';
-    saveBtn.className = 'req-chip__save';
-    saveBtn.textContent = '保存';
-    saveBtn.onclick = async () => {
-      const newTag = input.value.trim();
-      try {
-        const res = await fetch('/api/req/feature-tag', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: req.id, tag: newTag }),
-        });
-        if (!res.ok) {
-          const err = await res.text().catch(() => '未知错误');
-          throw new Error(err);
-        }
-        renderTagChip(newTag || null);
-      } catch (e) {
-        // 显示错误不离开编辑模式
-        input.style.borderColor = 'red';
-        input.title = e.message;
-        window.toast?.error('保存失败：' + e.message);
-      }
-    };
-    chip.appendChild(saveBtn);
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.type = 'button';
-    cancelBtn.className = 'req-chip__cancel';
-    cancelBtn.textContent = '取消';
-    cancelBtn.onclick = () => renderTagChip(currentTag);
-    chip.appendChild(cancelBtn);
-
-    input.focus();
-    input.select();
-  }
-
-  renderTagChip(req.featureTag);
-  return chip;
-}
-
 // ---- 评审期：错误条 / busy 进度条 ----
 
+/** 错误条只报事实。重试入口在右栏行动区（那里能同时说明"结论已保留"），不在这里重复给按钮。 */
 function renderErrorBanner(req) {
+  if (req.busy || !lastEventFailed(req)) return null;
   const last = (req.history || []).at(-1);
-  if (!last || !/失败|被拒|中断/.test(last.event)) return null;
-  const bar = document.createElement('div');
-  bar.className = 'req-error-banner';
-  const text = document.createElement('span');
-  text.textContent = last.event;
-  const retryBtn = document.createElement('button');
-  retryBtn.type = 'button';
-  retryBtn.className = 'btn danger';
-  retryBtn.textContent = '重试';
-  retryBtn.onclick = () => runDocgen(req.id);
-  bar.append(text, retryBtn);
+  const bar = e('div', 'rqw-bar err');
+  bar.appendChild(e('span', 'ic', '✕'));
+  bar.appendChild(e('span', 'tx', last.event));
   return bar;
 }
 
 function renderBusyBar(req) {
   if (!req.busy) return null;
-  const bar = document.createElement('div');
-  bar.className = 'req-busy-bar';
-  const spin = document.createElement('span');
-  spin.className = 'req-busy-spin';
-  const text = document.createElement('span');
+  const bar = e('div', 'rqw-bar busy');
+  bar.appendChild(e('div', 'rqw-spin'));
   // busy 条每 3s 随轮询整页重建，据 startedAt 现算已运行时长，让「生成中」有可见进度、不显得假死。
   // docgen 需实际读工程 + 生成长文档，大型工程或遇账号限流时耗时可达十几分钟，故明确提示可离开。
   const startedAt = req.busy.startedAt;
   const mins = startedAt ? Math.max(0, Math.floor((Date.now() - startedAt) / 60000)) : 0;
-  const elapsed = startedAt ? `（已运行 ${mins} 分钟）` : '';
-  text.textContent = `⚙ 开发文档生成中…${elapsed} 首次生成需实际阅读工程代码，通常几分钟、大型工程更久，可先离开，完成后回来查看。`;
-  bar.append(spin, text);
+  const body = e('div');
+  const head = e('span', null, hasDevDoc(req) ? '开发文档修订中…' : '开发文档生成中…');
+  body.appendChild(head);
+  if (startedAt) body.appendChild(e('span', 'el', `（已运行 ${mins} 分钟）`));
+  body.appendChild(document.createElement('br'));
+  const answeredCount = Object.keys(req.quiz?.answers || {}).length;
+  body.append(
+    (answeredCount ? `已采纳你的 ${answeredCount} 项问卷结论，` : '') +
+      '正在阅读工程实际代码。通常几分钟、大型工程更久，可先离开，完成后回来查看。',
+  );
+  bar.appendChild(body);
   return bar;
 }
 
@@ -1710,113 +2545,120 @@ function formatDocgenDuration(ms) {
   return `${secs}s`;
 }
 
-function renderDocArea(req) {
+/**
+ * 评审期双报告区：开发文档（技术细节）+ 需求地图（页面 × 逻辑点）。
+ * 只有地图存在时才出页签——没地图时多一排空标签只会让人以为坏了。
+ */
+function renderReportArea(req) {
+  const hasMap = !!(req.reqMap?.versions || []).length && !!req.mapLatest;
+  if (!hasMap) {
+    reportTab = 'doc';
+    return renderDocArea(req);
+  }
   const box = document.createElement('div');
-  box.className = 'req-doc-area';
-  const versions = req.devDoc?.versions || [];
-  if (!versions.length) {
-    box.appendChild(renderDocEmptyState(req));
-    // 空态也要展示通知选项：用户须在点「生成」之前就能勾上，否则首次生成完成的通知收不到
-    if (req.phase === 'review') box.appendChild(renderNotifyOption(req));
+  box.className = 'rq-report';
+
+  const tabs = document.createElement('div');
+  tabs.className = 'rq-report-tabs';
+  const mk = (key, label, badge) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'rq-report-tab' + (reportTab === key ? ' on' : '');
+    b.appendChild(Object.assign(document.createElement('span'), { textContent: label }));
+    if (badge) {
+      const n = document.createElement('span');
+      n.className = 'rq-report-badge';
+      n.textContent = badge;
+      b.appendChild(n);
+    }
+    b.onclick = () => {
+      if (reportTab === key) return;
+      reportTab = key;
+      renderReqPage(req);
+    };
+    tabs.appendChild(b);
+  };
+  const points = (req.mapLatest.pages || []).reduce((n, p) => n + (p.points || []).length, 0);
+  mk('doc', '开发文档');
+  mk('map', '需求地图', points + ' 处变更');
+  box.appendChild(tabs);
+
+  if (reportTab === 'doc') {
+    box.appendChild(renderDocArea(req));
     return box;
   }
+  const host = document.createElement('div');
+  host.className = 'rq-report-map';
+  box.appendChild(host);
+  // mountMap 要量容器尺寸做「适应」缩放，必须等它进 DOM 之后再挂
+  requestAnimationFrame(() => {
+    if (!document.body.contains(host)) return;
+    mountMap(host, {
+      reqId: req.id,
+      phase: req.phase,
+      map: req.mapLatest,
+      versions: (req.reqMap?.versions || []).map((x) => ({ v: x.v, at: x.at })),
+      onReload: () => loadAndRenderReq(req.id),
+      onRestore: (prompt) => {
+        // 评审期还没有需求会话，还原只能等定稿进开发期再点
+        if (!req.convId) return window.toast.error('还原需要开发会话，请先定稿进入开发期');
+        sendMessageProgrammatically(prompt, { mode: 'bypassPermissions' });
+      },
+    });
+  });
+  return box;
+}
 
+/**
+ * 文档区。相比旧版少了三块，都是挪走而非删掉：
+ * - 定稿按钮 → 右栏行动区（它是评审期唯一不可逆动作，挤在版本条右端太不起眼）
+ * - 耗时/tokens 统计 → 右栏「本版生成开销」卡
+ * - 通知勾选 → 右栏「完成通知」卡
+ * 本函数只在已有版本时被调用（无版本时主栏渲染的是配置卡），故不再有空态分支。
+ */
+function renderDocArea(req) {
+  const box = e('div', 'rqw-docarea');
+  const versions = req.devDoc?.versions || [];
   const latestV = Math.max(...versions.map((v) => v.v));
   const activeV = docOverride && versions.some((v) => v.v === docOverride.v) ? docOverride.v : latestV;
   const activeEntry = versions.find((v) => v.v === activeV);
   const showingLatest = activeV === latestV && !docOverride;
   const content = showingLatest ? req.devDocLatest ?? '' : docOverride?.content ?? '';
 
-  const tabsBar = document.createElement('div');
-  tabsBar.className = 'req-doc-tabs-bar';
+  const bar = e('div', 'rqw-docbar');
   for (const v of versions) {
-    const tabBtn = document.createElement('button');
-    tabBtn.type = 'button';
-    tabBtn.className = 'req-doc-vtab' + (v.v === activeV ? ' active' : '');
-    tabBtn.textContent = 'v' + v.v;
-    tabBtn.onclick = () => selectDocVersion(req, v.v, latestV);
-    tabsBar.appendChild(tabBtn);
+    const tab = e('button', 'rqw-vtab' + (v.v === activeV ? ' on' : ''), 'v' + v.v);
+    tab.type = 'button';
+    tab.onclick = () => selectDocVersion(req, v.v, latestV);
+    bar.appendChild(tab);
   }
-  if (req.phase === 'review' && showingLatest) {
-    const finalizeBtn = document.createElement('button');
-    finalizeBtn.type = 'button';
-    finalizeBtn.className = 'btn primary req-finalize-btn';
-    finalizeBtn.textContent = '✓ 定稿，进入开发期';
-    finalizeBtn.disabled = !!req.busy;
-    finalizeBtn.onclick = () => startFinalizeFlow(req.id);
-    tabsBar.appendChild(finalizeBtn);
-  }
-  box.appendChild(tabsBar);
+  bar.appendChild(e('span', 'gap'));
+  bar.appendChild(
+    e(
+      'span',
+      'hint',
+      showingLatest
+        ? `正在看最新版 · ${fmtTime(activeEntry?.at)} 生成`
+        : `正在看历史版 v${activeV} · 最新是 v${latestV}`,
+    ),
+  );
+  box.appendChild(bar);
 
   if (activeEntry?.summary) {
-    const sum = document.createElement('div');
-    sum.className = 'req-doc-summary';
-    const label = document.createElement('div');
-    label.className = 'req-doc-summary-label';
-    label.textContent = '📝 摘要';
-    const body = document.createElement('div');
-    body.className = 'req-doc-summary-body';
+    const sum = e('div', 'rqw-sum');
+    sum.appendChild(e('div', 'rqw-sum-l', '本版改动摘要'));
+    const body = e('div', 'rqw-sum-b');
     renderMarkdown(body, activeEntry.summary);
-    sum.append(label, body);
+    sum.appendChild(body);
     box.appendChild(sum);
   }
 
-  // 统计信息（仅最新版本，若有耗时数据则显示）
-  if (showingLatest && activeEntry?.ms) {
-    const stats = document.createElement('div');
-    stats.className = 'req-doc-stats';
-    const timeStr = formatDocgenDuration(activeEntry.ms);
-    const inputK = ((activeEntry.inputTokens || 0) / 1000).toFixed(1);
-    const outputK = ((activeEntry.outputTokens || 0) / 1000).toFixed(1);
-    stats.textContent = `耗时 ${timeStr} · 输入 ${inputK}k tokens · 输出 ${outputK}k tokens`;
-    box.appendChild(stats);
-  }
-
-  const contentEl = document.createElement('div');
-  contentEl.className = 'req-doc-content';
+  const doc = e('div', 'rqw-doc');
+  const contentEl = e('div', 'req-doc-content'); // 沿用 renderMarkdown 的样式契约，不重复一套排版规则
   renderMarkdown(contentEl, content);
-  box.appendChild(contentEl);
-
-  // 通知选项（仅评审期显示）
-  if (req.phase === 'review') box.appendChild(renderNotifyOption(req));
-
+  doc.appendChild(contentEl);
+  box.appendChild(doc);
   return box;
-}
-
-/** 通知选项行（仅评审期调用）：勾选后生成完成时经机器人推送。空态与有版本两个分支共用。 */
-function renderNotifyOption(req) {
-  const notifyBox = document.createElement('div');
-  notifyBox.className = 'req-notify-option';
-  const chk = document.createElement('input');
-  chk.type = 'checkbox';
-  chk.id = `notify-chk-${req.id}`;
-  chk.className = 'pretty-check';
-  chk.checked = !!req.notifyBotId;
-  const label = document.createElement('label');
-  label.htmlFor = `notify-chk-${req.id}`;
-  label.className = 'req-notify-label';
-  label.textContent = '完成后通过机器人通知我';
-  const dropdown = document.createElement('select');
-  dropdown.className = 'req-notify-dropdown';
-  dropdown.hidden = !req.notifyBotId;
-  dropdown.onchange = () => {
-    saveNotifyBotId(req.id, dropdown.value || null);
-  };
-  chk.onchange = () => {
-    dropdown.hidden = !chk.checked;
-    if (!chk.checked) {
-      saveNotifyBotId(req.id, null);
-    } else if (!dropdown._bots) {
-      // 首次勾选时异步加载机器人列表
-      loadBotsForNotify(dropdown, req.notifyBotId);
-    }
-  };
-  notifyBox.append(chk, label, dropdown);
-  // 初始加载：若已配置则立即填充机器人列表
-  if (req.notifyBotId) {
-    loadBotsForNotify(dropdown, req.notifyBotId);
-  }
-  return notifyBox;
 }
 
 /**
@@ -1889,42 +2731,6 @@ async function selectDocVersion(req, v, latestV) {
     if (!r.ok) return window.toast.error(d.error || '读取版本失败');
     docOverride = { v, content: d.content };
     renderReqPage(currentReq);
-  } catch {
-    window.toast.error('网络错误');
-  }
-}
-
-function renderDocEmptyState(req) {
-  const wrap = document.createElement('div');
-  wrap.className = 'req-doc-empty';
-  const hint = document.createElement('div');
-  hint.className = 'req-doc-empty-hint';
-  hint.textContent = '尚未生成开发文档。配置好工程目录与需求文档后，点击下方按钮生成。';
-  wrap.appendChild(hint);
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'btn primary';
-  btn.textContent = '生成开发文档';
-  btn.disabled = !!req.busy;
-  btn.onclick = () => runDocgen(req.id);
-  wrap.appendChild(btn);
-  return wrap;
-}
-
-async function runDocgen(id) {
-  try {
-    const r = await fetch('/api/req/docgen', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
-    });
-    const d = await r.json();
-    if (r.status === 202) {
-      window.toast.success('已开始生成开发文档');
-      await loadAndRenderReq(id);
-      return;
-    }
-    window.toast.error(d.error || '生成失败');
   } catch {
     window.toast.error('网络错误');
   }

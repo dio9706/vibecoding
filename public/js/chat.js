@@ -1,12 +1,15 @@
 // chat.js —— 聊天体（2026-07-24 壳/体反转切分自 app.js）：状态区 / UI 偏好 / 对话历史 / 消息模型与渲染 / 打字机 / 额度 / 发送与流 / 待续跑轮询
 import { toast, confirmDialog, promptDialog } from './ui.js';
 import { $, debounce, renderMarkdown, lsSet } from './util.js';
-import { getPromptText, clearPrompt, handleDrop, insertDroppedPaths } from './composer.js';
+import {
+  getPromptText, clearPrompt, handleDrop, insertDroppedPaths,
+  stashPrompt, restorePrompt, bindComposerDraft,
+} from './composer.js';
 import {
   loadConvs, saveConvs, flushConvs,
   convPushMessage, convSetMessage, convSetSession, convSetMsgFields,
   moveMessageToEnd, removeMessageAt, bubbleReset, bubblePush, bubbleGet,
-  convSetTitle, convSetMeta, convDelete,
+  convSetTitle, convSetMeta, convDelete, convSetDraft,
 } from './conv-store.js';
 import { bindDirPopover, closeDirModal } from './dir-popover.js';
 import { AnimeAnimations } from './anim.js';
@@ -258,6 +261,7 @@ export function bindMarkdownNav(fn) {
           // 结果是每次点磁盘历史会话都把上一个会话的整棵气泡树留在 _bubbleMap 里成为 detached 泄漏
           // （正是 commit 6cff831「根治内存泄漏」想修的那一类，属遗漏点）。
           if (currentConvId) bubbleReset(currentConvId);
+          stashDraftForCurrentConv(); // 同 openConv：草稿归旧会话（这条路径不走 openConv，历来是遗漏高发区）
           currentConvId = 'hist_' + Date.now().toString(36);
           markConvUsed(currentConvId); // 续接历史 = 本次使用过
           lsSet('claude_last_conv', currentConvId); // 刷新后自动回到该会话
@@ -704,12 +708,47 @@ export function renderConvListNow() {
         c.customCredId = chatCustomCredId;
         saveConvs(list); // 不动 updatedAt：纯偏好变更不改变左栏排序
       }
-      export async function openConv(id) {
-        _goChat();
+
+      // ---- 输入框草稿按会话隔离 ----
+      // #prompt 是页面级单例 DOM，openConv 只重建消息区、从不碰它 → 未发送的内容会被带进下一个会话。
+      // 修法与 persistPrefsToConv 同构：写穿当前会话记录，切换时「存旧 → 清 → 回填新」。
+      const NEW_DRAFT_KEY = 'claude_draft_new'; // 尚未落地成会话（currentConvId 为空）的草稿另存一处，否则误点侧栏就蒸发
+      /** 草稿变更写穿（由 composer 的 input 监听 debounce 后调用） */
+      function persistDraftToConv(html) {
+        if (currentConvId) convSetDraft(currentConvId, html);
+        else if (html) lsSet(NEW_DRAFT_KEY, html);
+        else localStorage.removeItem(NEW_DRAFT_KEY);
+      }
+      /** 取走输入框内容存进「当前」会话（必须在改写 currentConvId 之前调用）。
+       *  刻意不复用 persistDraftToConv：后者在「无会话 + 空内容」时会 removeItem，
+       *  而启动恢复（initChat 的 openConv）正是这个状态——那一下会误删上次没发出去的新对话草稿。
+       *  此处的空 stash 一律视为「无事发生」。 */
+      function stashDraftForCurrentConv() {
+        const html = stashPrompt();
+        if (currentConvId) convSetDraft(currentConvId, html);
+        else if (html) lsSet(NEW_DRAFT_KEY, html);
+      }
+      /** 已发送/已插话：草稿作废（不清会导致重开会话把已发出的话又灌回输入框） */
+      function dropDraftAfterSend(convId) {
+        if (convId) convSetDraft(convId, '');
+        localStorage.removeItem(NEW_DRAFT_KEY);
+      }
+      /**
+       * 打开某会话。
+       * @param {string} id
+       * @param {{nav?: boolean}} [opts] nav=false 时不切回聊天视图（只换会话）。
+       *   默认 true——所有用户手势路径（点侧栏行、点徽标、发送）都要跳视图，行为与历来一致。
+       *   自动路径（req 文档页 3s 轮询里「确保 conv 已打开」这类幂等调用）必须传 false：
+       *   否则用户在设置/任务/需求文档等面板停留时，会被后台轮询反复拽回聊天视图。
+       */
+      export async function openConv(id, opts = {}) {
+        const nav = opts.nav !== false;
+        if (nav) _goChat();
         if (id === currentConvId) return;
         const c = loadConvs().find((x) => x.id === id);
-        if (!c) return;
+        if (!c) return; // 目标会话不存在：原地不动，尤其不能清掉用户正在写的草稿
         if (currentConvId) bubbleReset(currentConvId); // 离开旧会话前清理其气泡缓存，避免 detached DOM 常驻
+        stashDraftForCurrentConv(); // 存旧会话草稿并清空输入框（须早于 currentConvId 改写）
         currentConvId = id;
         markConvUsed(id); // 打开 = 本次使用过
         lsSet('claude_last_conv', id); // 刷新后自动回到该会话
@@ -720,6 +759,7 @@ export function renderConvListNow() {
           refreshDirLabel();
         }
         applySessionPrefs(c); // 还原该会话的模型/强度/模式（缺失或不认识则保持现状）
+        restorePrompt(c.draft); // 还原该会话未发送的草稿（无则清空，即上面 stash 后的状态）
         _prefsOwnedByConv = true; // 此后 initUiPrefs 的迟到响应不得覆盖这些值
         AnimeAnimations.resetToolState();
         AnimeAnimations.stopStreamScramble();
@@ -768,9 +808,11 @@ export function renderConvListNow() {
         _goChat();
         window._setSidebarToolsMode?.(false); // 从工具态复位回会话列表
         const oldId = currentConvId;
+        stashDraftForCurrentConv(); // 存旧会话草稿并清空输入框（须早于 currentConvId 置空）
         currentConvId = null;
         if (oldId) bubbleReset(oldId); // 清旧会话的气泡缓存（需在重置 currentConvId 前用局部变量保存）
         localStorage.removeItem('claude_last_conv');
+        restorePrompt(localStorage.getItem(NEW_DRAFT_KEY)); // 回填上次「新对话」里没发出去的内容
         currentSession = null;
         messagesEl.querySelectorAll('.msg').forEach((m) => m.remove());
         emptyEl.style.display = '';
@@ -1959,6 +2001,7 @@ export function renderConvListNow() {
         await addMessage('user', text);
         recordMessage('user', text);
         clearPrompt();
+        dropDraftAfterSend(convId); // 已发出：草稿作废，否则切走再回来会把这句话灌回输入框
 
         // 助手占位：记一条空消息（标记进行中 + 待填 runId），并显示可见气泡
         const asstIndex = convPushMessage(convId, 'assistant', '');
@@ -2106,6 +2149,7 @@ export function renderConvListNow() {
         // 按对象身份重定位（_convsCache 是活对象，splice/搬移不改变元素身份，与 withdrawQueuedMsg 范式一致）
         const msgRef = conv0.messages[idx];
         clearPrompt();
+        dropDraftAfterSend(convId); // 插话同样是「已发出」，草稿作废
         const degrade = () => {
           // run 恰好结束 → 降级为新一轮：清排队态 + 补切段（与旧流程一致）后重启
           const conv1 = loadConvs().find((x) => x.id === convId);
@@ -3147,6 +3191,7 @@ export function renderConvListNow() {
       export function initChat() {
       refreshDirLabel(); // 回填上次选择的工作目录（localStorage 快速渲染）
       initUiPrefs();     // 异步从服务端同步偏好（跨重启恢复；覆盖 localStorage 默认值）
+      bindComposerDraft(persistDraftToConv); // 输入即写穿草稿到当前会话记录
       renderConvList(); // 渲染左侧对话历史
       // 刷新后自动回到上次打开的会话：运行中任务经 openConv 的 pending+runId 扫描自动重连。
       // setTimeout(0)：openConv 依赖脚本尾部才初始化的 AnimeAnimations（const TDZ），须等本轮求值结束
@@ -3155,6 +3200,7 @@ export function renderConvListNow() {
         const target = _urlConv || localStorage.getItem('claude_last_conv');
         const c = target ? loadConvs().find((x) => x.id === target) : null;
         if (c && (_urlConv || (c.cwd || '') === (cwd || ''))) setTimeout(() => openConv(c.id), 0);
+        else restorePrompt(localStorage.getItem(NEW_DRAFT_KEY)); // 无会话可恢复：回填未落地的新对话草稿
       }
       refreshDiskHistory(); // 拉取磁盘历史会话，合并进左栏
       refreshPending(); // 额度用尽待续跑轮询
@@ -3195,20 +3241,33 @@ export function renderConvListNow() {
       }
 
       /**
-       * Task 5.4：后台发送消息，启动一次 run（不产生用户气泡）。
+       * Task 5.4：后台发送消息，启动一次 run。
+       *
        * @param {string} convId 会话 ID
-       * @param {string} text 消息文本（提示词）
+       * @param {string} text 真正发给模型的提示词（可能极长，如塞了 30KB 转录）
+       * @param {{displayText?: string}} [opts] displayText 给出时，会额外落一条用户消息，
+       *   内容用 displayText 而不是 text——调用方可以传一句简短的「[汇总 3/21] 会话《x》」，
+       *   既让用户看得见"这一步在干什么"，又不会把整份转录塞进气泡。
+       *   缺省（不传）时保持历来行为：不记用户消息。
+       *
+       *   ⚠️ 原实现只 convPushMessage 一条助手占位、从不建 DOM 气泡，并且把 job 传给
+       *   attachStream，正好绕过其内部唯一会补气泡 + paintJob + ensureTyping 的 `if (!job)`
+       *   分支 —— 结果是整个后台流程期间对话区一个字都不画（用户看到的「空对话」）。
+       *   现在：目标会话恰好是当前会话时，落库与上屏严格成对，维护
+       *   「存储索引 = DOM 索引 = _bubbleMap 索引」三方同序；不是当前会话则仍只落库
+       *  （DOM 不属于它，用户切回时 openConv 会整体重建并经本地 job 分支 paintJob）。
        * @returns {Promise<void>} 返回已连接 SSE 的 Promise
        */
-      export async function sendMessageBackground(convId, text) {
+      export async function sendMessageBackground(convId, text, opts = {}) {
         const list = loadConvs();
         const conv = list.find(c => c.id === convId);
         if (!conv) throw new Error(`Conv ${convId} not found`);
+        const isCurrent = convId === currentConvId; // 决定本次是否上屏（addMessage 只服务当前会话的 DOM）
 
-        // 创建 job 对象（不显示用户气泡，直接启动 run）
+        // 创建 job 对象
         const job = {
           es: null,
-          asstIndex: -1,  // 后台会话：无可见气泡，留作占位
+          asstIndex: -1,
           convId: convId,
           text: '',
           shown: 0,
@@ -3221,13 +3280,26 @@ export function renderConvListNow() {
           runId: null,
         };
 
-        // 添加助手占位气泡到存储侧（不显示）
+        // 可选的用户消息：让「汇总了哪些内容」有迹可循（原实现连提示词都不落库，事后无从查证）
+        if (opts.displayText) {
+          convPushMessage(convId, 'user', opts.displayText);
+          if (isCurrent) await addMessage('user', opts.displayText); // 与上一行严格成对
+        }
+
+        // 助手占位
         const asstIndex = convPushMessage(convId, 'assistant', '');
         convSetMsgFields(convId, asstIndex, { pending: true });
+        if (isCurrent) await addMessage('assistant', ''); // 同上：成对，索引才对得齐
         job.asstIndex = asstIndex;
 
         // 注册为运行中的 job（防止多次重复启动）
         runningJobs[convId] = job;
+        if (isCurrent) {
+          updateComposerRunning();
+          renderConvListDebounced();
+          paintJob(job);   // 立刻显示「运行中…」，不必等 start 往返
+          ensureTyping();  // 起打字机，后续 delta 才会逐字上屏
+        }
 
         return new Promise((resolve, reject) => {
           // 启动 run（与 send() 的 launchRun 流程一致）

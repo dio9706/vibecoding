@@ -4,9 +4,12 @@
  *  req-view 不感知本模块，chat.js 只认 hook 回调。竞态/轮询纪律对齐 req-view（世代号 + 自杀式清理）。 */
 import { $, dirTail, renderMarkdown, fmtTime } from './util.js';
 import { confirmDialog } from './ui.js';
-import { bindReqConvHook, ensureConvRunAttached, loadReqTranscript, sendMessageProgrammatically } from './chat.js';
+import { bindReqConvHook, ensureConvRunAttached, loadReqTranscript, sendMessageProgrammatically, getCurrentConvId } from './chat.js';
 import { loadConvs } from './conv-store.js';
 import { openRequirement, refreshReqList } from './req-view.js';
+import { openChangeDialog } from './req-change.js';
+import { openUiSpecDialog } from './req-uispec.js';
+import { openMapOverlay } from './req-map-overlay.js';
 
 /**
  * 开发期首轮 develop 提示词（客户端侧，与 req-logic.js buildDevelopPrompt 保持等值）。
@@ -122,8 +125,17 @@ export async function mountReqChrome(reqId) {
     const convList = loadConvs();
     const conv = convList.find((c) => c.id === data.convId);
     const hasContent = conv?.messages?.some((m) => (m.text || '').trim());
-    if (!hasContent && epoch === chromeEpoch && currentReqId === reqId) {
-      // epoch 二次确认：fetch 期间用户可能切走，避免把消息发到已离开的会话
+    // 三重确认，缺一不可：
+    //   epoch / currentReqId —— fetch 期间用户可能切到别的需求；
+    //   getCurrentConvId() === data.convId —— 关键且曾遗漏：sendMessageProgrammatically 以
+    //     chat.js 的 currentConvId 为发送目标（它不收 convId 参数），用户在 mount 与本行之间
+    //     点了侧栏别的会话，开发提示词就会被发进那个**无关会话**（真 bug，非防御性冗余）。
+    if (
+      !hasContent &&
+      epoch === chromeEpoch &&
+      currentReqId === reqId &&
+      getCurrentConvId() === data.convId
+    ) {
       sendMessageProgrammatically(buildDevPrompt(data), { mode: 'bypassPermissions' });
     }
   }
@@ -375,6 +387,8 @@ function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
   const epoch = chromeEpoch;
   let pendingReplaceName = null;
 
+  railEl.append(renderReqMgmtSection(data));
+
   // —— API 文档管理 ——
   const docsSec = document.createElement('div');
   docsSec.className = 'req-rail-sec';
@@ -514,6 +528,70 @@ function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
   });
 
   railEl.append(docsSec);
+}
+
+/**
+ * 开发期右栏「需求管理」段（需求 v2）：需求变动 / 需求地图 / UI 规范。
+ * 排在 API 文档之前——中途改需求的频次远高于换 API 文档，最该一眼看见。
+ */
+function renderReqMgmtSection(data) {
+  const sec = document.createElement('div');
+  sec.className = 'req-rail-sec';
+  const head = document.createElement('div');
+  head.className = 'req-rail-head';
+  const title = document.createElement('b');
+  title.textContent = '需求管理';
+  head.appendChild(title);
+  sec.appendChild(head);
+
+  const mapVersions = data.reqMap?.versions || [];
+  const hasMap = mapVersions.length > 0;
+  const hasConv = !!data.convId;
+  const specDir = data.devCwd || data.projects?.frontend?.dir || data.projects?.backend?.dir || '';
+
+  const mk = (icon, label, sub, onClick, { highlight = false, disabled = false, tip = '' } = {}) => {
+    const b = document.createElement('button');
+    b.className = 'rq-railbtn' + (highlight ? ' hi' : '');
+    b.disabled = disabled;
+    if (tip) b.title = tip;
+    const i = document.createElement('span');
+    i.className = 'rq-ri';
+    i.textContent = icon;
+    const t = document.createElement('span');
+    t.className = 'rq-rt';
+    t.appendChild(Object.assign(document.createElement('span'), { textContent: label }));
+    const s = document.createElement('div');
+    s.className = 'rq-rn';
+    s.textContent = sub;
+    t.appendChild(s);
+    b.append(i, t);
+    if (!disabled) b.addEventListener('click', onClick);
+    sec.appendChild(b);
+    return b;
+  };
+
+  mk('⚡', '需求变动', '中途改需求 / 补口头约定', () =>
+    openChangeDialog({
+      reqId: data.id,
+      hasMap,
+      hasConv,
+      onDone: () => refreshRail(data.id),
+    }),
+  { highlight: true });
+
+  mk(
+    '🗺',
+    '需求地图',
+    hasMap ? 'v' + mapVersions[mapVersions.length - 1].v + ' · 点开查看' : '（本需求暂无地图）',
+    () => openMapOverlay({ reqId: data.id, phase: data.phase }),
+    { disabled: !hasMap, tip: hasMap ? '' : '评审期生成开发文档时会一并产出' },
+  );
+
+  mk('🎨', 'UI 规范', specDir ? dirTail(specDir) : '（未配置工程目录）', () => openUiSpecDialog({ dir: specDir, hasConv }), {
+    disabled: !specDir,
+  });
+
+  return sec;
 }
 
 /** 右栏局部刷新（apidoc 增删后）：只重拉记录重画右栏与横幅 busy 芯片，不动聊天区 */

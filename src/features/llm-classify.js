@@ -88,7 +88,11 @@ export async function runClassifierOnce({ prompt, systemPrompt, model, logTag, t
       persistSession: false, // 内部一次性调用，不落盘 session
       model,
       maxTurns: 1, // 分类只需一轮文本输出；即使模型试图调工具也就此收束
-      disallowedTools: ['Agent', 'Task', 'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
+      // 通配符禁全部工具：`"*"` 会把所有工具定义从请求里移除，模型根本看不见。
+      // 为什么不用逐个列名的黑名单（原写法）：黑名单补不全。2026-08-24 实测中
+      // haiku 绕过了列名黑名单——它调 ToolSearch 把被禁的 Read 重新捞出来，
+      // 吃掉 maxTurns 唯一一轮，整批分类作废。SDK 每加一个新工具，黑名单就多一个洞。
+      disallowedTools: ['*'],
       abortController: abort,
       onText: (t) => (out += t),
       onResult: (info) => {

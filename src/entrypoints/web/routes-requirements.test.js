@@ -801,3 +801,120 @@ test('GET /api/feature-index：返回功能账本', async () => {
   assert.ok('index' in res.json);
   assert.ok(typeof res.json.index === 'object');
 });
+
+// ==== 问卷必答 + 生成前背景（工作台改版）====
+// plan: docs/superpowers/plans/2026-08-25-req-workbench.md
+//
+// 必答规则不能只靠前端 UI 保证：接口是公开的，绕过界面就能提交半份问卷，
+// 而缺题的问卷会让 answersToPromptPart 静默落到 AI 猜测项——用户以为自己
+// 定了口径，实际模型按默认值走了。故必须在路由层兜住。
+
+const UNSURE = '__unsure__';
+
+/** 造一份 status=ready 的三题问卷，形状与 parseQuiz 的输出一致。 */
+function plantQuiz(id, n = 3) {
+  const questions = Array.from({ length: n }, (_, i) => ({
+    id: 'Q' + (i + 1),
+    title: '问题' + (i + 1),
+    hint: '',
+    why: '',
+    opts: [
+      { v: 'a', lab: '选项A', desc: '', guess: true },
+      { v: 'b', lab: '选项B', desc: '', guess: false },
+    ],
+  }));
+  updateRequirement(id, { quiz: { status: 'ready', questions, answers: {}, at: new Date().toISOString() } });
+  return questions;
+}
+
+test('PUT /api/req/quiz：缺题提交回 400，且不入队 docgen', async () => {
+  const { id } = await createReq('必答-缺题');
+  plantQuiz(id);
+  const res = await put('/api/req/quiz', { id, answers: { Q1: { v: 'a' } } });
+  assert.equal(res.status, 400);
+  assert.match(res.json.error, /未作答/);
+  // 关键：被拒的提交不该留下队列任务，否则用户会看到「生成中」却没答完问卷
+  assert.equal(hasQueuedTasks(id), false);
+  assert.equal(getRequirement(id).quiz.status, 'ready', '被拒后仍是待答态');
+});
+
+test('PUT /api/req/quiz：全部作答（含「不确定」）回 202，unsure 原值落盘', async () => {
+  const { id } = await createReq('必答-全答');
+  plantQuiz(id);
+  const res = await put('/api/req/quiz', {
+    id,
+    answers: {
+      Q1: { v: 'b', note: '' },
+      Q2: { v: UNSURE, note: '得问下设计' },
+      Q3: { v: 'a', note: '但列表页不要跟着改' },
+    },
+  });
+  assert.equal(res.status, 202);
+  assert.equal(res.json.answered, 3);
+  const q = getRequirement(id).quiz;
+  assert.equal(q.status, 'answered');
+  // 「不确定」是前端注入的保留值，不在 LLM 出的 opts 里，必须被放行且原值保存——
+  // 落成空串就和「未作答」混为一谈了，两者给模型的授权强度不同
+  assert.equal(q.answers.Q2.v, UNSURE);
+  assert.equal(q.answers.Q2.note, '得问下设计');
+  assert.equal(q.answers.Q3.note, '但列表页不要跟着改');
+  assert.equal(hasQueuedTasks(id), true, '答完应入队 docgen');
+});
+
+test('PUT /api/req/quiz：非法选项值视为未答，仍回 400', async () => {
+  const { id } = await createReq('必答-脏值');
+  plantQuiz(id);
+  const res = await put('/api/req/quiz', {
+    id,
+    answers: { Q1: { v: 'a' }, Q2: { v: '不存在的选项' }, Q3: { v: 'a' } },
+  });
+  assert.equal(res.status, 400);
+  assert.equal(hasQueuedTasks(id), false);
+});
+
+test('PUT /api/req/quiz：只写补充不选选项不算作答（必答不被 note 绕过）', async () => {
+  const { id } = await createReq('必答-只写note');
+  plantQuiz(id);
+  const res = await put('/api/req/quiz', {
+    id,
+    answers: { Q1: { v: 'a' }, Q2: { v: '', note: '我也不知道' }, Q3: { v: 'a' } },
+  });
+  assert.equal(res.status, 400);
+});
+
+test('PUT /api/req/prime：保存/回读/清空，且不留 history、不触发生成', async () => {
+  const { id } = await createReq('背景补充');
+  const before = getRequirement(id).history.length;
+
+  const saved = await put('/api/req/prime', {
+    id,
+    text: '旧版本地筛选卡死过',
+    files: [{ name: '复盘.md', path: '/t/f.md' }],
+  });
+  assert.equal(saved.status, 200);
+  let r = getRequirement(id);
+  assert.equal(r.prime.text, '旧版本地筛选卡死过');
+  assert.equal(r.prime.files.length, 1);
+  assert.ok(r.prime.at);
+  // 前端按防抖自动保存，逐次写 history 会把时间线冲爆
+  assert.equal(r.history.length, before, '自动保存不留痕');
+  // 背景是随下一次生成一并生效的草稿，本身绝不该触发 docgen
+  assert.equal(hasQueuedTasks(id), false);
+
+  // 用户删干净 → 归 null，而不是留一条空记录
+  await put('/api/req/prime', { id, text: '', files: [] });
+  assert.equal(getRequirement(id).prime, null);
+
+  // 超长截断
+  await put('/api/req/prime', { id, text: 'x'.repeat(9999), files: [] });
+  assert.equal(getRequirement(id).prime.text.length, 5000);
+
+  // 只有附件没正文也要留住：用户可能只拖一份复盘文档进来、一个字不写
+  await put('/api/req/prime', { id, text: '', files: [{ name: 'a.md', path: '/t/a.md' }] });
+  assert.equal(getRequirement(id).prime.files.length, 1);
+});
+
+test('PUT /api/req/prime：需求不存在回 404', async () => {
+  const res = await put('/api/req/prime', { id: 'r_nope', text: 'x' });
+  assert.equal(res.status, 404);
+});

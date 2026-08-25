@@ -60,6 +60,17 @@ import { lsSet } from './util.js';
         c.session = sid;
         saveConvs(list);
       }
+      /** 未发送的输入框草稿（HTML 快照，保留附件 chip）。
+       *  不动 updatedAt：纯 UI 状态变更不该改左栏排序（同 chat.js persistPrefsToConv 的取舍）。
+       *  老会话记录读出 undefined 即「无草稿」，无需 schema 迁移。 */
+      export function convSetDraft(convId, html) {
+        const list = loadConvs();
+        const c = list.find((x) => x.id === convId);
+        if (!c) return;
+        if (!html && !c.draft) return; // 空→空：不写，免得空输入框的切换也刷一次 localStorage
+        c.draft = html || '';
+        saveConvs(list);
+      }
       export function convSetTitle(convId, title) {
         const list = loadConvs();
         const c = list.find((x) => x.id === convId);

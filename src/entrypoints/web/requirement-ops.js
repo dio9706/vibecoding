@@ -31,6 +31,18 @@ import {
   parseFeatureTag,
 } from './req-logic.js';
 import { listFeatureTags, harvestFiles } from '../../store/feature-index.js';
+import {
+  parseJsonLoose,
+  normalizeMap,
+  nextMapVersion,
+  buildMapgenPrompt,
+  buildMapFixPrompt,
+  buildMapChangePrompt,
+  buildImpactPrompt,
+  parseImpact,
+  markFreshPoints,
+} from './req-map.logic.js';
+import { buildQuizPrompt, parseQuiz, answersToPromptPart } from './req-quiz.logic.js';
 
 export const DOCGEN_TIMEOUT_MS = 15 * 60_000; // spec §5.3：docgen race 上限
 const POLL_MS = 5000;
@@ -100,9 +112,9 @@ export function healStaleBusy() {
 // —— 系统任务队列（develop / api-fix / bug-fix / docgen）：内存队列，仅 web 进程单泵消费 ——
 const queue = []; // [{ reqId, kind, payload }]
 
-/** 去重判别键：区分同一 kind 下指向不同对象的任务（不同 API 文档 / 不同 BUG），避免误合并成一条丢工作项 */
+/** 去重判别键：区分同一 kind 下指向不同对象的任务（不同 API 文档 / 不同 BUG / 不同变动），避免误合并成一条丢工作项 */
 function taskDiscriminator(payload) {
-  return payload?.bug?.id || payload?.doc?.id || '';
+  return payload?.bug?.id || payload?.doc?.id || payload?.changeId || '';
 }
 
 /**
@@ -218,6 +230,38 @@ export function dispatch({ reqId, kind, payload }) {
     // fire-and-forget：runDocgen 内部在第一个 await 之前同步写 busy，防止下个 tick 重复出队
     runDocgen(req, payload).catch((e) =>
       logger.error('req-ops', 'docgen 任务异常（history 已记录失败原因）', { reqId, err: e?.message || String(e) }),
+    );
+    return;
+  }
+  // 需求 v2 的三类只读任务（问卷 / 地图生成 / 地图修订）：与 docgen 同形态——直连 runClaude、
+  // 不占 conv、只在评审期有意义。mapchange 例外，它由开发期的「需求变动」驱动，见下。
+  if (kind === 'quizgen' || kind === 'mapgen' || kind === 'mapfix') {
+    if (req.phase !== 'review') {
+      try {
+        updateRequirement(reqId, {}, `${kind} 作废：需求已离开评审期`);
+      } catch (e) {
+        logger.error('req-ops', 'updateRequirement 失败', { reqId, kind, err: e?.message || String(e) });
+      }
+      return;
+    }
+    const runner = { quizgen: runQuizGen, mapgen: runMapGen, mapfix: runMapFix }[kind];
+    runner(req, payload).catch((e) =>
+      logger.error('req-ops', `${kind} 任务异常（history 已记录失败原因）`, { reqId, err: e?.message || String(e) }),
+    );
+    return;
+  }
+  // 需求变动改地图：评审期之后才有意义（评审期直接改需求文档/补充说明即可）
+  if (kind === 'mapchange') {
+    if (req.phase !== 'dev' && req.phase !== 'test') {
+      try {
+        updateRequirement(reqId, {}, 'mapchange 作废：需求已离开开发/测试期');
+      } catch (e) {
+        logger.error('req-ops', 'updateRequirement 失败', { reqId, kind, err: e?.message || String(e) });
+      }
+      return;
+    }
+    runMapChange(req, payload).catch((e) =>
+      logger.error('req-ops', 'mapchange 任务异常（history 已记录失败原因）', { reqId, err: e?.message || String(e) }),
     );
     return;
   }
@@ -368,9 +412,11 @@ export async function runDocgen(req, payload = {}) {
         })
       : buildDocgenPrompt({
           reqDocText: fs.readFileSync(req.reqDoc.path, 'utf8'),
+          prime: req.prime ?? null,
           supplements: req.supplements,
           projects: req.projects,
           existingTags,
+          quizPart: answersToPromptPart(req.quiz),
         });
     // 关键节点日志：docgen 真正起跑（模式/工程目录/参考目录/prompt 规模）——排查「一直生成中」时
     // 先看这条是否出现、随后 claude.js 的 ▶runClaude / init / result 三条是否跟上、耗时多少。
@@ -393,7 +439,9 @@ export async function runDocgen(req, payload = {}) {
         ...claudeAuthOpts(),
         cwd,
         ...(addDirs.length ? { additionalDirectories: addDirs } : {}),
-        permissionMode: 'default',
+        // dontAsk：文档生成只需读代码，未列出的工具直接拒绝。
+        // allowedTools 单用只是免确认，挡不住 Write/Edit/Bash（见 team-tools/review/index.js 注释）。
+        permissionMode: 'dontAsk',
         allowedTools: ['Read', 'Grep', 'Glob'],
         ...(canRevise ? { resume: req.docSession } : {}),
         abortController: abort,
@@ -457,6 +505,9 @@ export async function runDocgen(req, payload = {}) {
     const eventMsg = `开发文档 v${v} 生成完成${featureTag ? `（功能模块：${featureTag}）` : ''}`;
     updateRequirement(req.id, updatePayload, eventMsg);
     logger.info('req-ops', 'docgen 生成完成', { reqId: req.id, v, ms: elapsed, featureTag: featureTag || '无' });
+    // 双报告（spec §3.4）：文档一落版就续跑地图。resume 同一 docSession，既省 token
+    // 又保证两份报告同源；地图失败不回滚文档（各自独立留痕）。
+    enqueueSystemTask(req.id, 'mapgen', {});
     // 异步发送通知（不阻塞主流程）
     sendDocgenNotify(req, elapsed, capturedTokens.inputTokens, capturedTokens.outputTokens).catch((e) =>
       logger.warn('req-ops', 'docgen 通知异常（已捕获，不影响主流程）', { reqId: req.id, err: e?.message || String(e) }),
@@ -699,5 +750,253 @@ export async function archiveRequirement(id, note, { runGit = defaultRunGit, run
     return { ok: true };
   } finally {
     archiving.delete(id);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 需求 v2：问卷 / 需求地图 / 需求变动（spec docs/superpowers/specs/2026-08-25-req-v2-design.md）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** 影响预估是用户在弹框里等的同步调用，不能用 docgen 那 15 分钟的上限 */
+export const IMPACT_TIMEOUT_MS = 90_000;
+
+/**
+ * 评审期只读 Claude 调用的公共外壳（quizgen / mapgen / mapfix / mapchange 共用）。
+ *
+ * 与 runDocgen 的 race+abort 骨架同源。**没有顺手把 runDocgen 也改成调它**：那条路径承载了
+ * 补充说明合并、版本落盘、功能标签、飞书通知等一堆分支，注释里还记着多次事故的成因，
+ * 为了 DRY 去动它风险明显大于收益。新任务共用本函数即可，后续要合并再一起做。
+ *
+ * busy 在**第一个 await 之前**同步写入（防下个 tick 重复出队）；成功由调用方清、失败在这里清。
+ */
+async function runReadonlyClaude(req, kind, { prompt, resume = null, startEvent, timeoutMs = DOCGEN_TIMEOUT_MS }) {
+  const { cwd, addDirs } = pickCwdAndDirs(req?.projects);
+  if (!cwd) throw new Error('未配置任何工程目录');
+  updateRequirement(req.id, { busy: { kind, startedAt: Date.now() } }, startEvent);
+
+  const t0 = Date.now();
+  try {
+    let capturedSession = null;
+    let text = '';
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), timeoutMs);
+    let raceTimer;
+    try {
+      const call = runClaude(prompt, {
+        ...claudeAuthOpts(),
+        cwd,
+        ...(addDirs.length ? { additionalDirectories: addDirs } : {}),
+        // dontAsk + allowedTools 双保险：只读任务不该有任何写能力（见 runDocgen 同款注释）
+        permissionMode: 'dontAsk',
+        allowedTools: ['Read', 'Grep', 'Glob'],
+        ...(resume ? { resume } : {}),
+        abortController: abort,
+        onInit: (i) => {
+          capturedSession = i.session_id;
+        },
+        onText: (t) => {
+          text += t;
+        },
+        onResult: (info) => {
+          if (!text && info.result) text = info.result;
+        },
+      });
+      call.catch((e) =>
+        logger.warn('req-ops', kind + ' 调用异常（已落兜底）', { reqId: req.id, err: e?.message || String(e) }),
+      );
+      const timeoutPromise = new Promise((resolve) => {
+        raceTimer = setTimeout(resolve, timeoutMs + 2_000);
+      });
+      if (await raceWithTimeoutFlag(call, timeoutPromise)) throw new Error('生成超时（流未结束）');
+    } finally {
+      clearTimeout(timer);
+      clearTimeout(raceTimer);
+    }
+    if (!text || text.trim().length < 20) throw new Error('输出为空或过短，判定生成失败');
+    logger.info('req-ops', kind + ' 调用完成', { reqId: req.id, ms: Date.now() - t0, chars: text.length });
+    return { text, sessionId: capturedSession };
+  } catch (e) {
+    const reason = (e?.message || String(e)).slice(0, 200);
+    updateRequirement(req.id, { busy: null }, kind + ' 失败：' + reason);
+    logger.error('req-ops', kind + ' 失败', { reqId: req.id, ms: Date.now() - t0, reason });
+    throw e;
+  }
+}
+
+/** 某需求某版地图 JSON；v 省略取最新。无地图/读失败返回 null（调用方据此走降级）。 */
+export function readMapVersion(req, v = null) {
+  const versions = req?.reqMap?.versions || [];
+  if (!versions.length) return null;
+  const target = v == null ? versions[versions.length - 1] : versions.find((x) => x.v === Number(v));
+  if (!target) return null;
+  try {
+    return JSON.parse(fs.readFileSync(target.path, 'utf8'));
+  } catch (e) {
+    logger.warn('req-ops', '地图读取失败', { reqId: req.id, v: target.v, err: e?.message || String(e) });
+    return null;
+  }
+}
+
+/** 就地覆盖写当前版地图（挂设计稿 / 存标注这类不产生新版本的改动走这里）。 */
+export function writeMapVersion(req, map, v = null) {
+  const versions = req?.reqMap?.versions || [];
+  const target = v == null ? versions[versions.length - 1] : versions.find((x) => x.v === Number(v));
+  if (!target) throw new Error('该版本地图不存在');
+  fs.writeFileSync(target.path, JSON.stringify(map, null, 2), 'utf8');
+  return target.v;
+}
+
+/** 地图落盘 + 版本登记（四条产地图的链路共用，保证 markFreshPoints / 回迁设计稿不会漏做）。 */
+function persistMap(req, rawText, { prev, event }) {
+  const map = normalizeMap(parseJsonLoose(rawText), { prev });
+  if (!map.pages.length) throw new Error('地图为空（模型未产出任何页面）');
+  markFreshPoints(prev, map);
+  const v = nextMapVersion(req.reqMap);
+  const p = reqDir(req.id, 'map-v' + v + '.json');
+  fs.writeFileSync(p, JSON.stringify({ v, ...map }, null, 2), 'utf8');
+  const versions = [...(req.reqMap?.versions || []), { v, path: p, at: new Date().toISOString() }];
+  updateRequirement(
+    req.id,
+    { reqMap: { versions }, busy: null },
+    event + '（v' + v + '，' + map.pages.length + ' 个页面）',
+  );
+  logger.info('req-ops', '地图落版', { reqId: req.id, v, pages: map.pages.length });
+  return { v, map };
+}
+
+/**
+ * 问卷生成。失败**不阻塞主流程**（spec §3.3）：路由层收到失败会引导用户直接走 docgen，
+ * 所以这里只把状态写回、留痕，不做任何补偿动作。
+ */
+export async function runQuizGen(req) {
+  const { cwd } = pickCwdAndDirs(req?.projects);
+  if (!cwd || !req?.reqDoc) {
+    updateRequirement(req.id, {}, '问卷生成被拒：' + DOCGEN_GUIDE);
+    throw new Error(DOCGEN_GUIDE);
+  }
+  const { text, sessionId } = await runReadonlyClaude(req, 'quizgen', {
+    prompt: buildQuizPrompt({
+      reqDocText: fs.readFileSync(req.reqDoc.path, 'utf8'),
+      projects: req.projects,
+      // 背景也要喂给出题环节：界面上承诺了「你说清楚的地方就不会再问」，
+      // 只喂 docgen 不喂这里，用户写了半页背景还被问同样的问题
+      primeText: req.prime?.text || '',
+    }),
+    startEvent: '开始生成不确定点问卷',
+  });
+  let questions;
+  try {
+    questions = parseQuiz(text);
+  } catch (e) {
+    // 解析失败与「没找出歧义」是同一种结局：这次不出问卷，直接让用户去生成开发文档
+    updateRequirement(req.id, { busy: null, quiz: null }, '问卷未生成：' + (e?.message || String(e)).slice(0, 120));
+    throw e;
+  }
+  updateRequirement(
+    req.id,
+    {
+      quiz: { status: 'ready', questions, answers: {}, at: new Date().toISOString() },
+      docSession: sessionId || req.docSession,
+      busy: null,
+    },
+    '问卷已生成（' + questions.length + ' 题）',
+  );
+  return questions;
+}
+
+/** 地图首次生成：紧跟在 docgen 之后，resume 同一 docSession。 */
+export async function runMapGen(req) {
+  const docPath = req.devDoc?.versions?.at(-1)?.path || '';
+  if (!docPath) throw new Error('尚无开发文档，无法生成需求地图');
+  // docSession 丢了就没上下文可续，降级为「现读开发文档」——比直接失败强
+  const resume = req.docSession || null;
+  const { text } = await runReadonlyClaude(req, 'mapgen', {
+    prompt: buildMapgenPrompt(resume ? {} : { docPath }),
+    resume,
+    startEvent: '开始生成需求地图',
+  });
+  try {
+    return persistMap(req, text, { prev: readMapVersion(req), event: '需求地图生成完成' });
+  } catch (e) {
+    updateRequirement(req.id, { busy: null }, '需求地图生成失败：' + (e?.message || String(e)).slice(0, 160));
+    throw e;
+  }
+}
+
+/** 标注 → 一轮修订，出 v+1。标注随旧版留在旧文件里，新版天然是空的。 */
+export async function runMapFix(req) {
+  const prev = readMapVersion(req);
+  if (!prev) throw new Error('尚无需求地图可修订');
+  // 无有效标注会在这里抛，不白跑一次 LLM，也不会凭空多出一个版本
+  const prompt = buildMapFixPrompt({ map: prev, annots: prev.annots || {} });
+  const { text } = await runReadonlyClaude(req, 'mapfix', {
+    prompt,
+    resume: req.docSession || null,
+    startEvent: '开始按标注修订需求地图',
+  });
+  try {
+    return persistMap(req, text, { prev, event: '需求地图按标注修订完成' });
+  } catch (e) {
+    updateRequirement(req.id, { busy: null }, '需求地图修订失败：' + (e?.message || String(e)).slice(0, 160));
+    throw e;
+  }
+}
+
+/** 开发期「需求变动」→ 更新地图，出 v+1。 */
+export async function runMapChange(req, payload = {}) {
+  const prev = readMapVersion(req);
+  if (!prev) throw new Error('尚无需求地图可更新');
+  const { text } = await runReadonlyClaude(req, 'mapchange', {
+    prompt: buildMapChangePrompt({ map: prev, text: payload.text }),
+    resume: req.docSession || null,
+    startEvent: '开始按需求变动更新地图',
+  });
+  try {
+    return persistMap(req, text, { prev, event: '需求地图按变动更新完成' });
+  } catch (e) {
+    updateRequirement(req.id, { busy: null }, '需求地图更新失败：' + (e?.message || String(e)).slice(0, 160));
+    throw e;
+  }
+}
+
+/**
+ * 需求变动影响预估：**同步**返回（用户在弹框里等），故不占 busy、不进队列、不给任何工具。
+ * 地图缺失或推理失败一律降级为空数组——预估只是锦上添花，不能挡住用户提交变动。
+ */
+export async function computeChangeImpact(req, text) {
+  const map = readMapVersion(req);
+  if (!map) return [];
+  let prompt;
+  try {
+    prompt = buildImpactPrompt({ map, text });
+  } catch {
+    return []; // 正文为空 / 地图没有逻辑点：没什么可预估的
+  }
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), IMPACT_TIMEOUT_MS);
+  try {
+    let out = '';
+    const call = runClaude(prompt, {
+      ...claudeAuthOpts(),
+      cwd: pickCwdAndDirs(req.projects).cwd || undefined,
+      permissionMode: 'dontAsk',
+      allowedTools: [], // 纯推理：给了工具它就会跑去读代码，把 90 秒耗光
+      abortController: abort,
+      onText: (t) => {
+        out += t;
+      },
+      onResult: (info) => {
+        if (!out && info.result) out = info.result;
+      },
+    });
+    call.catch(() => {}); // race 放弃后仍可能 reject，预挂 catch 防 unhandled
+    const timeoutPromise = new Promise((resolve) => setTimeout(resolve, IMPACT_TIMEOUT_MS + 2_000));
+    if (await raceWithTimeoutFlag(call, timeoutPromise)) return [];
+    return parseImpact(out, map);
+  } catch (e) {
+    logger.warn('req-ops', '影响预估失败（降级为空）', { reqId: req.id, err: e?.message || String(e) });
+    return [];
+  } finally {
+    clearTimeout(timer);
   }
 }

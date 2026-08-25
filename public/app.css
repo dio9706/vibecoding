@@ -2782,8 +2782,23 @@
   gap: 4px;
   border-bottom: 1px solid var(--border-soft);
   margin-bottom: 4px;
+  /* 需求条目 = 需求数 + 全部子会话 + 每需求一个「＋新会话」行，且 dev/test 阶段默认展开，
+     一屏放不下是常态。缺 min-height:0 时 flex 子项的 automatic minimum size 会把最小高度
+     锁死在内容高度上 → 收缩算法收不动它 → 它按内容无限撑高、把 flex:1 的 .conv-list 压成 0，
+     自身溢出又被 body{overflow:hidden} 静默裁掉，结果是「看不见且没有滚动条」。
+     三条必须同在：min-height:0 解锁收缩、max-height 定上限、overflow-y 才有滚动条。 */
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 55%;
+  overflow-y: auto;
 }
 .req-list[hidden] { display: none; }
+.req-list::-webkit-scrollbar { width: 6px; }
+.req-list::-webkit-scrollbar-track { background: transparent; }
+.req-list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
 .req-section-label {
   font-size: 11px;
   color: var(--faint);
@@ -3671,6 +3686,55 @@
   background-color: var(--secondary-dark, #5a6268);
 }
 
+/* 「查看汇总会话」：与主操作区分，走次要按钮观感 */
+.req-retro-view-btn {
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.15s;
+}
+.req-retro-view-btn:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* ---- 优化汇总进度（前端编排，req.busy 不会被写，故自带一套进度展示）---- */
+.req-retro-progress:empty { display: none; } /* idle 时不占垂直空间 */
+.req-retro-progress {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.req-retro-progress-line {
+  font-size: 12.5px;
+  color: var(--muted);
+  word-break: break-word;
+}
+.req-retro-progress-bar {
+  margin-top: 8px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-soft);
+  overflow: hidden;
+}
+.req-retro-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+.req-retro-progress-failed {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
 /* 记忆库面板 */
 .mem-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
 .mem-budget-tip { flex: 1; color: var(--faint); font-size: 12px; }
@@ -3767,7 +3831,10 @@
 
 .opt-picker { display: flex; align-items: center; gap: 8px; }
 .opt-picker label { color: var(--muted); font-size: 13px; white-space: nowrap; }
-.opt-picker input { flex: 1; padding: 6px 10px; }
+/* 复用顶栏同款 .dir-selector：顶栏受工具条挤压才限 320px，面板里宽度富裕，
+   放开上限占满一行，路径长时靠 .dir-label 的 ellipsis 截断（title 显示全路径） */
+.opt-picker .dir-selector { flex: 1; max-width: 100%; min-width: 0; }
+.opt-picker .dir-selector .dir-label { flex: 1; text-align: left; min-width: 0; }
 
 .opt-score { display: flex; align-items: center; gap: 16px; }
 .opt-ring {

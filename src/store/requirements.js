@@ -31,6 +31,10 @@ export function createRequirement({ title }) {
     phase: 'review',
     projects: { frontend: null, backend: null }, // { dir, dev:boolean } | null
     reqDoc: null, // { name, path }
+    // 生成前的背景补充：需求文档之外用户已知的信息（历史坑/约束/优先级）。
+    // 不并入 supplements —— 那是 append-only 的修订历史，而这是一份可反复
+    // 编辑、只有一份的草稿，且不该触发 docgen（见 PUT /api/req/prime）。
+    prime: null, // { text, files:[{name,path}], at } | null
     supplements: [], // [{ id, text, files:[{name,path}], at }]
     devDoc: { versions: [] }, // [{ v, path, summary, at }]
     docSession: null, // 评审期 docgen 的 Claude session（增量修订）
@@ -41,6 +45,10 @@ export function createRequirement({ title }) {
     apiDocs: [], // [{ id, name, path, updatedAt }]
     designGuidelines: '',
     featureTag: null, // 功能模块标签（docgen 自动推断或用户手改）
+    // ---- 需求 v2（问卷 / 需求地图 / 需求变动）；老需求读侧一律降级为 null/[] ----
+    quiz: null, // { status:'ready'|'answered', questions:[{id,title,hint,why,opts}], answers:{[qid]:{v,note}}, at }
+    reqMap: null, // { versions:[{ v, path, at }] }；地图正文落 requirements/<id>/map-v<n>.json，不塞进本记录
+    changes: [], // 开发期需求变动 [{ id, text, scope:'both'|'map', hits:[pointId], at }]
     bitable: null, // { url, appToken, tableId }
     bugs: [], // [{ id, recordId, title, detail, verdict:'sure'|'doubt', reason, status, at }]
     busy: null, // { kind, runId, startedAt } —— 串行闸落盘镜像
