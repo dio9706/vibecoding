@@ -45,6 +45,23 @@ import {
 import { buildQuizPrompt, parseQuiz, answersToPromptPart } from './req-quiz.logic.js';
 
 export const DOCGEN_TIMEOUT_MS = 15 * 60_000; // spec §5.3：docgen race 上限
+
+// ============================================================
+// docgen 生成状态管理：去超时 + 用户停止 + 实时日志
+// ============================================================
+
+/** 活跃生成的 AbortController 映射：key=reqId, value=AbortController
+ *  runDocgen 起始时写入，完成/失败/用户停止时删除 */
+export const docgenAborts = new Map();
+
+/** 用户主动停止的集合：标记该 reqId 的生成是由用户触发 abort() 的
+ *  POST /api/req/docgen/stop 时添加，cleanup 时删除 */
+export const userStoppedSet = new Set();
+
+/** 实时日志缓存：key=reqId, value=最后一行文本（≤200 字）
+ *  onText 回调时更新，GET /api/req/get 返回给前端，生成完成后删除 */
+export const docgenLiveLine = new Map();
+
 const POLL_MS = 5000;
 
 /** docgen 前置条件缺失时的引导文案：runDocgen 内部守卫与 routes-requirements.js 的路由层预检共用同一句 */
