@@ -14,6 +14,10 @@ import {
   MAX_TARGETS,
   buildSummaryText,
   buildReportFileName,
+  buildUnderstandFailureReply,
+  normalizeScope,
+  buildScopeNotice,
+  SCOPE_SAFE_TITLE,
 } from './logic.js';
 
 test('TRACKING_PREFIX 回归锚点', () => {
@@ -415,4 +419,108 @@ test('buildReportFileName：超长标题被截断', () => {
   const name = buildReportFileName('标'.repeat(60), new Date('2026-08-19T02:30:00Z'), 480);
   assert.ok(name.length < 80);
   assert.ok(name.endsWith('.html'));
+});
+
+// —— 阶段 A 失败回话 ——
+// 2026-08-26 事故：用户发「统计从 8 月 1 日至今所有付费用户的行为轨迹」，模型 52.2s 算完，
+// 而预算只有 47s，结果被丢弃后回了一句「没听懂这个统计需求，换个说法试试」。
+// 需求表述完全正常，改说法一点用都没有 —— 归因错了，用户就只能瞎试。
+
+test('buildUnderstandFailureReply：超时不能说成没听懂', () => {
+  const r = buildUnderstandFailureReply('timeout');
+  assert.ok(!r.includes('没听懂'), '超时说成没听懂会把用户引向改说法这条死路');
+  assert.match(r, /超时/);
+  assert.match(r, /再发一次|重试|再试/, '必须给出可执行的下一步');
+});
+
+test('buildUnderstandFailureReply：额度耗尽要点明原因', () => {
+  const r = buildUnderstandFailureReply('exhausted');
+  assert.ok(!r.includes('没听懂'));
+  assert.match(r, /额度/);
+});
+
+test('buildUnderstandFailureReply：真的解析不出才说没听懂', () => {
+  // 这条分支是唯一「换个说法」有意义的场景
+  const r = buildUnderstandFailureReply('unparsable');
+  assert.match(r, /没听懂/);
+  assert.match(r, /帮我统计埋点/, '给个可照抄的正确例子');
+});
+
+test('buildUnderstandFailureReply：未知原因兜底为没听懂文案', () => {
+  // 新增 reason 时忘了加分支也不能回一句 undefined
+  for (const bad of [undefined, null, '', 'whatever']) {
+    const r = buildUnderstandFailureReply(bad);
+    assert.ok(typeof r === 'string' && r.length > 0);
+    assert.ok(!r.includes('undefined'));
+  }
+});
+
+// —— 能力边界守卫 ——
+// 设计文档早就写明「不做：漏斗/留存/下钻/多事件关联/用户分群」，但实现里没有任何机制
+// 让这条边界对用户可见 —— 越界需求会被当成普通关键词召回，产出一份看着有效实则答非所问的报告。
+// 见 docs/superpowers/specs/2026-08-26-tracking-stats-scope-guard-design.md
+
+test('normalizeScope：字段缺失/脏值一律退回「支持」——失效方向必须是现状', () => {
+  // 这是本守卫最重要的安全属性：模型漏字段时退回今天的行为，
+  // 而不是把所有需求都判成越界。反过来会让整个功能一夜之间失灵。
+  for (const bad of [undefined, null, {}, 'nope', 123, []]) {
+    const r = normalizeScope(bad);
+    assert.equal(r.supported, true, `${JSON.stringify(bad)} 应退回 supported`);
+    assert.deepEqual(r.unsupported, []);
+  }
+});
+
+test('normalizeScope：只有显式 false 才算越界', () => {
+  assert.equal(normalizeScope({ supported: true }).supported, true);
+  // 非布尔的真值不该被当成越界信号
+  assert.equal(normalizeScope({ supported: 'yes' }).supported, true);
+  const r = normalizeScope({ supported: false, unsupported: ['用户分群'] });
+  assert.equal(r.supported, false);
+  assert.deepEqual(r.unsupported, ['用户分群']);
+});
+
+test('normalizeScope：声明越界却说不出禁区名 → 视为支持', () => {
+  // 说不出「越界在哪」的判定不足以改变行为：拿它去拒答，用户会收到一条
+  // 无法解释、也无法据此修改需求的拒绝 —— 那比直接给数据更糟。
+  assert.equal(normalizeScope({ supported: false }).supported, true);
+  assert.equal(normalizeScope({ supported: false, unsupported: [] }).supported, true);
+  assert.equal(normalizeScope({ supported: false, unsupported: 'x' }).supported, true);
+  assert.equal(normalizeScope({ supported: false, unsupported: ['', '  '] }).supported, true);
+});
+
+test('normalizeScope：禁区项去空白、丢空值', () => {
+  const r = normalizeScope({ supported: false, unsupported: ['  用户分群 ', '', '多事件关联'] });
+  assert.deepEqual(r.unsupported, ['用户分群', '多事件关联']);
+});
+
+test('buildScopeNotice：点明禁区、给替代口径、指出人工 SQL 更快', () => {
+  const r = buildScopeNotice(['用户分群', '多事件关联']);
+  assert.match(r, /用户分群/);
+  assert.match(r, /多事件关联/);
+  assert.match(r, /PV|UV|触发/, '必须说明替代口径是什么');
+  assert.match(r, /SQL/, '必须给出真正能解决问题的出路');
+});
+
+test('buildScopeNotice：脏输入不炸且不印 undefined', () => {
+  for (const bad of [undefined, null, [], 'x', [null, '']]) {
+    const r = buildScopeNotice(bad);
+    assert.ok(typeof r === 'string' && r.length > 0);
+    assert.ok(!r.includes('undefined'));
+  }
+});
+
+test('SCOPE_SAFE_TITLE：不含任何越界措辞', () => {
+  // 用户拍板「报告附件不加声明」，于是 title 是报告脱离对话后唯一的防线。
+  // 它绝不能出现轨迹/漏斗/分群这类词 —— 那正是要防的误导。
+  for (const word of ['轨迹', '漏斗', '分群', '留存', '路径', '付费']) {
+    assert.ok(!SCOPE_SAFE_TITLE.includes(word), `安全标题不该含「${word}」`);
+  }
+  assert.match(SCOPE_SAFE_TITLE, /PV|UV/, '要点明真实口径');
+});
+
+test('SCOPE_SAFE_TITLE：能安全用作文件名', () => {
+  // title 会经 buildReportFileName 变成飞书附件名，非法字符会让上传或本地保存失败
+  const name = buildReportFileName(SCOPE_SAFE_TITLE, new Date('2026-08-26T02:30:00Z'), 480);
+  assert.ok(name.endsWith('.html'));
+  assert.ok(!/[\\/:*?"<>|]/.test(name.replace(/\.html$/, '')), '不应残留非法字符');
 });

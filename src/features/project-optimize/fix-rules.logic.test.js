@@ -47,9 +47,29 @@ test('替换反引号包裹的 rules 引用', () => {
   assert.equal(replaceRuleRefs(md, 'popup-pattern'), '先读 `/popup-pattern` 技能，照模板写。');
 });
 
-test('替换后清掉「技能 的」这类多余空格', () => {
+test('替换后清掉「技能」与后续中文之间的多余空格', () => {
+  // 原文是「`xxx.md` 的分支」，反引号后那个空格在替换后夹在了「技能」和中文之间，
+  // 而中文排版本来就不用空格分词
   const md = '读 `.claude/rules/keyboard-input-pattern.md` 的分支';
   assert.equal(replaceRuleRefs(md, 'keyboard-input-pattern'), '读 `/keyboard-input-pattern` 技能的分支');
+});
+
+test('「技能」后接任意中文助词都要收紧，不只是「的」', () => {
+  // 2026-08-26 P3-12 实测发现的：原来只针对「的」「「」两种写死，
+  // kxmall 的 popup-pattern.md 里是「以 `xxx.md` 为准」，替换后留下「技能 为准」
+  const cases = [
+    ['颜色以 `.claude/rules/a.md` 为准', '颜色以 `/a` 技能为准'],
+    ['见 `.claude/rules/a.md` 「模态」分支', '见 `/a` 技能「模态」分支'],
+    ['照 `.claude/rules/a.md` 里写的做', '照 `/a` 技能里写的做'],
+    ['参考 `.claude/rules/a.md` 。', '参考 `/a` 技能。'],
+  ];
+  for (const [md, want] of cases) assert.equal(replaceRuleRefs(md, 'a'), want);
+});
+
+test('「技能」后接英文或行尾时空格保留', () => {
+  // 只收紧中文侧：后面跟拉丁字母时空格是有意义的分隔
+  assert.equal(replaceRuleRefs('见 `.claude/rules/a.md` (v2)', 'a'), '见 `/a` 技能 (v2)');
+  assert.equal(replaceRuleRefs('见 `.claude/rules/a.md`', 'a'), '见 `/a` 技能');
 });
 
 test('不碰其它规则的引用', () => {
@@ -65,8 +85,10 @@ test('名字含正则元字符也能安全替换', () => {
 });
 
 test('一行里多处引用全部替换', () => {
+  // 「技能和」而不是「技能 和」：那个空格原本是用来隔开代码片段的，
+  // 替换后夹在两个中文词之间就成了多余（见上面的空格收紧规则）
   const md = '`.claude/rules/a.md` 和 `.claude/rules/a.md`';
-  assert.equal(replaceRuleRefs(md, 'a'), '`/a` 技能 和 `/a` 技能');
+  assert.equal(replaceRuleRefs(md, 'a'), '`/a` 技能和 `/a` 技能');
 });
 
 test('hasRuleRef 认出反引号包裹的引用', () => {

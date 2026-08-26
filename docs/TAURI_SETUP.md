@@ -104,7 +104,7 @@ Rust 首次全量编译所有依赖。后续增量编译只需 1-3 分钟。
 
 | 快捷键 | 功能 |
 |--------|------|
-| `Ctrl+Shift+P` (Win) / `Cmd+Shift+P` (Mac) | 从任意应用唤起 Claude Agent 窗口 |
+| `Ctrl+Shift+P` (Win) / `Cmd+Shift+P` (Mac) | 从任意应用唤起 Vibe Coding 窗口 |
 | `Ctrl+N` | 新建任务（菜单栏 File → New Task） |
 | 点击「×」关闭窗口 | 最小化到系统托盘（不退出） |
 | 托盘右键 → Quit | 完全退出应用 |

@@ -4,7 +4,7 @@
 
 **Goal:** 把 Node 运行时与后端代码作为 Tauri sidecar/resource 打进 Windows 安装包，`main.rs` 改用 `tauri_plugin_shell` 启动 sidecar，使安装包在无 Node 的干净机器上开箱即用。
 
-**Architecture:** 随包一个真实 `node.exe`（externalBin，按 target-triple 命名），后端 `server.js`+`src/`+生产 `node_modules`+`public/` 作为 resource（staging 到 `src-tauri/resources/sidecar/`）。生产构建下 Rust 用 `app.shell().sidecar("node").args([<resource>/sidecar/server.js])`，cwd 设为 `%APPDATA%\com.claudeagent.desktop`，并注入 `APP_DATA_DIR` env 让后端把数据写到该可写目录；开发构建保留系统 `node server.js`。
+**Architecture:** 随包一个真实 `node.exe`（externalBin，按 target-triple 命名），后端 `server.js`+`src/`+生产 `node_modules`+`public/` 作为 resource（staging 到 `src-tauri/resources/sidecar/`）。生产构建下 Rust 用 `app.shell().sidecar("node").args([<resource>/sidecar/server.js])`，cwd 设为 `%APPDATA%\com.vibecoding.desktop`，并注入 `APP_DATA_DIR` env 让后端把数据写到该可写目录；开发构建保留系统 `node server.js`。
 
 **Tech Stack:** Tauri v2、tauri-plugin-shell 2.0、Rust、Node.js 24.x（ESM）、NSIS/MSI。
 
@@ -229,7 +229,7 @@ fn start_backend_dev() {
 fn start_backend_prod(app: &AppHandle) {
     use std::io::Write;
 
-    // 1. 可写数据目录：%APPDATA%\com.claudeagent.desktop
+    // 1. 可写数据目录：%APPDATA%\com.vibecoding.desktop
     let data_dir = match app.path().app_data_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -714,10 +714,10 @@ Expected: 先执行 prepare-sidecar（打印 `done.`），随后 `tauri build` �
 
 1. 应用能启动，UI 正常加载。
 2. `http://127.0.0.1:3000/api/ping` 有响应（可在应用内功能触发，或浏览器访问）。
-3. 数据文件出现在 `%APPDATA%\com.claudeagent.desktop\`（`settings.json`、`tasks.json`、`event-log.jsonl`、`logs\backend.log` 等），安装目录（`Program Files`）内**无**运行时写入。
+3. 数据文件出现在 `%APPDATA%\com.vibecoding.desktop\`（`settings.json`、`tasks.json`、`event-log.jsonl`、`logs\backend.log` 等），安装目录（`Program Files`）内**无**运行时写入。
 4. 任务管理器：启动后存在 `node.exe` 子进程；托盘"退出"后该 `node.exe` **消失**（无孤儿）。
 
-Expected: 四项全部满足。若 §2 ping 不通，先看 `%APPDATA%\com.claudeagent.desktop\logs\backend.log` 定位后端启动错误。
+Expected: 四项全部满足。若 §2 ping 不通，先看 `%APPDATA%\com.vibecoding.desktop\logs\backend.log` 定位后端启动错误。
 
 ---
 

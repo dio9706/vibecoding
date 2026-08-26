@@ -298,7 +298,7 @@
       <input type="checkbox" id="autostartToggle" class="pretty-check" />
     </label>
     <div style="font-size:11px;color:var(--faint);margin-top:2px;padding:0 2px;">
-      启动系统后自动打开 Claude Agent（需 Tauri 桌面模式）
+      启动系统后自动打开 Vibe Coding（需 Tauri 桌面模式）
     </div>
   </div>
 
@@ -649,8 +649,12 @@
 
             <div class="opt-actions">
               <button id="optFix" class="btn primary" disabled>一键优化</button>
-              <span class="opt-phase-note">阶段一仅支持体检，一键优化即将开放</span>
+              <span class="opt-phase-note" id="optFixHint">目前仅「规范加载方式」支持自动优化</span>
             </div>
+
+            <!-- 进度与结果由 optimize-view.js 用 createElement + textContent 填充（禁 innerHTML） -->
+            <div class="opt-progress" id="optProgress" hidden></div>
+            <div class="opt-result" id="optResult" hidden></div>
           </div>
         </div>
 

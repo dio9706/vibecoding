@@ -28,6 +28,10 @@ import {
   validateSelection,
   buildSummaryText,
   buildReportFileName,
+  buildUnderstandFailureReply,
+  normalizeScope,
+  buildScopeNotice,
+  SCOPE_SAFE_TITLE,
   MAX_TARGETS,
 } from './logic.js';
 import { checkThrottle, buildThrottleReply, collectExpired, MAX_CONCURRENT } from './throttle.js';
@@ -91,8 +95,9 @@ async function runReport(ctx, body) {
 
   // 阶段 A：理解
   const understood = await understandRequest(body, dict, now);
-  if (!understood) {
-    return ctx.reply('没听懂这个统计需求，换个说法试试～例如「帮我统计埋点: 最近7天分享功能的点击」');
+  if (!understood.ok) {
+    // 按真实原因回话：超时/额度耗尽时说「换个说法」，只会让用户反复改写一句本来正确的需求
+    return ctx.reply(buildUnderstandFailureReply(understood.reason));
   }
 
   const range = normalizeRange(understood.range, today);
@@ -133,8 +138,23 @@ async function runReport(ctx, body) {
     logger.warn('tracking-stats', '剔除了索引中不存在的标识', { dropped: sel.dropped });
   }
 
+  // 能力边界（见 specs/2026-08-26-tracking-stats-scope-guard-design.md）：
+  // 「漏斗/留存/下钻/多事件关联/用户分群」这五类设计上就不做。越界时不拒答，
+  // 而是降级给 PV/UV 并显式声明 —— 但 title 必须换成固定安全标题：
+  // 用户拍板报告附件里不加声明，title 就是这份报告脱离对话后**唯一**的防线。
+  // 沿用模型产出的「付费用户行为轨迹统计」之类标题，截图转发出去就是个污染源。
+  const scope = normalizeScope(understood.scope);
+  const title = scope.supported ? understood.title : SCOPE_SAFE_TITLE;
+  if (!scope.supported) {
+    logger.info('tracking-stats', '需求超出能力边界，降级为 PV/UV 口径', {
+      unsupported: scope.unsupported,
+      // 留原标题便于回溯模型当时怎么理解的；也是评估误判率的唯一线索
+      droppedTitle: understood.title,
+    });
+  }
+
   const spec = {
-    title: understood.title,
+    title,
     events: sel.events,
     pages: sel.pages,
     range: { start: range.start, end: range.end },
@@ -148,7 +168,7 @@ async function runReport(ctx, body) {
   };
 
   const specPath = await writeSpecFile(spec);
-  const fileName = buildReportFileName(understood.title, now);
+  const fileName = buildReportFileName(title, now);
   logger.info('tracking-stats', '开始查询', {
     title: spec.title,
     events: spec.events.length,
@@ -188,8 +208,12 @@ async function runReport(ctx, body) {
 
   // 先发摘要再发附件：附件上传可能失败，结论必须先到。
   // 摘要发送失败也不能中断附件发送 —— 两条是互为备份的送达路径。
+  //
+  // 越界声明拼在摘要**前面、同一条消息里**：分成两条发会被别人的消息割开，
+  // 而一条孤零零的摘要看上去就是个正常结论 —— 声明必须和它要限定的数字待在一起。
+  const summaryText = buildSummaryText(out.summary);
   await ctx
-    .reply(buildSummaryText(out.summary))
+    .reply(scope.supported ? summaryText : `${buildScopeNotice(scope.unsupported)}\n\n${summaryText}`)
     .catch((e) => logger.warn('tracking-stats', '摘要发送失败', { err: e?.message || String(e) }));
 
   const chatId = ctx.meta?.chatId || ctx.sessionKey;
@@ -238,9 +262,10 @@ export default {
 
     // 即时应答不 await（与 bug-patrol 同理：发送失败不该中断统计流程）
     ctx
-      // 说 1~2 分钟而不是 1 分钟：实测两阶段 LLM 各 20~30s，加查库 1~7s 与渲染，
-      // 总耗时常在 1.5 分钟上下。承诺短了用户会在还没出结果时就以为机器人挂了，然后重发。
-      .reply('📊 收到，正在理解需求并查询埋点…（约需 1~2 分钟，完成后在此回报）')
+      // 说 1~3 分钟而不是 1 分钟：实测两阶段 LLM 常态各 20~30s，加查库 1~7s 与渲染，
+      // 总耗时多在 1.5 分钟上下；但限流窗口内单阶段实测可达 52s，两阶段预算上限合计 3 分钟
+      // （见 understand.js 的 TIMEOUT_MS）。承诺短了用户会在还没出结果时以为机器人挂了，然后重发。
+      .reply('📊 收到，正在理解需求并查询埋点…（约需 1~3 分钟，完成后在此回报）')
       .catch((e) => logger.warn('tracking-stats', '即时应答发送失败', { err: e?.message || String(e) }));
 
     // 异步执行：任何没被局部 catch 的异常都在这里兜底回告，绝不静默；

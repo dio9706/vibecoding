@@ -8,16 +8,39 @@
  * （session / todos / askUser / 额度续跑 / 看门狗），体检一条都用不上，接进来反而要
  * 处理一堆无关状态。这里只借它的 sendTo 做 SSE 发送。
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import { sendTo } from '../../store/runs.js';
 import { logger } from '../../shared/logger.js';
 import { checkPrompts } from '../../features/project-checkup/check-prompts.js';
 import { checkComments } from '../../features/project-checkup/check-comments.js';
-import { runStaticCheckup, recomputeReport, analyzingDim } from '../../features/project-checkup/index.js';
-import { getLlmCache, saveLlmCache, saveCheckup } from '../../store/optimize.js';
+import { checkTests } from '../../features/project-checkup/check-tests.js';
+import { checkHygiene } from '../../features/project-checkup/check-hygiene.js';
+import {
+  runStaticCheckup, recomputeReport, analyzingDim, LLM_DIM_KEYS,
+} from '../../features/project-checkup/index.js';
+import { planDemote, demoteOne } from '../../features/project-optimize/fix-rules.js';
+import { createBackup, recordPostState, listBackups, restoreBackup } from '../../features/project-optimize/backup.js';
+import { checkWorkspace } from '../../features/project-optimize/git-guard.js';
+import { selectFixableRules, buildFixNotes } from '../../features/project-optimize/fix-plan.logic.js';
+import {
+  getLlmCache, saveLlmCache, saveCheckup,
+  acquireBusy, releaseBusy, saveFixResult, getProjectRecord,
+} from '../../store/optimize.js';
 
-const RUNNERS = { prompts: checkPrompts, comments: checkComments };
+/**
+ * 异步回填的维度表 —— 编排层的唯一驱动来源（新增维度只需在这里登记）。
+ * prompts/comments 走 LLM；tests/hygiene 起子进程（跑测试命令 / git ls-files）。
+ * 四者都不能放进同步的 runStaticCheckup：tests 最长可达 120s，会把体检请求整个挂住。
+ */
+const RUNNERS = {
+  prompts: checkPrompts,
+  comments: checkComments,
+  tests: checkTests,
+  hygiene: checkHygiene,
+};
 
-const jobs = new Map(); // checkupId -> job
+const jobs = new Map(); // jobId -> job（体检和优化共用一张表，靠 job.kind 区分）
 let seq = 0;
 const KEEP_MS = 30 * 60 * 1000; // 完成的 job 保留时长，供晚接入/重连的前端读取
 const MAX_DONE = 50;
@@ -52,8 +75,13 @@ function emit(job, event, data) {
   }
 }
 
+function getJob(id, kind) {
+  const job = id ? jobs.get(id) : null;
+  return job && job.kind === kind ? job : null;
+}
+
 export function getCheckupJob(id) {
-  return id ? jobs.get(id) || null : null;
+  return getJob(id, 'checkup');
 }
 
 /**
@@ -74,13 +102,54 @@ export function attachCheckupJob(job, res) {
 }
 
 /**
- * 跑一次体检。
+ * 跑一次体检（带串行闸）。
  *
- * @returns {Promise<{report:object, checkupId:string|null}>}
- *   checkupId 为 null 表示两个 LLM 维度都已在同步返回里落定（缓存全命中 / 无需调 LLM），
- *   前端不用开 SSE。
+ * 闸的必要性：同一目录并发体检会把两个 LLM 维度各跑两遍，白烧一倍额度而结果完全相同。
+ * 用户开两个标签页、或点完没反应又点一次，都会撞上。
+ *
+ * 释放时机分两种：LLM 维度全部命中缓存时体检是同步完成的，当场释放；
+ * 需要冷跑时交给 finishJob 在 SSE 收尾时释放（job.ownsBusy 标记归属，
+ * 免得优化流程内部触发的体检去释放优化自己持有的那把闸）。
+ *
+ * @returns {Promise<{report:object, checkupId:string|null} | {busy:object}>}
+ *   busy 非空表示该项目正被占用（体检或优化），调用方转成 409。
  */
+
+/** 目录必须存在且是目录。错误文案与 runStaticCheckup 保持一致——前端已按它显示 */
+function assertValidProjectDir(dir) {
+  if (!dir || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+    throw new Error('目录不存在或不可读');
+  }
+}
+
 export async function startCheckup(dir, { force = false } = {}) {
+  // 目录合法性必须先于 acquireBusy：占闸会写 optimize.json，而非法路径最终只返回 400，
+  // 垃圾条目却已经落盘。实测残留过一条 key 为 'C:UsersDELLDesktop…'（反斜杠被吞）的项目条目。
+  assertValidProjectDir(dir);
+
+  const gate = acquireBusy(dir, 'checkup');
+  if (!gate.ok) return { busy: gate.busy };
+  try {
+    const out = await runCheckup(dir, { force, ownsBusy: true });
+    // 没有 checkupId = 没起后台 job，没人会替我们释放
+    if (!out.checkupId) releaseBusy(dir);
+    return out;
+  } catch (e) {
+    releaseBusy(dir);
+    throw e;
+  }
+}
+
+/**
+ * 体检内核，不含闸。
+ *
+ * 单独拆出来是因为优化结束后要重跑体检，而那时优化自己正持着闸——
+ * 走 startCheckup 会被自己挡在门外。
+ *
+ * @param {object} opts
+ * @param {boolean} [opts.ownsBusy] 起了后台 job 时，是否由该 job 负责释放闸
+ */
+async function runCheckup(dir, { force = false, ownsBusy = false } = {}) {
   // 先跑静态维度：目录非法会在这里抛，早于任何 LLM 调用 —— 不会为一个打错的路径白烧额度
   const report = runStaticCheckup(dir);
   const cache = getLlmCache(dir);
@@ -121,8 +190,10 @@ export async function startCheckup(dir, { force = false } = {}) {
   gc();
   const job = {
     id: `ckup_${Date.now().toString(36)}_${++seq}`,
+    kind: 'checkup',
     dir,
     status: 'running',
+    ownsBusy,
     report,
     landed: {}, // 已回填的维度：{key: dimResult}，供新订阅者 replay
     done: null, // 终局汇总：{score, grade, issueCount}
@@ -175,10 +246,240 @@ function finishJob(job) {
   job.done = { score: job.report.score, grade: job.report.grade, issueCount: job.report.issueCount };
   job.updatedAt = Date.now();
   emit(job, 'done', job.done);
+  closeSubs(job);
+  if (job.ownsBusy) releaseBusy(job.dir);
+}
+
+function closeSubs(job) {
   for (const res of [...job.subs]) {
     try { res.end(); } catch { /* 连接已断，忽略 */ }
   }
   job.subs.clear();
+}
+
+// ==================== 一键优化 ====================
+
+export function getFixJob(id) {
+  return getJob(id, 'fix');
+}
+
+/**
+ * 订阅优化进度。
+ *
+ * 与体检的 replay 用同一个理由：POST 返回到前端把 EventSource 建起来之间有个窗口，
+ * 期间产生的 step 事件不补就永远丢了。优化的事件序列有先后语义（第几步在做什么），
+ * 所以这里存的是**有序事件流**而不是体检那样的「按维度覆盖」。
+ */
+export function attachFixJob(job, res) {
+  sendTo(res, 'replay', { status: job.status, events: job.events, done: job.done });
+  if (job.status !== 'running') return res.end();
+  job.subs.add(res);
+  res.on('close', () => job.subs.delete(res));
+}
+
+/** 记进事件流再推送：晚接入的订阅者靠这份记录补齐前面的进度 */
+function pushEvent(job, event, data) {
+  job.events.push({ event, data });
+  job.updatedAt = Date.now();
+  emit(job, event, data);
+}
+
+/**
+ * 发起一次优化。
+ *
+ * @param {string} dir
+ * @param {object} opts
+ * @param {string[]} [opts.dimensions] 用户勾选的维度（v1 只有 rules 会被处理）
+ * @param {boolean} [opts.force] 跳过脏工作区确认
+ * @returns {Promise<{jobId:string, backupPending:true}
+ *   | {needsConfirm:true, dirtyCount:number, isRepo:boolean, files:string[]}
+ *   | {nothing:true, blocked:Array}
+ *   | {busy:object}>}
+ */
+export async function startFix(dir, { dimensions = [], force = false } = {}) {
+  const report = getProjectRecord(dir)?.lastCheckup;
+  if (!report) throw new Error('请先跑一次体检，再执行优化');
+
+  const { files, blocked } = selectFixableRules(report);
+  if (!files.length) return { nothing: true, blocked };
+
+  // job id 先生成再抢闸：生成本身没有副作用，但把它写进占用记录后，
+  // 被挡下的那个请求就能拿着 jobId 去接同一条 SSE，而不是只被告知「有人在跑」。
+  const jobId = `fix_${Date.now().toString(36)}_${++seq}`;
+
+  // 闸必须抢在 checkWorkspace 之前：那一步要起 git 子进程（几十毫秒起步），
+  // 等它期间足够第二个请求把前面的只读检查整个跑完，两边就都进来了。
+  const gate = acquireBusy(dir, 'fix', jobId);
+  if (!gate.ok) return { busy: gate.busy };
+
+  try {
+    const ws = await checkWorkspace(dir);
+    if (ws.dirty && !force) {
+      // 只是要用户确认，不是失败，闸得先放掉——否则用户点「确认」重发时会被自己挡住
+      releaseBusy(dir);
+      return { needsConfirm: true, dirtyCount: ws.count, isRepo: ws.isRepo, files: ws.files.slice(0, 20) };
+    }
+
+    gc();
+    const job = {
+      id: jobId,
+      kind: 'fix',
+      dir,
+      status: 'running',
+      events: [],
+      done: null,
+      subs: new Set(),
+      updatedAt: Date.now(),
+    };
+    jobs.set(job.id, job);
+
+    // 不 await：立刻把 jobId 还给前端去接 SSE
+    runFix(job, { files, blocked, dimensions, rulesBefore: report.dims?.rules?.score ?? null })
+      .catch((e) => {
+        logger.warn('optimize', '优化编排异常', { dir, err: e?.message || String(e) });
+        finishFixJob(job, { error: e?.message || String(e) });
+      });
+
+    return { jobId: job.id };
+  } catch (e) {
+    releaseBusy(dir);
+    throw e;
+  }
+}
+
+/**
+ * 优化主流程：规划 → 快照 → 逐个降级 → 记录优化后状态 → 重算静态分。
+ *
+ * 顺序不能动：快照必须在任何写操作之前（planDemote 无副作用，专为此设计），
+ * recordPostState 必须在全部写完之后（它记的是「优化后的内容哈希」，
+ * 还原时靠它区分「用户事后又手工改过」和「优化本身造成的差异」）。
+ */
+async function runFix(job, { files, blocked, dimensions, rulesBefore }) {
+  const dir = job.dir;
+  const results = [];
+  let backupDir = null;
+
+  try {
+    pushEvent(job, 'step', { phase: 'plan', text: `规划 ${files.length} 个规则文件的降级` });
+    const plan = planDemote(dir, files);
+
+    const backup = createBackup(dir, plan, { dimensions });
+    backupDir = backup.dirName;
+    pushEvent(job, 'step', { phase: 'backup', text: `已快照 ${plan.length} 个文件`, backupDir });
+
+    for (const f of files) {
+      const r = await demoteOne(dir, f, {
+        onStep: (s) => pushEvent(job, 'step', { phase: s.step, file: s.file, skillName: s.skillName }),
+      });
+      results.push(r);
+      pushEvent(job, 'file', r);
+      if (r.fatal) {
+        // 核心失败：文件系统处于半完成状态，继续处理只会越错越多
+        pushEvent(job, 'step', {
+          phase: 'abort',
+          text: `${r.file} 失败且改动已写到一半，已停止处理剩余 ${files.length - results.length} 个文件`,
+        });
+        break;
+      }
+    }
+
+    // 中途 abort 也要记：记的是**实际落盘的状态**，部分完成的状态一样能当还原基准。
+    // 记不上不会坏事，只是还原退化成无条件覆盖，所以失败仅告警不中断。
+    try {
+      recordPostState(dir, backupDir);
+    } catch (e) {
+      logger.warn('optimize', 'recordPostState 失败，还原将退化为无条件覆盖', { dir, err: e?.message || String(e) });
+    }
+
+    const report = refreshStaticReport(dir);
+    const notes = buildFixNotes({ requested: dimensions, results, rootClaudeMd: readRootClaudeMd(dir) });
+
+    const summary = {
+      results,
+      blocked,
+      notes,
+      backupDir,
+      rules: { before: rulesBefore, after: report.dims?.rules?.score ?? null },
+      report,
+    };
+    saveFixResult(dir, {
+      at: new Date().toISOString(),
+      backupDir,
+      dimensions,
+      results,
+      notes,
+      rules: summary.rules,
+    });
+    finishFixJob(job, summary);
+  } catch (e) {
+    // 已经动过盘就不能装作没发生：把已有结果和备份目录一起交出去，用户才知道能还原
+    logger.warn('optimize', '优化执行失败', { dir, err: e?.message || String(e) });
+    finishFixJob(job, { error: e?.message || String(e), results, backupDir });
+  }
+}
+
+/**
+ * 改过盘之后刷新体检报告（优化和还原都用）。
+ *
+ * 只重算静态维度，**不自动重跑 LLM 维度**：那要好几分钟、约 $0.9，而用户此刻只想看降级结果。
+ * 但也不能把上一轮的 LLM 结论原样留着——那些 issue 指向的文件可能已经被移走了，
+ * 展示出来就是在报不存在的问题。所以标成待分析，由用户自己决定要不要点「重新体检」。
+ * 指纹缓存不受影响：注释维度的源码没动，重新体检时会直接命中缓存，不会重复计费。
+ */
+function refreshStaticReport(dir) {
+  const report = runStaticCheckup(dir);
+  for (const key of LLM_DIM_KEYS) {
+    if (report.dims[key]) report.dims[key].reason = '规则已变动，请重新体检以刷新 AI 分析';
+  }
+  recomputeReport(report);
+  saveCheckup(dir, report);
+  return report;
+}
+
+/** 根 CLAUDE.md 内容，供 buildFixNotes 检查索引表残留；读不到返回 null（不是错误） */
+function readRootClaudeMd(dir) {
+  try {
+    return fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 还原一次优化。
+ *
+ * **必须走串行闸**：优化跑到一半时还原，两边会交错写同一批文件——
+ * 还原把文件写回旧版，紧接着降级又把它删掉，最终状态既不是优化后也不是优化前。
+ * 这比「不让还原」糟糕得多，所以宁可回 409 让用户等。
+ *
+ * @returns {{restored:number, skipped:Array, overwritten:string[], report:object} | {busy:object}}
+ */
+export function runRollback(dir, dirName) {
+  // dirName 来自请求体，会拼进 path.join —— 不校验就是任意路径读写：
+  // 只要目标位置恰好有个 manifest.json，还原动作就会照着它往仓库外写文件。
+  // 用「必须是本项目已有的快照之一」来卡，比过滤 ../ 之类的黑名单可靠。
+  const known = listBackups(dir).some((b) => b.dirName === dirName);
+  if (!known) throw new Error('备份不存在');
+
+  const gate = acquireBusy(dir, 'rollback');
+  if (!gate.ok) return { busy: gate.busy };
+  try {
+    const out = restoreBackup(dir, dirName);
+    return { ...out, report: refreshStaticReport(dir) };
+  } finally {
+    releaseBusy(dir);
+  }
+}
+
+function finishFixJob(job, done) {
+  if (job.status !== 'running') return;
+  job.status = 'done';
+  job.done = done;
+  job.updatedAt = Date.now();
+  emit(job, 'done', done);
+  closeSubs(job);
+  // 闸一定要放：漏放的话这个项目要等一小时才解锁（见 store/optimize.js 的 BUSY_STALE_MS）
+  releaseBusy(job.dir);
 }
 
 /** 淘汰过期/超量的已完成 job，避免内存无限增长（照搬 store/runs.js 的 gc 口径） */

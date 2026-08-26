@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { config } from '../../shared/config.js';
 import { logger } from '../../shared/logger.js';
 import { getEvents, clearEvents } from '../../store/event-log.js';
+import { getBotLogs, clearBotLogs } from '../../store/bot-log.js';
 import { getTasks, getTask, updateTask } from '../../store/tasks.js';
 import { getPluginEnabled, getActiveBot } from '../../store/settings.js';
 import { analyze, develop } from '../../plugins/team-tools/task-ops.js';
@@ -30,6 +31,22 @@ export function handleLogsClear(req, res) {
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
   try {
     clearEvents();
+    sendJson(res, 200, { ok: true });
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: String((e && e.message) || e) });
+  }
+}
+
+/** 机器人端业务日志（面板数据源），最新在前。条数已在 store 内封顶，此处不再 slice */
+export function handleBotLogs(res) {
+  sendJson(res, 200, { logs: getBotLogs() });
+}
+
+/** 清空全部机器人日志 */
+export function handleBotLogsClear(req, res) {
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+  try {
+    clearBotLogs();
     sendJson(res, 200, { ok: true });
   } catch (e) {
     sendJson(res, 500, { ok: false, error: String((e && e.message) || e) });

@@ -87,6 +87,34 @@ test('全部不可用时总分为 null', () => {
   assert.deepEqual(r.countedDims, []);
 });
 
+test('6 个维度全 done 时的加权（权重表变更的护栏）', () => {
+  const r = aggregateScore({
+    map: { score: 100, status: 'done' },
+    prompts: { score: 100, status: 'done' },
+    rules: { score: 100, status: 'done' },
+    comments: { score: 100, status: 'done' },
+    tests: { score: 0, status: 'done' },
+    hygiene: { score: 0, status: 'done' },
+  });
+  // (100*25 + 100*20 + 100*10 + 100*15 + 0*20 + 0*10) / 100 = 70
+  assert.equal(r.total, 70);
+  assert.equal(r.countedDims.length, 6);
+});
+
+test('新维度为 na 时权重按比例分摊给其余维度', () => {
+  const r = aggregateScore({
+    map: { score: 80, status: 'done' },
+    prompts: { score: null, status: 'na' },
+    rules: { score: null, status: 'na' },
+    comments: { score: null, status: 'na' },
+    tests: { score: 60, status: 'done' },
+    hygiene: { score: null, status: 'na' },
+  });
+  // 只有 map(25) 和 tests(20) 参与：(80*25 + 60*20) / 45 = 3200/45 = 71.1 → 71
+  assert.equal(r.total, 71);
+  assert.deepEqual(r.countedDims.sort(), ['map', 'tests']);
+});
+
 test('档位映射', () => {
   assert.equal(gradeOf(95).key, 'healthy');
   assert.equal(gradeOf(90).key, 'healthy');

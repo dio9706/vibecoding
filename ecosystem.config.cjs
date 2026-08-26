@@ -15,7 +15,7 @@
 // 值 = 桌面版 app_data_dir()（Windows：%APPDATA%\<identifier>）。
 // 改了本文件后必须让 PM2 重新读取 env：`pm2 restart ecosystem.config.cjs --update-env`
 // （或 `pm2 delete all && pm2 start ecosystem.config.cjs`）。
-const APP_DATA_DIR = 'C:\\Users\\DELL\\AppData\\Roaming\\com.claudeagent.desktop';
+const APP_DATA_DIR = 'C:\\Users\\DELL\\AppData\\Roaming\\com.vibecoding.desktop';
 
 module.exports = {
   apps: [

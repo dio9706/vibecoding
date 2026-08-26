@@ -82,8 +82,8 @@ tauri init --with-package-json -d . -f npm
 ```
 
 **配置时的选项选择：**
-- 项目名：`claude-agent-desktop`
-- 窗口标题：`Claude Agent`
+- 项目名：`vibe-coding-desktop`
+- 窗口标题：`Vibe Coding`
 - UI 方式：选 **Vanilla** (无构建工具)
 
 这会在 `src-tauri/` 下生成骨架。
@@ -105,7 +105,7 @@ tauri init --with-package-json -d . -f npm
   "app": {
     "windows": [
       {
-        "title": "Claude Agent",
+        "title": "Vibe Coding",
         "width": 1200,
         "height": 800,
         "minWidth": 800,
@@ -143,12 +143,12 @@ tauri init --with-package-json -d . -f npm
     "systemTray": {
       "iconPath": "icons/icon.png",
       "menuOnLeftClick": false,
-      "tooltip": "Claude Agent"
+      "tooltip": "Vibe Coding"
     },
     "bundle": {
       "active": true,
       "targets": ["nsis", "msi"],
-      "identifier": "com.claudeagent.desktop",
+      "identifier": "com.vibecoding.desktop",
       "icon": [
         "icons/32x32.png",
         "icons/128x128.png",
@@ -376,9 +376,9 @@ fn main() {
 
 ```toml
 [package]
-name = "claude-agent-desktop"
+name = "vibe-coding-desktop"
 version = "0.1.0"
-description = "Claude Agent Desktop Application"
+description = "Vibe Coding Desktop Application"
 authors = ["Your Name"]
 license = "ISC"
 repository = ""
@@ -665,9 +665,9 @@ fn setup_menu() -> tauri::Menu {
     use tauri::{Menu, MenuItem, Submenu};
 
     let app_menu = Submenu::new(
-        "Claude Agent",
+        "Vibe Coding",
         Menu::new()
-            .add_native_item(MenuItem::About("Claude Agent".into(), Default::default()))
+            .add_native_item(MenuItem::About("Vibe Coding".into(), Default::default()))
             .add_native_item(MenuItem::Separator)
             .add_native_item(MenuItem::Quit),
     );
@@ -974,7 +974,7 @@ npm run tauri:dev
 
 预期行为：
 1. Tauri CLI 启动编译 Rust（首次 5-10 分钟，后续 1-2 分钟）
-2. 编译完成后打开桌面窗口（标题「Claude Agent」）
+2. 编译完成后打开桌面窗口（标题「Vibe Coding」）
 3. WebView 尝试加载 http://127.0.0.1:3000/index.html
 4. 后端健康检查超时（因为 sidecar 还没启动成功，这很正常）
 5. 可能弹 dialog「backend startup failed」
@@ -1225,7 +1225,7 @@ tokio = { version = "1", features = ["full"] }  # 异步运行时
 cd C:\Users\DELL\Desktop\claude-p-web-demo
 
 # 编译新代码
-cargo build -p claude-agent-desktop
+cargo build -p vibe-coding-desktop
 
 # 开发模式启动
 npm run tauri:dev
@@ -1929,7 +1929,7 @@ npm run tauri:dev
 1. 启动应用，然后点「×」隐藏窗口
 2. 点其他应用（比如浏览器、记事本）让它获得焦点
 3. 按 `Ctrl+Shift+P`（Windows）或 `Cmd+Shift+P`（macOS）
-4. 验证 Claude Agent 窗口突然出现并置顶
+4. 验证 Vibe Coding 窗口突然出现并置顶
 
 ---
 
@@ -2013,7 +2013,7 @@ git push origin v0.2.0
 在 GitHub Releases 页面编辑 v0.2.0 release，添加说明：
 
 ```markdown
-# Claude Agent Desktop v0.2.0
+# Vibe Coding Desktop v0.2.0
 
 首个 Tauri 桌面版本。
 

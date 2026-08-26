@@ -217,7 +217,7 @@ test('图片加载失败时原地降级成 chip（没有 path_exists，onerror �
 });
 
 test('上传图片的完整路径后接中文说明（线上原始案例）', async () => {
-  const p = 'C:\\Users\\DELL\\AppData\\Roaming\\com.claudeagent.desktop\\.uploads\\a-screenshot-20260814.png';
+  const p = 'C:\\Users\\DELL\\AppData\\Roaming\\com.vibecoding.desktop\\.uploads\\a-screenshot-20260814.png';
   assert.equal(await render(`${p}   路径的判断有问题, 仅判断绝对路径吧`),
     `[📄:${p}]   路径的判断有问题, 仅判断绝对路径吧`);
 });

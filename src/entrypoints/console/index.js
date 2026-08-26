@@ -4,9 +4,15 @@
  * 用法：npm run chat:console；CONSOLE_ROLE=guest 可模拟访客（缺省 owner）。
  * 注意：dispatch 会真实调用意图分类与 feature（可能起 Claude 进程，烧额度）。
  */
-import { createConsoleChannel } from '../../channels/console.js';
-import { dispatch } from '../../app/dispatch.js';
-import { logger } from '../../shared/logger.js';
+import { loadAppEnv } from '../../shared/load-env.js';
+
+// 在业务模块之前：config.js 模块求值即读 env，静态 import 会抢在本行之前跑，
+// 所以下面三个依赖改用动态 import（见 shared/load-env.js）
+loadAppEnv();
+
+const { createConsoleChannel } = await import('../../channels/console.js');
+const { dispatch } = await import('../../app/dispatch.js');
+const { logger } = await import('../../shared/logger.js');
 
 const role = process.env.CONSOLE_ROLE === 'guest' ? 'guest' : 'owner';
 const channel = createConsoleChannel({ userId: 'console-' + role });

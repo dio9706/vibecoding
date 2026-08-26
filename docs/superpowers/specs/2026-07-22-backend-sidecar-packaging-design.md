@@ -16,7 +16,7 @@
 
 1. 安装 NSIS/MSI → 应用启动。
 2. 后端 sidecar 由**随包 node** 拉起，`http://127.0.0.1:3000/api/ping` 正常响应，前端 UI 正常加载。
-3. 所有运行时数据写入 `%APPDATA%\com.claudeagent.desktop\`（settings.json、tasks.json、event-log.jsonl、saved-dirs.json、用户自定义 `scripts/` 等），**不向 `Program Files` 只读目录写入**。
+3. 所有运行时数据写入 `%APPDATA%\com.vibecoding.desktop\`（settings.json、tasks.json、event-log.jsonl、saved-dirs.json、用户自定义 `scripts/` 等），**不向 `Program Files` 只读目录写入**。
 4. 从托盘"退出"后，任务管理器中**不残留 node.exe 孤儿进程**。
 
 ## 2. 选定方案：真 node 二进制作 sidecar + 后端作 resource（方案 A）
@@ -31,7 +31,7 @@
 
 ```
 ┌─────────────────────────── 安装包 (NSIS/MSI) ───────────────────────────┐
-│  claude-agent-desktop.exe        (Tauri 主进程 / WebView)                │
+│  vibe-coding-desktop.exe        (Tauri 主进程 / WebView)                │
 │  binaries/node-x86_64-pc-windows-msvc.exe   (externalBin → sidecar)     │
 │  $RESOURCE/sidecar/                                                     │
 │      server.js  src/**  node_modules/**  package.json  public/**        │
@@ -40,7 +40,7 @@
                          ▼
    app.shell().sidecar("node")
        .args([ <$RESOURCE>/sidecar/server.js ])
-       .current_dir( %APPDATA%\com.claudeagent.desktop )   ← 可写数据目录 = cwd
+       .current_dir( %APPDATA%\com.vibecoding.desktop )   ← 可写数据目录 = cwd
        .env("APP_DATA_DIR", <同上>)                        ← 修正 store 的 __dirname 相对写入
        .env("PORT", "3000")
        .spawn()  → (rx, child)
@@ -61,7 +61,7 @@
 | store 数据文件（settings/tasks/event-log/saved-dirs 等，见 `src/store/index.js`） | `__dirname` 相对（代码目录上两级） | 代码在只读 `$RESOURCE` → 写失败 | 读 `APP_DATA_DIR` env（Rust 注入） |
 | 用户自定义 action 脚本目录（`config.scripts.dir`，默认 `scripts`） | `process.cwd()` 相对 | cwd 不确定 | sidecar `current_dir = 数据目录` |
 
-两者最终都落在 `%APPDATA%\com.claudeagent.desktop\`。
+两者最终都落在 `%APPDATA%\com.vibecoding.desktop\`。
 
 ## 4. 组件级改动清单
 
@@ -138,7 +138,7 @@ Node 版本 **pin 到 24.x**（与开发一致；SDK 要求 `>=18`，满足）�
 1. **本地构建**：跑 `scripts/build-win.sh`，产出 NSIS/MSI。
 2. **干净环境验收**：在无 Node 的 Windows 用户账户（或干净 VM）安装并启动，逐条核对 §1 的 4 条成功标准。
 3. **进程核对**：任务管理器确认启动后出现 `node.exe` 子进程、退出后消失（无孤儿）。
-4. **数据落点核对**：确认数据文件出现在 `%APPDATA%\com.claudeagent.desktop\`，`Program Files` 目录无写入。
+4. **数据落点核对**：确认数据文件出现在 `%APPDATA%\com.vibecoding.desktop\`，`Program Files` 目录无写入。
 5. **回归**：`tauri dev`（debug）仍走系统 node、行为不变。
 
 ## 7. 已知限制 / 超本次范围（仅记录，不修）

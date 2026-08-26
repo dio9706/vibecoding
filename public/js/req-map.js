@@ -121,6 +121,9 @@ export function mountMap(container, opts) {
     // 外层再叠一次缩略比，缩略图就跟着主画布跑了（原 bug：鸟瞰图里内容被推出可视区）。
     const canvasClone = canvas.cloneNode(true);
     canvasClone.style.transform = 'none';
+    // 连 <defs> 一起克隆会让 marker id 在文档里重复一份；删掉后克隆体的 marker-end
+    // 自然引用主画布那份（内容一模一样），少一处 id 撞车。
+    canvasClone.querySelector('defs')?.remove();
     mmContent.appendChild(canvasClone);
 
     // 以左上角为基准缩放，避免默认居中缩放把内容顶出可视区

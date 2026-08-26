@@ -21,6 +21,8 @@ import path from 'node:path';
 import { runClassifierOnce } from '../llm-classify.js';
 import { logger } from '../../shared/logger.js';
 import { findCandidates, evaluatePrompts, splitBlocks } from './check-prompts.logic.js';
+import { shouldSkipDir } from './scan-dirs.logic.js';
+import { gitTrackedFiles } from './git-tracked.js';
 import { computeFingerprint, isCacheValid } from './fingerprint.logic.js';
 
 /**
@@ -31,7 +33,7 @@ import { computeFingerprint, isCacheValid } from './fingerprint.logic.js';
  * 不排除的话 CLAUDE.md 数量从 20 涨到 22+（副本还会随分支增长）。这些副本的内容与主干高度重复，
  * 收进来只会产生指向临时分支的重复条目、白烧 LLM 额度，而用户根本不会去改临时分支里的提示词。
  */
-const SKIP_DIR = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.expo', 'worktrees']);
+// 目录排除规则见 scan-dirs.logic.js（三个扫描维度共用，避免各持一份互不一致的清单）
 
 /** 超过这个行数视为提示词文件过长（与 logic 层的 OVERSIZE_LINES 对齐） */
 const OVERSIZE_LINES = 200;
@@ -128,21 +130,26 @@ const TEXT_CLIP = 400;
  * @param {string} projectDir
  * @returns {Array<{full:string, rel:string}>} rel 统一用正斜杠，供回报定位
  */
-function collectPromptFiles(projectDir) {
+function collectPromptFiles(projectDir, tracked) {
   const out = [];
   const seen = new Set();
+  // 三个来源（walk 的 CLAUDE.md、.claude/rules、.claude/skills）都经过这里，
+  // 所以 tracked 过滤只需写在这一处
   const add = (full, rel) => {
+    const r = rel.replace(/\\/g, '/'); // 先归一为正斜杠：git 输出的就是正斜杠
+    // tracked 为 null = 非 git 仓库，退回「全都算」的旧行为
+    if (tracked && !tracked.has(r)) return;
     const key = path.resolve(full);
     if (seen.has(key)) return;
     seen.add(key);
-    out.push({ full, rel: rel.replace(/\\/g, '/') });
+    out.push({ full, rel: r });
   };
 
   const walk = (dir, rel) => {
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
-      if (SKIP_DIR.has(e.name)) continue;
+      if (shouldSkipDir(e.name)) continue;
       const full = path.join(dir, e.name);
       const r = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) { walk(full, r); continue; }
@@ -448,11 +455,34 @@ function reanchor(verdicts, candidates) {
  *   `cacheEntry` 即下次要传回 `opts.cache` 的东西；status 非 done 时为 null（见下方说明）
  */
 export async function checkPrompts(projectDir, { cache = null, force = false } = {}) {
-  const files = collectPromptFiles(projectDir);
+  // 只看 git 追踪的文件：构建产物里的配置副本会被重复计分并重复烧额度（详见 git-tracked.js）
+  const tracked = await gitTrackedFiles(projectDir);
+  const files = collectPromptFiles(projectDir, tracked);
   const fingerprint = computeFingerprint(statFiles(files));
 
   if (!force && isCacheValid(cache, fingerprint)) {
     return { ...cache.result, cached: true, cacheEntry: cache, fingerprint };
+  }
+
+  // 一个提示词文件都没有 → 无法判断，不计入总分。
+  //
+  // 必须在「候选为 0 → 满分」之前拦掉：候选为 0 有两种成因，① 压根没有提示词文件、
+  // ② 有文件且都很干净，只有第②种配得上满分。混为一谈的后果实测过——本仓库既无
+  // CLAUDE.md 也无 .claude/rules，却拿到 prompts=100，30 点权重把总分从 0 抬到 46，
+  // 「较差」看起来像「一半还行」。comments 维度早已区分这两者（sampled===0 → na），这里对齐它。
+  if (files.length === 0) {
+    return finish(
+      {
+        score: null,
+        status: 'na',
+        issues: [],
+        verdictLog: [],
+        reason: '项目没有 CLAUDE.md 或 .claude/rules 提示词文件',
+      },
+      fingerprint,
+      0,
+      0,
+    );
   }
 
   const candidates = [];

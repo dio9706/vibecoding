@@ -43,9 +43,11 @@ function makeMap() {
   };
 }
 
-const paths = () => [...doc.querySelectorAll('.rq-edges > path')];
+// 一律限定在 .rq-canvas-host 内：鸟瞰图里挂着一份画布的 cloneNode 副本，而 .rq-minimap
+// 在骨架里排在 .rq-canvas-host **之前**，全局选择器会优先命中那份没有事件监听的克隆体。
+const paths = () => [...doc.querySelectorAll('.rq-canvas-host .rq-edges > path')];
 const pathOf = (from, to) => paths().find((p) => p.getAttribute('data-from') === from && p.getAttribute('data-to') === to);
-const nodeHeadOf = (index) => doc.querySelectorAll('.rq-nodes .rq-node')[index].querySelector('.rq-nhead');
+const nodeHeadOf = (index) => doc.querySelectorAll('.rq-canvas-host .rq-node')[index].querySelector('.rq-nhead');
 
 /** 抽屉里某一节的行文本。节标题在 .rq-lb 上，行在紧随的 .rq-jump 里。 */
 function drawerSectionRows(label) {
@@ -88,6 +90,18 @@ test('每条 edge 都画出一条带箭头的连线（回归：边曾被 normali
   for (const p of paths()) {
     assert.match(p.getAttribute('marker-end') || '', /#rq-arrow/, '每条连线都要有箭头 marker');
   }
+
+  // marker 必须真在 SVG 命名空间里 —— 落到 HTML 命名空间的话浏览器不认，箭头会隐形
+  const marker = doc.querySelector('.rq-canvas-host .rq-edges defs marker#rq-arrow');
+  assert.ok(marker, '常态箭头 marker 应存在');
+  assert.equal(marker.namespaceURI, 'http://www.w3.org/2000/svg');
+  assert.ok(doc.querySelector('.rq-canvas-host .rq-edges defs marker#rq-arrow-hl'), '高亮箭头 marker 应存在');
+});
+
+test('鸟瞰图克隆体不复制 defs，避免 marker id 在文档里撞车', () => {
+  mount();
+  assert.equal(doc.querySelectorAll('marker#rq-arrow').length, 1, 'marker id 全文档只能有一份');
+  assert.ok(doc.querySelector('.rq-minimap-content .rq-canvas'), '鸟瞰图里应有画布克隆体');
 });
 
 test('父子连线从父节点下沿出、子节点上沿进（不再按 dx/dy 猜走向）', () => {
@@ -128,7 +142,7 @@ test('选中 hub 页面时它的链路高亮、无关连线淡出', () => {
 
 test('入度为 0 的页面打「入口」徽标，其余不打', () => {
   mount();
-  const nodes = [...doc.querySelectorAll('.rq-nodes .rq-node')];
+  const nodes = [...doc.querySelectorAll('.rq-canvas-host .rq-node')];
   const hasEntry = (n) => !!n.querySelector('.rq-nflag.rq-entry');
   assert.ok(hasEntry(nodes[0]), '游戏广场是入口页，应有徽标');
   assert.ok(!hasEntry(nodes[1]) && !hasEntry(nodes[2]) && !hasEntry(nodes[3]), '子页面不该有入口徽标');

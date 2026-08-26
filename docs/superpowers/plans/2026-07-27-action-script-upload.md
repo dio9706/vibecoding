@@ -385,7 +385,7 @@ printf 'print("hi")\n' > /tmp/probe.py
 curl -s -X POST "http://127.0.0.1:3000/api/scripts/upload?name=probe.py" --data-binary @/tmp/probe.py
 curl -s "http://127.0.0.1:3000/api/scripts"
 ```
-Expected: 上传返回 `{"scriptName":"probe.py","scriptType":"python"}`；`/api/scripts` 列表含 `probe.py`；且 `%APPDATA%\com.claudeagent.desktop\scripts\probe.py` 存在。之后可删除 probe.py。
+Expected: 上传返回 `{"scriptName":"probe.py","scriptType":"python"}`；`/api/scripts` 列表含 `probe.py`；且 `%APPDATA%\com.vibecoding.desktop\scripts\probe.py` 存在。之后可删除 probe.py。
 
 - [ ] **Step 5: 提交**
 
@@ -546,7 +546,7 @@ Run: `pm2 restart claude-web --update-env`
 - [ ] **Step 2: 新建动作并上传脚本**
 
 新建动作 → 填名称/意图/关键词 `二维码` → 点「上传脚本」选 `scripts/get_qrcode.py` → "当前脚本"显示 `get_qrcode.py（python）` → 加变量 `env` → 保存。
-Expected: 列表出现该动作，脚本名 `get_qrcode.py`；`%APPDATA%\com.claudeagent.desktop\scripts\get_qrcode.py` 存在。
+Expected: 列表出现该动作，脚本名 `get_qrcode.py`；`%APPDATA%\com.vibecoding.desktop\scripts\get_qrcode.py` 存在。
 
 - [ ] **Step 3: 触发验证**
 

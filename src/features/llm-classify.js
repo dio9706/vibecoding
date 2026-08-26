@@ -60,19 +60,53 @@ export function extractFirstJsonObject(text) {
 }
 
 /**
- * @param {object} opts
- * @param {string} opts.prompt        用户侧 prompt
- * @param {object} [opts.systemPrompt] 可选 system prompt（runClaude 透传格式）
- * @param {string} opts.model         分类模型
- * @param {string} opts.logTag        日志标识（如 'intent/feedback'）
- * @param {number} [opts.timeoutMs]   超时预算（默认 CLASSIFY_TIMEOUT_MS=30s；意图分类点传 10s）
- * @returns {Promise<object|null>}    首个 JSON 对象或 null
+ * 把一次分类调用的终局状态归结为「数据 + 失败原因」。纯函数，三条失败分支各自钉死。
+ *
+ * 为什么要区分原因（2026-08-26 事故）：埋点统计的阶段 A 拿到 null 后一律回话
+ * 「没听懂这个统计需求，换个说法试试」。而那次的真实情况是模型花了 52.2s 算完、
+ * 预算只有 47s，结果被丢弃 —— 需求表述完全正常。把超时说成「没听懂」，
+ * 用户只会一遍遍改说法，而改说法对超时毫无作用，等于把人引进死路。
+ * 调用方要能分开回话，就必须先能分开归因。
+ *
+ * **先尝试解析、再看是否超时**，顺序是关键：abort 只说明「流没按时结束」，
+ * 不代表没拿到答案。模型常常早早就把 JSON 吐完了，SDK 流却迟迟不收尾（限流时尤其明显）。
+ * 此时手里已有完整结果还回一句失败，是白烧一次额度又骗了用户。
+ *
+ * @param {{exhausted?:boolean, aborted?:boolean, text?:unknown}} [o]
+ * @returns {{data: object|null, reason: 'exhausted'|'timeout'|'unparsable'|null}}
  */
-export async function runClassifierOnce({ prompt, systemPrompt, model, logTag, timeoutMs }) {
+export function classifyOutcome(o) {
+  const { exhausted = false, aborted = false, text = '' } = o || {};
+  if (exhausted) return { data: null, reason: 'exhausted' };
+
+  const block = extractFirstJsonObject(text);
+  if (block) {
+    try {
+      return { data: JSON.parse(block), reason: null };
+    } catch {
+      /* 大括号配平却仍非法（如尾逗号）：属输出质量问题，落到下面按 unparsable 归因 */
+    }
+  }
+  // 超时优先于 unparsable：被截断的残缺 JSON 正是超时的典型表现，
+  // 归到 unparsable 会把排查往「模型不听话」的方向带偏。
+  return { data: null, reason: aborted ? 'timeout' : 'unparsable' };
+}
+
+/**
+ * 与 runClassifierOnce 同一套调用逻辑，但**连失败原因一起返回**。
+ *
+ * 独立导出而不是改 runClassifierOnce 的签名：后者有 10 个调用点，
+ * 绝大多数只关心「拿到没拿到」。为一个调用点的需要去改公共契约，
+ * 收益不抵风险 —— runClassifierOnce 就此退化为本函数的一层薄包装。
+ *
+ * @param {object} opts 同 runClassifierOnce
+ * @returns {Promise<{data: object|null, reason: string|null}>}
+ */
+export async function runClassifierDetailed({ prompt, systemPrompt, model, logTag, timeoutMs }) {
   // 额度耗尽 fail-fast：曾发生五小时限流窗口内 SDK 流永不结束 → 不发起注定失败 / 会 stall 的分类调用
   if (isPoolExhausted(getTokens())) {
     logger.warn('llm-classify', 'token 池全部耗尽，跳过分类（fail-fast）', { logTag });
-    return null;
+    return classifyOutcome({ exhausted: true });
   }
   // 意图分类点传 10s（用户在等第一条回复）；其余调用点不传，沿用 30s
   const budget = Number(timeoutMs) > 0 ? Number(timeoutMs) : CLASSIFY_TIMEOUT_MS;
@@ -107,11 +141,20 @@ export async function runClassifierOnce({ prompt, systemPrompt, model, logTag, t
   } finally {
     clearTimeout(timer);
   }
-  const block = extractFirstJsonObject(out);
-  if (!block) return null;
-  try {
-    return JSON.parse(block);
-  } catch {
-    return null;
-  }
+  // 用 signal.aborted 判超时而不是量耗时：abort 只由上面那个 timer 触发，
+  // 它是「预算用尽」的权威信号。拿耗时去猜会在「调用早早异常返回」时误判成超时。
+  return classifyOutcome({ aborted: abort.signal.aborted, text: out });
+}
+
+/**
+ * @param {object} opts
+ * @param {string} opts.prompt        用户侧 prompt
+ * @param {object} [opts.systemPrompt] 可选 system prompt（runClaude 透传格式）
+ * @param {string} opts.model         分类模型
+ * @param {string} opts.logTag        日志标识（如 'intent/feedback'）
+ * @param {number} [opts.timeoutMs]   超时预算（默认 CLASSIFY_TIMEOUT_MS=30s；意图分类点传 10s）
+ * @returns {Promise<object|null>}    首个 JSON 对象或 null（失败原因见 runClassifierDetailed）
+ */
+export async function runClassifierOnce(opts) {
+  return (await runClassifierDetailed(opts)).data;
 }

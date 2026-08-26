@@ -2,12 +2,15 @@
  * 项目优化面板的纯逻辑层：不碰 DOM，可在 node 下单测。
  */
 
+// 这张表是面板渲染的唯一来源（dimListFrom 基于它 map，不遍历 report.dims）——
+// 后端新增维度若不在这里登记，即使有数据也完全不显示。顺序即展示顺序。
 export const DIM_META = [
   { key: 'map', label: '项目地图', hint: '地图是否建立、是否过期、引用是否失效' },
+  { key: 'tests', label: '测试健康度', hint: '测试是否全绿、大文件是否缺测试' },
   { key: 'prompts', label: '提示词质量', hint: '规则是否过度宽泛、是否互相冲突' },
   { key: 'rules', label: '规范加载方式', hint: '大块规范是否该从 rules 降级为 skill' },
-  { key: 'deadcode', label: '无用代码', hint: '即将支持' },
   { key: 'comments', label: '注释合理性', hint: '注释是否解释「为什么」、是否已过期' },
+  { key: 'hygiene', label: '仓库卫生', hint: '运行数据、临时脚本是否误入版本库' },
 ];
 
 const SEVERITY_ORDER = { error: 0, warn: 1, info: 2 };

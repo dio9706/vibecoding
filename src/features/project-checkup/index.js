@@ -1,14 +1,20 @@
 /**
- * 体检编排：同步跑静态检测器（维度①③），并给两个 LLM 维度（②提示词质量 / ⑤注释合理性）
- * 留占位。LLM 维度由上层 optimize-ops 起跑后异步回填（见 recomputeReport）；
- * 维度④ 暂不做，标 disabled。
+ * 体检编排：同步跑静态检测器（map / rules），其余维度留占位、由上层 optimize-ops 异步回填。
+ *
+ * 哪些维度必须异步：
+ *   - prompts / comments：要调 LLM
+ *   - tests / hygiene：要起子进程（跑测试命令 / git ls-files），tests 更可能长达 120s
+ * 同步跑它们会把整个体检 HTTP 请求阻塞到测试结束。
  */
 import fs from 'node:fs';
 import { checkMap } from './check-map.js';
 import { checkRules } from './check-rules.js';
 import { aggregateScore } from './score.logic.js';
 
-/** 需要 LLM 的维度，顺序即 UI 展示顺序无关，仅用于上层遍历 */
+/**
+ * 需要 LLM 的维度。仅供 refreshStaticReport 改文案用——
+ * 异步回填的调度完全由 optimize-ops 的 RUNNERS 表驱动，不读这个常量。
+ */
 export const LLM_DIM_KEYS = ['prompts', 'comments'];
 
 /**
@@ -29,10 +35,11 @@ export function runStaticCheckup(projectDir, now = Date.now()) {
 
   const dims = {
     map: checkMap(projectDir),
+    tests: { score: null, status: 'pending', issues: [], reason: '未开始执行测试' },
     prompts: { score: null, status: 'pending', issues: [], reason: '未启动 AI 分析' },
     rules: checkRules(projectDir),
-    deadcode: { score: null, status: 'disabled', issues: [], reason: '即将支持' },
     comments: { score: null, status: 'pending', issues: [], reason: '未启动 AI 分析' },
+    hygiene: { score: null, status: 'pending', issues: [], reason: '未开始检查' },
   };
 
   return recomputeReport({

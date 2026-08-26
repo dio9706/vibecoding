@@ -78,8 +78,16 @@ export function replaceRuleRefs(md, name) {
   if (!hasRuleRef(text, name)) return text;
 
   let out = text.split(refToken(name)).join('`/' + name + '` 技能');
-  // 「技能 的」这类多余空格：原文是「`xxx.md` 的分支」，替换后成了「技能 的分支」
-  out = out.replace(/技能 的/g, '技能的').replace(/技能 「/g, '技能「');
+  // 收紧「技能」与后续中文之间的空格。
+  //
+  // 那个空格来自原文：「以 `xxx.md` 为准」里反引号后本来就有一个空格用于隔开代码片段，
+  // 替换后它夹在了「技能」和中文之间，而中文排版不用空格分词，读起来像断句。
+  //
+  // 原实现是 `技能 的` / `技能 「` 两条写死的规则。2026-08-26 P3-12 实测撞到第三种
+  // （kxmall 的 popup-pattern.md 里是「为准」），说明按助词枚举补不完。
+  // 改成按字符类判定：只要后面是中日韩文字或中文标点就收紧，跟拉丁字母时保留
+  //（那种场合空格是有意义的分隔，如「技能 (v2)」）。
+  out = out.replace(/技能 (?=[　-〿一-鿿＀-￯])/g, '技能');
   return out;
 }
 

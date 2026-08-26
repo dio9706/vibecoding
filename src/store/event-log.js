@@ -4,10 +4,13 @@
  * 都是一次全量磁盘往返，且被 git 追踪导致工作区永远脏。
  * 追加单行远小于 4KB 近似原子，无需文件锁（极端并发下日志丢一行可接受）。
  * 旧 event-log.json 只读兼容合并，不再写入。
+ *
+ * 读取与压缩下沉到 store/jsonl.js（三个 JSONL store 共用），此处只保留本日志特有的策略：
+ * 3 天保留窗口、遗留 JSON 合并、1000 条上限。
  */
 import fs from 'node:fs';
 import { dataPath, readJson } from './index.js';
-import { acquireLock, releaseLock } from './lock.js';
+import { readJsonl, compactJsonl, withinRetention } from './jsonl.js';
 
 const FILE = 'event-log.jsonl';
 const LEGACY = 'event-log.json';
@@ -34,71 +37,18 @@ export function appendEvent(entry) {
   }
 }
 
-function readJsonl() {
-  let raw = '';
-  try {
-    raw = fs.readFileSync(dataPath(FILE), 'utf8');
-  } catch {
-    return [];
-  }
-  const out = [];
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      out.push(JSON.parse(line));
-    } catch {
-      /* 跳过坏行（如进程被杀时的半行） */
-    }
-  }
-  return out; // 文件序 = 旧→新
-}
-
-/** 是否在保留窗口内（3 天）。time 缺失/不可解析一律保留，避免误删。 */
-function withinRetention(e, now) {
-  const t = Date.parse(e && e.time);
-  if (Number.isNaN(t)) return true;
-  return now - t <= RETAIN_MS;
+function compact() {
+  compactJsonl(FILE, { max: MAX, retainMs: RETAIN_MS });
 }
 
 /** 最新在前；合并旧版 event-log.json（只读遗留），封顶 MAX 条 */
 export function getEvents() {
   const now = Date.now();
-  const cur = readJsonl().reverse();
+  const cur = readJsonl(FILE).reverse();
   const legacy = readJson(LEGACY, []); // 旧文件本就最新在前
-  return [...cur, ...legacy].filter((e) => withinRetention(e, now)).slice(0, MAX);
+  return [...cur, ...legacy].filter((e) => withinRetention(e, now, RETAIN_MS)).slice(0, MAX);
 }
 
-/**
- * 压缩：只保留最新 MAX 条。
- *
- * append 本身可以无锁（单行 <4KB 近似原子，极端并发丢一行可接受），
- * 但**压缩必须加锁**：它是「读全量 → rename 覆盖」，跨进程并发时会把对方在这个窗口里
- * 追加的行整段吞掉（web 与 feishu 双进程都在写访问日志，窗口并不罕见）。
- */
-function compact() {
-  const file = dataPath(FILE);
-  const lock = file + '.lock';
-  let token;
-  try {
-    token = acquireLock(lock, { maxWaitMs: 2000 });
-  } catch {
-    return; // 抢不到锁说明别的进程正在压缩，跳过本次即可
-  }
-  try {
-    const now = Date.now();
-    const list = readJsonl();
-    let keep = list.filter((e) => withinRetention(e, now));
-    if (keep.length > MAX) keep = keep.slice(-MAX); // 时间为主、条数为安全上限
-    if (keep.length === list.length) return; // 无过期、未超限，无需写盘
-    const tmp = file + '.' + process.pid + '.tmp';
-    fs.writeFileSync(tmp, keep.length ? keep.map((e) => JSON.stringify(e)).join('\n') + '\n' : '');
-    fs.renameSync(tmp, file);
-  } catch {
-    /* 压缩失败不影响主流程，下次再试 */
-  } finally {
-    releaseLock(lock, token);
-  }
-}
 /** 清空全部访问日志：截空 JSONL，并删除只读遗留 event-log.json，保证清空彻底。 */
 export function clearEvents() {
   fs.writeFileSync(dataPath(FILE), '');

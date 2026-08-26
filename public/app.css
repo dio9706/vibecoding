@@ -3847,12 +3847,20 @@
 .opt-picker .dir-selector { flex: 1; max-width: 100%; min-width: 0; }
 .opt-picker .dir-selector .dir-label { flex: 1; text-align: left; min-width: 0; }
 
-.opt-score { display: flex; align-items: center; gap: 16px; }
+/* 分数区做成一张卡：原来贴着背景飘着，和下面的维度卡片没有层次区分 */
+.opt-score {
+  display: flex; align-items: center; gap: 20px;
+  background: var(--panel-2);
+  border: 1px solid var(--faint);
+  border-radius: 10px;
+  padding: 18px 20px;
+}
 .opt-ring {
   width: 96px; height: 96px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   border: 6px solid var(--faint);
   transition: border-color .3s ease;
+  flex: none;
 }
 .opt-ring.is-healthy { border-color: var(--green); }
 .opt-ring.is-good { border-color: var(--accent-hi); }
@@ -3866,8 +3874,16 @@
 
 .opt-dims { display: flex; flex-direction: column; gap: 8px; }
 
-.opt-dim { border: 1px solid var(--faint); border-radius: 6px; padding: 10px 12px; }
+.opt-dim {
+  border: 1px solid var(--faint);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--panel);
+  transition: border-color .15s, background .15s;
+}
+.opt-dim:not(.is-disabled):hover { border-color: var(--accent-hi); background: var(--panel-2); }
 .opt-dim.is-disabled { opacity: .45; }
+.opt-dim.is-open { background: var(--panel-2); }
 .opt-dim-head { display: flex; align-items: center; gap: 10px; cursor: pointer; }
 .opt-dim-head input[type="checkbox"] { cursor: pointer; }
 .opt-dim-label { font-weight: 500; }
@@ -3892,9 +3908,12 @@
   animation: spin 0.7s linear infinite;
 }
 
-.opt-issues { margin-top: 8px; display: none; flex-direction: column; gap: 4px; }
+.opt-issues {
+  margin: 10px 0 2px; display: none; flex-direction: column; gap: 6px;
+  padding-left: 12px; border-left: 2px solid var(--faint);
+}
 .opt-dim.is-open .opt-issues { display: flex; }
-.opt-issue { display: flex; gap: 8px; font-size: 12px; align-items: baseline; }
+.opt-issue { display: flex; gap: 8px; font-size: 12px; align-items: baseline; line-height: 1.6; }
 .opt-issue-sev { min-width: 40px; }
 .opt-issue-sev.sev-error { color: var(--red); }
 .opt-issue-sev.sev-warn { color: var(--amber); }
@@ -3904,3 +3923,83 @@
 
 .opt-actions { display: flex; align-items: center; gap: 12px; }
 .opt-phase-note { color: var(--muted); font-size: 12px; }
+
+/* 这两个是面板的主操作，默认 .btn 的 12.5px/6px 在这么空的版面里显得像次要链接 */
+#optRunCheckup, #optFix {
+  font-size: 14px;
+  font-weight: 600;
+  padding: 10px 26px;
+  border-radius: 8px;
+  flex: none;
+}
+#optRunCheckup:disabled, #optFix:disabled { cursor: not-allowed; }
+
+/* ---- 优化进度 ---- */
+/* 这两块默认带 hidden 属性，而 display:flex 的优先级高于 hidden 自带的 display:none，
+   不显式盖掉的话空盒子会一直占着一条带边框的空白 */
+.opt-progress[hidden], .opt-result[hidden] { display: none; }
+
+.opt-progress {
+  border: 1px solid var(--faint);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 10px 14px;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.opt-step { display: flex; gap: 10px; font-size: 12px; align-items: baseline; line-height: 1.6; }
+.opt-step-phase { color: var(--accent-hi); min-width: 96px; }
+.opt-step-file { color: var(--muted); font-family: var(--mono, monospace); }
+.opt-step-text { color: var(--muted); }
+
+/* ---- 优化结果 ---- */
+.opt-result { display: flex; flex-direction: column; gap: 10px; }
+
+.opt-res-summary {
+  display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center;
+  background: var(--panel-2);
+  border: 1px solid var(--faint);
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 13px;
+}
+.opt-res-stat { font-weight: 600; }
+.opt-res-stat.is-warn { color: var(--amber); }
+.opt-res-error { color: var(--red); font-size: 13px; }
+
+.opt-res-file {
+  border: 1px solid var(--faint);
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--panel);
+}
+.opt-res-file.is-done { border-left-color: var(--green); }
+.opt-res-file.is-skipped { border-left-color: var(--amber); }
+.opt-res-file.is-failed { border-left-color: var(--red); }
+
+.opt-res-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.opt-res-badge { font-size: 12px; font-weight: 600; }
+.opt-res-badge.sev-done { color: var(--green); }
+.opt-res-badge.sev-skipped { color: var(--amber); }
+.opt-res-badge.sev-failed { color: var(--red); }
+.opt-res-file-name { font-family: var(--mono, monospace); font-size: 13px; }
+
+.opt-res-body { display: flex; flex-direction: column; gap: 6px; }
+.opt-kv { display: flex; gap: 10px; font-size: 12px; line-height: 1.7; align-items: baseline; }
+.opt-kv-k { color: var(--muted); min-width: 92px; flex: none; }
+.opt-kv-v { flex: 1; min-width: 0; word-break: break-word; }
+/* 生成的 description 是要用户逐字读的（写砸了 skill 就唤不起来），给足对比度和行距 */
+.opt-kv-v.is-desc {
+  color: var(--text, #e8e8ef);
+  background: var(--panel-2);
+  border-radius: 6px;
+  padding: 8px 10px;
+  line-height: 1.8;
+}
+
+.opt-res-note { color: var(--amber); font-size: 12px; line-height: 1.7; }
+.opt-res-foot { display: flex; gap: 10px; margin-top: 4px; }

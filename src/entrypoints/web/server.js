@@ -71,6 +71,8 @@ import { startConvNotify } from './conv-notify.js';
 import {
   handleLogs,
   handleLogsClear,
+  handleBotLogs,
+  handleBotLogsClear,
   handleTasks,
   handleTaskAction,
   handleHistory,
@@ -91,6 +93,8 @@ const ACCESS_LOG_SKIP = new Set([
   '/api/tasks',
   '/api/logs',
   '/api/logs/clear',
+  '/api/bot-logs', // 面板打开即请求；不排除的话「看日志」这个动作本身就在刷日志
+  '/api/bot-logs/clear',
   '/api/run/pending',
   '/api/tokens/status',
   '/api/memory/list',
@@ -158,6 +162,8 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/api/dirs/saved') return handleSaved(req, res);
   if (url.pathname === '/api/logs') return handleLogs(res);
   if (url.pathname === '/api/logs/clear') return handleLogsClear(req, res);
+  if (url.pathname === '/api/bot-logs') return handleBotLogs(res);
+  if (url.pathname === '/api/bot-logs/clear') return handleBotLogsClear(req, res);
   if (url.pathname === '/api/tasks') return handleTasks(res);
   if (url.pathname === '/api/tasks/action') return handleTaskAction(req, res);
   if (url.pathname.startsWith('/api/conv-notify/')) {

@@ -1,41 +1,20 @@
-/** 访问日志面板：分组渲染 + 搜索过滤 + 虚拟滚动 + 清空。入口 loadLogs 由 showView('logs') 调用。 */
+/** 机器人日志面板：分组渲染 + 搜索过滤 + 虚拟滚动 + 清空。入口 loadLogs 由 showView('logs') 调用。 */
 import { $, debounce, fmtTime } from './util.js';
 import { confirmDialog } from './ui.js';
-      const LOG_PATH_LABELS = {
-        '/api/run/start': '发起对话',
-        '/api/run/abort': '停止对话',
-        '/api/run/set-mode': '切换权限模式',
-        '/api/run': '对话流(SSE)',
-        '/api/tasks/action': '需求/故障操作',
-        '/api/dirs/saved': '常用目录变更',
-        '/api/dirs/pick': '系统选择目录',
-        '/api/dirs/browse': '浏览目录',
-      };
-      function formatLogEntry(g) {
-        if (g.type === 'cleanup') {
-          const tail = g.ok ? '' : `（失败 code ${g.code ?? '-'}）`;
-          return { ok: g.ok, text: `数据清理 · ${g.phone || '-'} · ${g.env || '-'}${tail}` };
-        }
-        const ok = g.status ? g.status < 400 : true;
-        const parts = [LOG_PATH_LABELS[g.path] || g.path || '(未知)'];
-        if (g.method && g.method !== 'GET') parts.push(g.method);
-        if (g.status) parts.push(String(g.status));
-        if (g.ms != null) parts.push(`${g.ms}ms`);
-        return { ok, text: parts.join(' · ') };
-      }
+import { formatBotLogEntry } from './logs-panel.logic.js';
       export async function loadLogs() {
         const body = $('#logBody');
         body.innerHTML = '<div style="color:var(--faint);padding:8px">加载中…</div>';
         let allLogs = [];
         try {
-          const { logs } = await (await fetch('/api/logs')).json();
+          const { logs } = await (await fetch('/api/bot-logs')).json();
           allLogs = logs || [];
         } catch {
           body.innerHTML = '<div style="color:var(--red);padding:8px">读取失败</div>';
           return;
         }
         if (!allLogs.length) {
-          body.innerHTML = '<div style="color:var(--faint);padding:8px">暂无日志</div>';
+          body.innerHTML = '<div style="color:var(--faint);padding:8px">暂无机器人日志</div>';
           return;
         }
 
@@ -56,7 +35,7 @@ import { confirmDialog } from './ui.js';
         searchBar.appendChild(searchInput);
         searchBar.appendChild(countSpan);
 
-        // 清空日志按钮：主动清空全部访问日志（3 天自动保留之外的手动一键清）
+        // 清空日志按钮：主动清空全部机器人日志（条数上限之外的手动一键清）
         const clearBtn = document.createElement('button');
         clearBtn.type = 'button';
         clearBtn.textContent = '清空日志';
@@ -66,15 +45,15 @@ import { confirmDialog } from './ui.js';
         clearBtn.style.marginLeft = '8px';
         clearBtn.addEventListener('click', async () => {
           const ok = await confirmDialog({
-            title: '清空访问日志',
-            message: '确认清空全部访问日志？清空后不可恢复。',
+            title: '清空机器人日志',
+            message: '确认清空全部机器人日志？清空后不可恢复。',
             confirmText: '确认清空',
             danger: true,
           });
           if (!ok) return;
           clearBtn.disabled = true;
           try {
-            const resp = await fetch('/api/logs/clear', { method: 'POST' });
+            const resp = await fetch('/api/bot-logs/clear', { method: 'POST' });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok || !data.ok) throw new Error('clear failed');
             loadLogs();
@@ -116,7 +95,7 @@ import { confirmDialog } from './ui.js';
           const frag = document.createDocumentFragment();
           for (let i = startIdx; i < endIdx; i++) {
             const g = filteredLogs[i];
-            const { ok, text } = formatLogEntry(g);
+            const { ok, text } = formatBotLogEntry(g);
             const row = document.createElement('div');
             row.className = 'log-row';
             row.style.height = ROW_H + 'px';
@@ -141,10 +120,7 @@ import { confirmDialog } from './ui.js';
         const filterDebounced = debounce((q) => {
           const kw = q.trim().toLowerCase();
           filteredLogs = kw
-            ? allLogs.filter((g) => {
-                const { text } = formatLogEntry(g);
-                return text.toLowerCase().includes(kw) || (g.path || '').includes(kw);
-              })
+            ? allLogs.filter((g) => formatBotLogEntry(g).text.toLowerCase().includes(kw))
             : allLogs;
           scroller.scrollTop = 0;
           renderVisible();

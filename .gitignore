@@ -30,6 +30,8 @@ requirements.json
 requirements/
 event-log.json
 event-log.jsonl
+# bot-log.jsonl : 机器人端业务日志（含用户姓名/原话摘要），属运行数据且高频追加
+bot-log.jsonl
 review-log.jsonl
 # user-log.jsonl : 用户在执行台/飞书亲手打出的原文（记忆库数据采集层），属个人数据
 user-log.jsonl

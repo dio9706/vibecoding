@@ -2,8 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DIM_META, dimListFrom, severityRank, sortIssues } from './optimize-view.logic.js';
 
-test('维度元信息覆盖五个维度且顺序固定', () => {
-  assert.deepEqual(DIM_META.map((d) => d.key), ['map', 'prompts', 'rules', 'deadcode', 'comments']);
+test('维度元信息覆盖六个维度且顺序固定', () => {
+  // tests 紧随 map（两者都是高权重的健壮性信号），hygiene 收尾；
+  // 原先恒为 disabled 的 deadcode 已由 hygiene 取代
+  assert.deepEqual(
+    DIM_META.map((d) => d.key),
+    ['map', 'tests', 'prompts', 'rules', 'comments', 'hygiene'],
+  );
 });
 
 test('每个维度都有中文标签和说明', () => {
@@ -19,8 +24,9 @@ test('从报告生成维度列表,带上可勾选状态', () => {
       map: { score: 80, status: 'done', issues: [{ code: 'X', severity: 'warn', file: 'a', line: 1 }] },
       prompts: { score: null, status: 'pending', issues: [], reason: '阶段二支持' },
       rules: { score: 55, status: 'done', issues: [] },
-      deadcode: { score: null, status: 'disabled', issues: [], reason: '即将支持' },
       comments: { score: null, status: 'pending', issues: [], reason: '阶段二支持' },
+      tests: { score: 70, status: 'done', issues: [] },
+      hygiene: { score: null, status: 'na', issues: [], reason: '不是 git 仓库' },
     },
   };
   const list = dimListFrom(report);
@@ -29,10 +35,11 @@ test('从报告生成维度列表,带上可勾选状态', () => {
   assert.equal(list[0].selectable, true);
   assert.equal(list[0].issueCount, 1);
 
-  const deadcode = list.find((d) => d.key === 'deadcode');
-  assert.equal(deadcode.selectable, false);
-  assert.equal(deadcode.scoreText, '--');
-  assert.equal(deadcode.reason, '即将支持');
+  // na 维度：无分数、不可勾选，但要把原因透出来
+  const hygiene = list.find((d) => d.key === 'hygiene');
+  assert.equal(hygiene.selectable, false);
+  assert.equal(hygiene.scoreText, '--');
+  assert.equal(hygiene.reason, '不是 git 仓库');
 
   // pending 不可勾选：还没有结果，无从优化
   assert.equal(list.find((d) => d.key === 'prompts').selectable, false);
@@ -98,13 +105,13 @@ test('score 为 0 时不能显示成 --', () => {
 
 test('报告为空时全部维度显示 --', () => {
   const list = dimListFrom(null);
-  assert.equal(list.length, 5);
+  assert.equal(list.length, 6);
   assert.ok(list.every((d) => d.scoreText === '--' && d.selectable === false));
 });
 
 test('报告缺 dims 键时不崩', () => {
   const list = dimListFrom({});
-  assert.equal(list.length, 5);
+  assert.equal(list.length, 6);
   assert.ok(list.every((d) => d.scoreText === '--'));
 });
 

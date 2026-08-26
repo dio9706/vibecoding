@@ -1,7 +1,7 @@
 [package]
-name = "claude-agent-desktop"
+name = "vibe-coding-desktop"
 version = "0.1.0"
-description = "Claude Agent Desktop Application"
+description = "Vibe Coding Desktop Application"
 authors = ["Your Name"]
 license = "ISC"
 repository = ""

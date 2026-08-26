@@ -9,6 +9,8 @@ import { logger } from '../../../shared/logger.js';
 import { config } from '../../../shared/config.js';
 import { runScript } from '../../../integrations/shell.js';
 import { appendActionLog } from '../../../store/action-log.js';
+import { recordBotActivity } from '../../../shared/bot-activity.js';
+import { getConfig } from '../../../store/action-configs.js';
 
 /**
  * 从配置和收集的变量组装脚本参数数组
@@ -151,6 +153,17 @@ export async function runAction(actionConfig, userId, collectedVars) {
       { error: err?.message || String(err) },
     );
   }
+
+  // 8. 记录机器人日志（面板展示用；action-log 是审计用途，两者并行不互相替代）
+  // botId 由 actionId 反查：动作 per-bot 独享，配置里带 botId
+  await recordBotActivity({
+    kind: 'action',
+    botId: getConfig(actionId)?.botId,
+    userId,
+    detail: actionName,
+    ok: result.ok,
+    code: result.code || (result.ok ? 0 : 1),
+  });
 
   return { ok: result.ok, output };
 }

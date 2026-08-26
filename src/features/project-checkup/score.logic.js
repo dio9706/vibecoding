@@ -3,14 +3,19 @@
  *
  * 权重不等权的理由：地图和提示词影响的是「以后每一次开发的速度」，有复利效应；
  * rules 降级是一次性配置问题；注释是代码卫生，影响可读性但不直接拖慢 AI。
- * 维度④（无用代码）v1 不做，不出现在权重表里。
+ *
+ * tests / hygiene 是体检从「AI 协作配置健康度」扩展到「项目代码健壮性」时加入的：
+ * 测试是健壮性的核心信号（20），仓库卫生问题明确但影响面小（10）。
+ * 原先恒为 disabled 的 deadcode 槽位已由 hygiene 取代。
  */
 
 export const WEIGHTS = {
-  map: 35,
-  prompts: 30,
-  rules: 15,
-  comments: 20,
+  map: 25,
+  prompts: 20,
+  rules: 10,
+  comments: 15,
+  tests: 20,
+  hygiene: 10,
 };
 
 const GRADES = [

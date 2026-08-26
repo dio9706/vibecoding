@@ -5,7 +5,7 @@
 ### Step 1.1-1.2: 安装和初始化
 - ✅ 全局安装 Tauri CLI v2.11.4
 - ✅ 验证版本：`tauri --version` 输出正确
-- ✅ 创建 Tauri 项目骨架：`tauri init --ci -f -d . -A claude-agent-desktop -W "Claude Agent"`
+- ✅ 创建 Tauri 项目骨架：`tauri init --ci -f -d . -A vibe-coding-desktop -W "Vibe Coding"`
 
 ### Step 1.3: 创建 src-tauri/tauri.conf.json
 - ✅ 文件已创建：`src-tauri/tauri.conf.json`

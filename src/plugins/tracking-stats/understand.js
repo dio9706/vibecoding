@@ -5,21 +5,29 @@
  * 字面召回直接归零 —— 而召回不到的事件，后续模型再聪明也选不出来。
  * 阶段 A 先把口语转成规范检索词，阶段 B 再从召回结果里挑。
  */
-import { runClassifierOnce } from '../../features/llm-classify.js';
+import { runClassifierDetailed } from '../../features/llm-classify.js';
 import { config } from '../../shared/config.js';
 import { logger } from '../../shared/logger.js';
 
 /**
- * 两阶段的分类超时：45s。
+ * 两阶段的分类超时：90s。
  *
  * 为什么不跟 intent.js 的 10s：那是一句话的短分类 prompt，而这里阶段 A 要塞进 40 组业务模块
  * 目录（每组还带 3 条样例事件），阶段 B 要塞进上百条候选埋点，量级完全不是一回事。
- * 2026-08-19 端到端冒烟实测阶段 A 真实耗时 22~28s，10s 必然超时 —— 表现为「LLM 调用成功、
- * 阶段 A 却无输出」。45s 是在实测上限之上留了约 60% 余量，同时不至于让用户干等到怀疑卡死。
+ * 2026-08-19 端到端冒烟实测阶段 A 真实耗时 22~28s，10s 必然超时。
+ *
+ * 为什么从 45s 提到 90s（2026-08-26 事故）：45s 是照「实测 22~28s + 60% 余量」定的，
+ * 但那次实测是额度充足时的数据。限流窗口内同一个 prompt 实测拖到 **52.2s**
+ * （同一次请求的阶段 B 也用了 30.4s），45s + 2s race 兜底照样判超时，
+ * 而模型其实已经算完 —— 结果整个请求作废、额度白烧，用户还收到一句「没听懂」。
+ * 余量要按**最坏观测值**留而不是常态值：超时一次的代价是全盘重来，多等半分钟只是慢一点。
+ *
+ * 代价是最坏情况两阶段合计 3 分钟，feature.js 的即时应答文案已同步改为「1~3 分钟」——
+ * 承诺短了，用户会在还没出结果时以为机器人挂了然后重发，那更糟。
  *
  * 注意别顺手把 intent.js 的 10s 也改了：那条路径每条消息都要走，拖长就是全局变慢。
  */
-const TIMEOUT_MS = 45_000;
+const TIMEOUT_MS = 90_000;
 /** 阶段 A 塞进 prompt 的分类目录条数上限 —— 再多 prompt 就开始膨胀，收益却在递减 */
 const CATEGORY_MAX = 40;
 /** 每个分类附带的样例事件条数上限 */
@@ -120,36 +128,63 @@ ${body}
   "range": { "start": "YYYY-MM-DD", "end": "YYYY-MM-DD" },
   "target": "event" 或 "page" 或 "both",
   "keywords": ["检索词1", "检索词2"],
-  "title": "报告标题"
+  "title": "报告标题",
+  "scope": { "supported": true, "unsupported": [] }
 }
 
 规则：
 1. range 用绝对日期，且必须基于上面给出的今天（${todayDate}）推算，不要用你记忆里的日期。「最近一个月」=今天往前推 29 天到今天；「上个月」「7月」=该自然月的完整区间；「昨天」=昨天单日。用户没提时间就给最近 7 天。
 2. target：用户明确说「页面」「访问」「浏览」用 page；说「点击」「按钮」「操作」用 event；说不清用 both。
 3. keywords：把口语转成能在事件名和中文名里检索到的词，做同义词扩展，中英文都给。例如「小孩吃饭那块」应扩展为 ["宝宝辅食","baby_food","辅食","儿童"]。给 2-6 个词。
-4. title：一句话概括这份报告统计的是什么。`;
+4. title：一句话概括这份报告统计的是什么。**只描述本工具真能算出来的东西**（见规则 5）——
+   不要把用户提到的、但本工具做不到的分析写进标题。
+5. scope：判断需求是否落在能力范围内。
+   本工具**只能**算：事件/页面在一段时间内的触发次数（PV）与去重人数（UV）、按天趋势、与上一周期环比。
+   本工具**做不到**下面五类。命中任意一类，就把该类名字原样放进 unsupported，并把 supported 设为 false：
+   - 漏斗分析（转化率、某几步之间的流失）
+   - 留存分析（次日/7 日留存、回访、流失）
+   - 自定义维度下钻（按渠道/机型/地区/版本/来源等属性拆分）
+   - 多事件关联（行为轨迹、路径、先后顺序、事件之间的关系）
+   - 用户分群（付费用户、新老用户、活跃度分层等任何按人群筛选的诉求）
+   「统计某个功能的点击量/某个页面的访问量」是本工具的正常用法，不算越界。
+   **拿不准时一律给 supported: true。** 误判成越界，会让一个正常需求收到一句莫名其妙的说明。`;
 }
 
-/** 阶段 A：理解 */
+/**
+ * 阶段 A：理解。
+ *
+ * 返回带 ok 标记的结果而不是 null：调用方必须按失败原因分别回话
+ * （超时 / 额度耗尽 / 真的没听懂）。只给一个 null，就只能回一句笼统而且大概率错的话 ——
+ * 2026-08-26 那次就是把超时回成了「没听懂，换个说法试试」。
+ *
+ * @returns {Promise<{ok:true, range:object|null, target:'event'|'page'|'both', keywords:string[], title:string}
+ *   | {ok:false, reason:string|null}>}
+ */
 export async function understandRequest(body, dict, now = new Date()) {
   const { date } = beijingNow(now);
-  const out = await runClassifierOnce({
+  const { data, reason } = await runClassifierDetailed({
     prompt: buildUnderstandPrompt(body, dict, date),
     model: config.intent.classifyModel,
     logTag: 'tracking-stats/understand',
     timeoutMs: TIMEOUT_MS,
   });
-  if (!out) {
-    logger.warn('tracking-stats', '阶段 A 无输出（超时或解析失败）');
-    return null;
+  if (!data) {
+    // reason 必须落日志：排查时「超时」和「模型输出没法解析」的下一步动作完全不同 ——
+    // 前者调预算或看额度，后者改 prompt。只记一句「无输出」等于把这个岔路口抹掉。
+    logger.warn('tracking-stats', '阶段 A 无输出', { reason, budgetMs: TIMEOUT_MS });
+    return { ok: false, reason };
   }
   // 只做形状兜底：模型可能吐回缺字段或类型不对的 JSON，先保证下游拿到的字段类型稳定；
-  // 语义校验（区间是否可查、标识是否真实存在）一律交给 logic.js 的纯函数
+  // 语义校验（区间是否可查、标识是否真实存在、需求是否越界）一律交给 logic.js 的纯函数
   return {
-    range: out.range && typeof out.range === 'object' ? out.range : null,
-    target: ['event', 'page', 'both'].includes(out.target) ? out.target : 'both',
-    keywords: Array.isArray(out.keywords) ? out.keywords.map((k) => String(k || '').trim()).filter(Boolean) : [],
-    title: String(out.title || '').trim() || '埋点统计',
+    ok: true,
+    range: data.range && typeof data.range === 'object' ? data.range : null,
+    target: ['event', 'page', 'both'].includes(data.target) ? data.target : 'both',
+    keywords: Array.isArray(data.keywords) ? data.keywords.map((k) => String(k || '').trim()).filter(Boolean) : [],
+    title: String(data.title || '').trim() || '埋点统计',
+    // 原样带出，归一化由 logic.normalizeScope 负责 —— 与 range 交给 normalizeRange 同一分工。
+    // 缺字段时这里是 undefined，normalizeScope 会兜成「支持」（即老实现的行为）
+    scope: data.scope,
   };
 }
 
@@ -186,21 +221,26 @@ ${pgLines}
 5. 两个数组合计不要超过 20 条。`;
 }
 
-/** 阶段 B：精选。返回原始选择，硬校验由 logic.validateSelection 负责 */
+/**
+ * 阶段 B：精选。返回原始选择，硬校验由 logic.validateSelection 负责。
+ *
+ * 这里保持「失败即 null」：调用方对阶段 B 的回话本来就没有误导性（说的是「模型无响应」），
+ * 不必像阶段 A 那样分文案。但 reason 照样要落日志 —— 排查得知道是超时还是输出不可解析。
+ */
 export async function pickTargets(body, candidates) {
-  const out = await runClassifierOnce({
+  const { data, reason } = await runClassifierDetailed({
     prompt: buildPickPrompt(body, candidates),
     model: config.intent.classifyModel,
     logTag: 'tracking-stats/pick',
     timeoutMs: TIMEOUT_MS,
   });
-  if (!out) {
-    logger.warn('tracking-stats', '阶段 B 无输出（超时或解析失败）');
+  if (!data) {
+    logger.warn('tracking-stats', '阶段 B 无输出', { reason, budgetMs: TIMEOUT_MS });
     return null;
   }
   // 同样只做形状兜底：非数组一律归零，交给 validateSelection 做白名单硬校验
   return {
-    events: Array.isArray(out.events) ? out.events : [],
-    pages: Array.isArray(out.pages) ? out.pages : [],
+    events: Array.isArray(data.events) ? data.events : [],
+    pages: Array.isArray(data.pages) ? data.pages : [],
   };
 }

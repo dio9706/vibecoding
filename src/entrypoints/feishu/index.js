@@ -13,7 +13,8 @@ import { extractDocLinks, stripDocLinks } from '../../channels/feishu-normalize.
 import { fetchDocRawContent, resolveWikiNode, getBotOpenId } from '../../integrations/lark.js';
 import { atPrefix } from '../../shared/mention.js';
 import { docxToMdFile } from '../../integrations/docx.js';
-import { getPluginEnabled } from '../../store/settings.js';
+import { getPluginEnabled, getActiveBot } from '../../store/settings.js';
+import { recordBotActivity } from '../../shared/bot-activity.js';
 import { dispatch, dispatchSafely } from '../../app/dispatch.js';
 import { logger } from '../../shared/logger.js';
 import { msg } from '../../shared/messages.js';
@@ -250,14 +251,24 @@ async function onInbound(m) {
   const emojis = config.lark.reactionEmojis;
   const emoji = emojis[Math.floor(Math.random() * emojis.length)];
   const reactionId = await channel.addReaction(m.messageId, emoji);
+  let result = { ok: false };
   try {
     // 用 dispatchSafely 而非裸 dispatch：这里没有 catch，而上游 channels/feishu.js 只 logger.error，
     // 且 SDK 早已回 200 ack（飞书不重推）+ seen 已标记（用户重发同一条也不会重跑）。
     // 裸 dispatch 抛错 = 用户看到表情贴上又取下，然后永远没有下文。
-    await dispatchSafely(ctx);
+    result = await dispatchSafely(ctx);
   } finally {
     if (reactionId) await channel.removeReaction(m.messageId, reactionId);
   }
+  // 机器人日志埋点：放在回复已发出、表情已撤之后 —— getUserName 首次调用有网络往返，
+  // 不能挡住用户感知到的响应速度。
+  await recordBotActivity({
+    kind: 'chat',
+    botId: getActiveBot()?.id,
+    userId: m.userId,
+    detail: m.text,
+    ok: result.ok,
+  });
 }
 
 // bots 迁移幂等且走文件锁：feishu 先于 web 启动时也能立即用上机器人凭证/动作（避免动作失配窗口）

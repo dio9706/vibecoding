@@ -114,10 +114,11 @@ export function planDemote(projectDir, ruleFileNames) {
  * @param {(name:string, body:string)=>Promise<{description:string,source:string}>} [opts.describe]
  *   description 生成器。默认 describeSkill（真发 LLM 调用）；单测注入桩件，
  *   否则每跑一次测试就是一次真实调用——又慢又花钱，而这一层要验的是流程不是文案质量。
- * @returns {Promise<{file:string, status:'done'|'skipped'|'failed', fatal:boolean, skillName:string,
- *   refsUpdated:string[], refsFailed:Array<{path:string,reason:string}>,
- *   descriptionSource:string|null, reason:string}>}
- *   `fatal` 为真表示上层应停止处理后续文件（见文件头纪律 2）
+ * @returns {Promise<{file:string, status:'done'|'skipped'|'failed', fatal:boolean,
+ *   skillName:string, skillFile:string, description:string|null, descriptionSource:string|null,
+ *   refsUpdated:string[], refsFailed:Array<{path:string,reason:string}>, reason:string}>}
+ *   `fatal` 为真表示上层应停止处理后续文件（见文件头纪律 2）；
+ *   `description` 是实际写进 frontmatter 的那一句，UI 直接摊给用户核对
  */
 export async function demoteOne(projectDir, fileName, { onStep, describe = describeSkill } = {}) {
   const skillName = skillNameOf(fileName);
@@ -129,9 +130,14 @@ export async function demoteOne(projectDir, fileName, { onStep, describe = descr
   const base = {
     file: relRule,
     skillName,
+    skillFile: relSkill,
     fatal: false,
     refsUpdated: [],
     refsFailed: [],
+    // description 原文要一路带到 UI：它决定 skill 能不能被唤起，而写砸了不报错、
+    // 体检分数反而会涨（见 describe-skill.js 开头）。只给 source 的话，
+    // 用户想复核还得自己去翻文件——那就等于没人会复核。
+    description: null,
     descriptionSource: null,
     reason: '',
   };
@@ -160,6 +166,7 @@ export async function demoteOne(projectDir, fileName, { onStep, describe = descr
   } catch (e) {
     return { ...base, status: 'failed', reason: `生成 description 失败：${msgOf(e)}` };
   }
+  const description = described?.description ?? null;
   const descriptionSource = described?.source ?? null;
 
   // ---- 第 3 步：写 skill ----
@@ -168,14 +175,14 @@ export async function demoteOne(projectDir, fileName, { onStep, describe = descr
     fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(
       path.join(projectDir, relSkill),
-      buildSkillFile({ name: skillName, description: described?.description, body: stripFrontmatter(raw) }),
+      buildSkillFile({ name: skillName, description, body: stripFrontmatter(raw) }),
       'utf8',
     );
   } catch (e) {
     // 核心失败：写盘这一步失败基本是环境性的（目录被占、磁盘满、权限），
     // 后面每个文件都会以同样方式失败，继续只会刷屏
     logger.warn('fix-rules', '写 skill 文件失败，停止后续降级', { file: relRule, err: msgOf(e) });
-    return { ...base, status: 'failed', fatal: true, descriptionSource, reason: `写 ${relSkill} 失败：${msgOf(e)}` };
+    return { ...base, status: 'failed', fatal: true, description, descriptionSource, reason: `写 ${relSkill} 失败：${msgOf(e)}` };
   }
 
   // ---- 第 4 步：删原文件 ----
@@ -186,7 +193,7 @@ export async function demoteOne(projectDir, fileName, { onStep, describe = descr
     // 核心失败：skill 已经写出去了，原文件还在 —— 同一份规范此刻有两个副本，
     // 再往下替换引用会让文档指向 skill 而 rules 仍在被动注入，是最糟的中间态
     logger.warn('fix-rules', '删除原 rules 文件失败，停止后续降级', { file: relRule, err: msgOf(e) });
-    return { ...base, status: 'failed', fatal: true, descriptionSource, reason: `删除 ${relRule} 失败：${msgOf(e)}` };
+    return { ...base, status: 'failed', fatal: true, description, descriptionSource, reason: `删除 ${relRule} 失败：${msgOf(e)}` };
   }
 
   // ---- 第 5 步：全仓替换引用 ----
@@ -220,5 +227,5 @@ export async function demoteOne(projectDir, fileName, { onStep, describe = descr
     });
   }
 
-  return { ...base, status: 'done', descriptionSource, refsUpdated, refsFailed };
+  return { ...base, status: 'done', description, descriptionSource, refsUpdated, refsFailed };
 }

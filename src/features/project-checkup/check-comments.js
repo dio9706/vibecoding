@@ -27,6 +27,8 @@ import {
   SAMPLE_SIZE,
 } from './check-comments.logic.js';
 import { computeFingerprint, isCacheValid } from './fingerprint.logic.js';
+import { shouldSkipDir } from './scan-dirs.logic.js';
+import { gitTrackedFiles } from './git-tracked.js';
 
 /**
  * 遍历时跳过的目录。
@@ -38,7 +40,7 @@ import { computeFingerprint, isCacheValid } from './fingerprint.logic.js';
  * 注：更细的文件级过滤（扩展名白名单、测试文件、.min.）在 logic 层的 pickSampleFiles 里，
  * 这里只挡「整棵子树都不用进」的目录，省掉无谓的 stat。
  */
-const SKIP_DIR = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.expo', 'worktrees']);
+// 具体清单见 scan-dirs.logic.js（三个扫描维度共用，避免各持一份互不一致的清单）
 
 /**
  * 判定模型。null = 跟随会话默认模型（claude.js 对 falsy 的 model 会整个跳过该参数）。
@@ -150,16 +152,18 @@ const BATCH_PAYLOAD_CHARS = 60_000;
  * @param {string} projectDir
  * @returns {Array<{full:string, rel:string, mtime:number, size:number}>} rel 统一用正斜杠
  */
-function collectSourceFiles(projectDir) {
+function collectSourceFiles(projectDir, tracked) {
   const out = [];
   const walk = (dir, rel) => {
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
-      if (SKIP_DIR.has(e.name)) continue;
+      if (shouldSkipDir(e.name)) continue;
       const full = path.join(dir, e.name);
       const r = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) { walk(full, r); continue; }
+      // tracked 为 null = 非 git 仓库，退回「全都算」的旧行为
+      if (tracked && !tracked.has(r)) continue;
       try {
         const st = fs.statSync(full);
         out.push({ full, rel: r, mtime: st.mtimeMs, size: st.size });
@@ -450,7 +454,9 @@ function toFindings(verdicts) {
  *   `cacheEntry` 即下次要传回 `opts.cache` 的东西；status 非 done 时为 null（见 finish 的说明）
  */
 export async function checkComments(projectDir, { cache = null, force = false } = {}) {
-  const all = collectSourceFiles(projectDir);
+  // 只看 git 追踪的文件：构建产物副本会让同一处注释被重复报告并重复烧额度（详见 git-tracked.js）
+  const tracked = await gitTrackedFiles(projectDir);
+  const all = collectSourceFiles(projectDir, tracked);
   const sampled = pickSampleFiles(all.map((f) => ({ path: f.rel, mtime: f.mtime })), SAMPLE_SIZE);
 
   // 指纹只覆盖抽样中的文件，而不是全部源码文件。

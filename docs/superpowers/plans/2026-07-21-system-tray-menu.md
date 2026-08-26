@@ -553,7 +553,7 @@ fn show_tray_notification(app: &AppHandle, message: String, _duration_secs: u64)
     use tauri::api::notification::Notification;
     
     let _ = Notification::new(app.config().tauri.bundle.identifier.clone())
-        .title("Claude Agent")
+        .title("Vibe Coding")
         .body(&message)
         .show();
 }
@@ -564,7 +564,7 @@ fn show_tray_notification(app: &AppHandle, message: String, _duration_secs: u64)
     use tauri::api::notification::Notification;
     
     let _ = Notification::new(app.config().tauri.bundle.identifier.clone())
-        .title("Claude Agent")
+        .title("Vibe Coding")
         .body(&message)
         .show();
 }
@@ -622,7 +622,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     });
 
     let mut builder = TrayIconBuilder::new()
-        .tooltip("Claude Agent")
+        .tooltip("Vibe Coding")
         .show_menu_on_left_click(false)
         .on_menu_event({
             let app = app.clone();

@@ -4,9 +4,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { extractPathRefs, candidatePaths, evaluateMap } from './check-map.logic.js';
+import { shouldSkipDir } from './scan-dirs.logic.js';
 
 const CODE_EXT = /\.(js|mjs|cjs|ts|tsx|jsx|vue|py|go|rs|java|scss|css)$/i;
-const SKIP_DIR = new Set(['node_modules', 'dist', 'build', 'coverage', '.git']);
 const MIN_FILES_FOR_MODULE = 3; // 文件太少的目录不值得单独建地图
 
 /** 递归取目录下代码文件的最新 mtime 和文件数 */
@@ -17,7 +17,7 @@ function scanDir(dir) {
     let entries;
     try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
-      if (e.name.startsWith('.') || SKIP_DIR.has(e.name)) continue;
+      if (shouldSkipDir(e.name, { skipHidden: true })) continue;
       const full = path.join(d, e.name);
       if (e.isDirectory()) { walk(full); continue; }
       if (!CODE_EXT.test(e.name)) continue;
@@ -54,9 +54,9 @@ function buildPathIndex(projectDir) {
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
-      // 注意：这里刻意不跳过点目录——地图会引用 `.claude/`，必须索引进来。
-      // scanDir 里的 startsWith('.') 规则是给 mtime 统计用的，两处别混用。
-      if (SKIP_DIR.has(e.name)) continue;
+      // 注意：这里刻意不跳过点目录（不传 skipHidden）——地图会引用 `.claude/`，必须索引进来。
+      // scanDir 里的 skipHidden 是给 mtime 统计用的，两处别混用。
+      if (shouldSkipDir(e.name)) continue;
       const r = rel ? `${rel}/${e.name}` : e.name;
       out.push(r);
       if (e.isDirectory()) walk(path.join(dir, e.name), r);
@@ -93,7 +93,7 @@ export function checkMap(projectDir) {
   let entries = [];
   try { entries = fs.readdirSync(baseDir, { withFileTypes: true }); } catch { /* 读不到就当没有模块 */ }
   for (const e of entries) {
-    if (!e.isDirectory() || e.name.startsWith('.') || SKIP_DIR.has(e.name)) continue;
+    if (!e.isDirectory() || shouldSkipDir(e.name, { skipHidden: true })) continue;
     const full = path.join(baseDir, e.name);
     const { latestMtime, fileCount } = scanDir(full);
     if (fileCount < MIN_FILES_FOR_MODULE) continue;

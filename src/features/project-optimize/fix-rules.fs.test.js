@@ -156,6 +156,25 @@ test('onStep 按五步顺序回调', async () => {
   clean(dir);
 });
 
+test('回报生成的 description 全文与 skill 文件路径', async () => {
+  // UI 要把 description 原文摊给用户当场核对（它决定 skill 能不能被唤起，而写砸了不会报错）；
+  // 只给 source 的话用户还得自己去翻文件
+  const dir = makeProject();
+  const r = await demoteOne(dir, 'big-wide.md', { describe: stubDescribe });
+  assert.equal(r.description, 'big-wide 的测试用描述，说明范围与触发场景。');
+  assert.equal(r.skillFile, '.claude/skills/big-wide/SKILL.md');
+  assert.equal(read(dir, r.skillFile).includes(r.description), true, '回报的应当就是真正写进文件的那一句');
+});
+
+test('跳过与失败时 description 为空但 skillFile 仍给出', async () => {
+  const dir = makeProject();
+  fs.mkdirSync(path.join(dir, '.claude/skills/big-wide'), { recursive: true });
+  const r = await demoteOne(dir, 'big-wide.md', { describe: stubDescribe });
+  assert.equal(r.description, null);
+  assert.equal(r.skillFile, '.claude/skills/big-wide/SKILL.md', '路径要给，用户才知道是哪个文件挡住了');
+  clean(dir);
+});
+
 test('兜底生成的 description 会如实标注来源', async () => {
   // source 是上层提示用户「这条要人工复核」的唯一依据，不能被吞掉
   const dir = makeProject();

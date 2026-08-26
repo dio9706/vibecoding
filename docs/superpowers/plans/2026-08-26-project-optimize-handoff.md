@@ -8,7 +8,7 @@
 
 ## 一、现状一句话
 
-体检功能(四个维度)**已完整可用**;一键优化**做了一半**(12 个 task 完成 6 个),剩余 6 个 task。
+体检功能(四个维度)和一键优化(rules 降级 + 备份还原)**都已完整可用**,阶段三 12 个 task 全部完成,并在真实项目上跑通「体检 → 优化 → 还原」闭环。
 
 ## 二、这个工具是什么
 
@@ -22,7 +22,7 @@ web 执行台(`claude-p-web-demo`)里的一个面板:选一个本地项目 → �
 |---|---|---|
 | 一 | 静态体检:维度① 项目地图、维度③ rules 降级检测 | ✅ 完成 |
 | 二 | LLM 维度:维度② 提示词质量、维度⑤ 注释合理性 + SSE 异步回填 | ✅ 完成 |
-| 三 | 一键优化:rules 降级 + 备份还原 | **8/12** |
+| 三 | 一键优化:rules 降级 + 备份还原 | ✅ 完成 (12/12) |
 
 维度④(无用代码)v1 明确不做,UI 上置灰。
 
@@ -43,26 +43,28 @@ src/features/project-checkup/          ← 五个检测器，全部定型，逐�
 ├── score.logic.js        (+test)      11 测试  加权总分
 └── index.js                                    编排入口
 
-src/features/project-optimize/         ← 阶段三，做了一半
+src/features/project-optimize/         ← 阶段三，已完整可用
 ├── fix-rules.logic.js    (+test)      21 测试  ✅ 降级文本变换
+├── fix-rules.js       (+fs.test)      18 测试  ✅ 降级执行层（扫盘/写盘/删盘/失败分级）
+├── fix-plan.logic.js     (+test)      12 测试  ✅ 选材（含 R2 拦截）+ 手工待办提示
+├── describe-skill.js     (+test)      28 测试  ✅ description 生成 + YAML 纯量净化
 ├── backup.logic.js       (+test)       6 测试  ✅ 备份纯逻辑
 ├── backup.js                                   ✅ 快照/还原/保留策略
 ├── git-guard.logic.js    (+test)       6 测试  ✅ porcelain 解析
-├── git-guard.js                                ✅ 工作区检查
-├── describe-skill.js     (+test)      28 测试  ✅ description 生成 + YAML 纯量净化
-└── fix-rules.js      (+fs.test)      18 测试  ✅ 降级执行层（扫盘/写盘/删盘/失败分级）
+└── git-guard.js                                ✅ 工作区检查
 
 src/entrypoints/web/
-├── routes-optimize.js                          体检两个接口已通，fix 相关待加
-└── optimize-ops.js                             体检 SSE 编排已通，fix 编排待加
+├── routes-optimize.js  (+test)        21 测试 ✅ 六个接口全通
+└── optimize-ops.js                             ✅ 体检 + 优化 + 还原编排（含串行闸）
 
-src/store/optimize.js                           数据层，setBusy/saveFixResult 已写但未接
-public/js/optimize-view.js / .logic.js          面板，体检部分已通
-public/js/optimize-fix.logic.js (+test)  9 测试 ✅ 一键优化前端纯逻辑
+src/store/optimize.js  (+test)          10 测试 ✅ 串行闸 acquireBusy/releaseBusy + 优化历史
+public/js/optimize-view.logic.js                维度列表摊平（体检部分）
+public/js/optimize-fix.logic.js (+test) 15 测试 ✅ 一键优化前端纯逻辑
+public/js/optimize-view.js                      ✅ 面板：体检 + 优化 + SSE + 结果区
 tests/fixtures/projects/                        healthy / no-map / kxmall-like / demote-target
 ```
 
-**全套测试当前 1499 条,1497 通过。** 那 2 条失败是既有的、与本工具无关(`public/js/chat.path.test.js` 断言 `.md` 图标是 📄,而 `chat.js` 实际给 📝——两个文件在 git 中均未修改,是 HEAD 内容漂移)。
+**全套测试当前 1605 条,1603 通过。** 那 2 条失败是既有的、与本工具无关(`public/js/chat.path.test.js` 断言 `.md` 图标是 📄,而 `chat.js` 实际给 📝——两个文件在 git 中均未修改,是 HEAD 内容漂移)。
 
 > 注:总数会随其它会话的并发改动浮动。跑全量时若看到 `public/js/` 下的额外失败(如
 > `req-chat.apidoc.test.js` 报 `ResizeObserver is not defined`),先确认那些文件是否正被别人改——
@@ -73,8 +75,11 @@ tests/fixtures/projects/                        healthy / no-map / kxmall-like /
 | 项目 | 分数 | 说明 |
 |---|---|---|
 | `kxmall-app-ui`(已优化过) | rules 100 / map 64 | 死链检出 2 条,其中 1 条是真失效引用 |
-| `kxmall-app-ui.auto`(未优化副本) | rules 60 | 自动捞出 `design-system.md` 14KB、`keyboard-input-pattern.md` 20.5KB——正是人工判断该迁的那两个 |
+| `kxmall-app-ui` 优化前快照<br>(`git archive 212c76ad^`) | 总分 **56**<br>map 64 / prompts 57<br>rules 41 / comments 52 | P3-12 的验收对象。rules 捞出 4 个该降级的(13.7 / 14.6 / 7.0 / 5.8 KB),<br>2 个小文件正确地没动。优化后 rules **41 → 100**,还原后回到 41。 |
 | `claude-p-web-demo`(本仓库) | 0 | 根本没有 CLAUDE.md |
+
+> `kxmall-app-ui.auto` 那份副本已被删除,原表里基于它的 rules 60 基线不再可复现;
+> 上面这行用 git 里的真实历史快照替代,数字更可信(是当时的原样,不是合成的退化副本)。
 
 ---
 
@@ -101,6 +106,10 @@ tests/fixtures/projects/                        healthy / no-map / kxmall-like /
 `BATCH_TIMEOUT_MS` 原本 120s 是按 haiku 校准的。换成默认模型后每批实测 127s,日志里 `✔ runClaude {"ms":127093}` 说明**模型成功返回了**,但 race 在 122s 就放弃 → 拿到半截流 → JSON 大括号配不平 → 整批废 → 整个维度 `partial` → 被 `aggregateScore` 踢出总分 = 功能等于没有。
 
 **教训**:换模型档位必须同步重校准超时,否则测到的是超时扛不住,不是模型能力。现在 `check-prompts.js` / `check-comments.js` 都用 300s。
+
+**2026-08-26 P3-12 又原样撞了一次,连数字都一样。** `describe-skill.js` 的 `DESCRIBE_TIMEOUT_MS` 是按「单独跑一次 54.5s」校准到 120s 的,看起来余量翻倍很安全。真实项目验收时 `keyboard-input-pattern` 那次日志赫然是 `✔ runClaude {"ms":127091}` —— 模型成功返回,race 在 122s 放弃,答案晚到 5 秒,静默落了机械兜底。同一次跑里另外三个是 91.6s / 34.9s / 35.3s,**波动接近 4 倍**。
+
+**教训升级**:超时预算不能按「单次实测值 + 一点余量」定,要按**连续跑 / 并发时的长尾**定 —— 单独跑一次测到的是最好情况,而线上永远是连着跑的。已提到 300s 并复跑验证(107s、`source: llm`)。
 
 ### 坑 3:`validateVerdicts` 必须校验条数
 
@@ -157,7 +166,10 @@ P3-6 原定的验收判据是「拿 `popup-pattern` 的正文测,人工核对生
 
 ---
 
-## 五、剩余 4 个 Task
+## 五、12 个 Task 的落地记录
+
+**全部完成。** 下面按 task 记录实际做法、与原计划的出入、以及实测数字——
+出入都是实现/验收过程中被真实数据推翻的,不是随意改的。
 
 原计划见 `docs/superpowers/plans/2026-08-24-project-optimize-phase3.md`,但**有两处已过时**,以本文档为准。
 
@@ -218,40 +230,115 @@ P3-6 原定的验收判据是「拿 `popup-pattern` 的正文测,人工核对生
 
 **保留的设计**(与原计划一致):降级五步、核心失败即停、`SKIP_DIR` 另加 `worktrees`(往 worktree 里写等于污染别的分支的工作区,且改动落在备份之外)。
 
-### P3-8: fix 编排 + 串行闸
+### ~~P3-8: fix 编排 + 串行闸~~ ✅ 已完成(2026-08-26)
 
-⚠️ **计划文档过时**:原计划说「新建 `optimize-ops.js`」,但**该文件在阶段二已创建**(体检的 SSE 编排,含 `startCheckup`/`getCheckupJob`/`attachCheckupJob`)。你要**加进现有文件**,复用它的 job 注册表模式。
+`optimize-ops.js` 新增 `startFix` / `getFixJob` / `attachFixJob`;`store/optimize.js` 新增串行闸与优化历史。
 
-**要做**:
-- `startFix({dir, dimensions, force})` → `{jobId}` 或 `{needsConfirm: true, dirtyCount, isRepo}`
-- 开跑前 `checkWorkspace(dir)`(`git-guard.js`),脏工作区且非 force → 返回 `needsConfirm`
-- 只处理体检报告里 `fixable: true` 的项 —— **必须尊重 `R2_DEMOTE_UNCERTAIN`**(「有 frontmatter 但解析不出 paths」的文件故意标成不可自动修)
-- `planDemote` → `createBackup` → 逐个 `demoteOne` → 重新体检
-- SSE 推进度(`step` 事件)+ 最终结果(`done` 事件)
-- **串行闸**:用 `store/optimize.js` 的 `setBusy` 落盘,防止同一项目并发优化
+⚠️ **交接文档自己写错了一处**:上一版说「`setBusy`/`saveFixResult` 已写但未接」——**代码里根本没有这两个函数**,是本轮补的(实现为 `acquireBusy`/`releaseBusy`/`getBusy`/`saveFixResult`)。
 
-**顺带修一个阶段二遗留**:体检本身也没有串行闸,同一目录并发体检会白烧一倍额度。接在同一个 `busy` 机制上。
+**`startFix(dir, {dimensions, force})` 的四种返回**:
 
-**`recordPostState` 待接**:`backup.js` 导出了它但没有调用方。要在 `demoteOne` 循环结束后、重新体检之前调一次,记录「优化后内容哈希」。没有它的话还原会退化成「无条件覆盖 + 上报 overwritten 列表」(安全但保护弱)。
-
-**这条链路已在 P3-7 实测里手工串过一遍并跑通**(`planDemote` → `createBackup` → 循环 `demoteOne` → `recordPostState` → `checkRules` → `restoreBackup`),结果见上面 P3-7 的实测表:还原时 `skipped=0 overwritten=0`,说明 postHash 基准生效了。P3-8 照这个顺序接即可。
-
-**停止条件用 `demoteOne` 返回的 `fatal`**,别去解析 `reason` 字符串:`status:'failed'` 同时覆盖「什么都没写就失败」(不该中断)和「写到一半失败」(必须中断),只有 `fatal` 分得开。
-
-### P3-9: 路由扩展
-
-在 `src/entrypoints/web/routes-optimize.js` 加四个接口(照现有两个的写法):
-
-| 方法 | 路径 | 说明 |
+| 返回 | 含义 | 路由应给的状态码 |
 |---|---|---|
-| POST | `/api/optimize/fix` | `{dir, dimensions, force?}` → `{jobId, backupDir}` 或 `{needsConfirm}` |
-| GET | `/api/optimize/fix-stream?jobId=` | SSE 进度 |
-| GET | `/api/optimize/backups?dir=` | 备份列表 |
-| POST | `/api/optimize/rollback` | `{dir, dirName}` → `{restored, skipped}` |
+| `{jobId}` | 已开跑,去接 SSE | 200 |
+| `{needsConfirm, dirtyCount, isRepo, files}` | 工作区脏,要用户确认 | 200 |
+| `{nothing: true, blocked}` | 没有可自动修的项 | 200 |
+| `{busy: {kind, at, jobId}}` | 该项目正被占用 | 409(`busy.jobId` 可直接拿去接 SSE) |
+| 抛错 | 还没体检过 | 400 |
+
+**串行闸的实现要点**:
+
+- **落盘而非进程内变量**。PM2 同时跑 claude-web 和 claude-feishu 两个进程,进程内的锁拦不住另一个进程。`updateJson` 是同步的且带跨进程文件锁,所以「检查 + 占位」写在同一个回调里天然是一次原子 CAS。
+- **闸必须抢在 `checkWorkspace` 之前**。那一步要起 git 子进程(几十毫秒起步),等它期间足够第二个请求把前面的只读检查整个跑完 —— 实测两个并发 `startFix` 确实是一个拿 jobId、一个被挡。
+- **`needsConfirm` 要先放闸**,否则用户点「确认」重发时会被自己挡住。
+- **`BUSY_STALE_MS = 60min` 的过期兜底**。没有它,一次崩溃就把该项目永久锁死。取 60 分钟是按最坏情况估的(每文件一次 description 最长实测 82s + 体检单批预算 300s)。
+- **job id 先生成再抢闸**,写进占用记录 —— 被挡下的第二个标签页因此能拿着 `busy.jobId` 接同一条 SSE,而不是只被告知「有人在跑」。
+- 体检也接上了同一把闸(原来没有,同一目录并发体检会白烧一倍额度)。为此把 `startCheckup` 拆成「闸 + `runCheckup` 内核」:优化结束要重跑体检,而那时优化自己正持着闸,走 `startCheckup` 会被自己挡在门外。
+
+**⚠️ 与原计划的一处实质分歧:优化后不自动重跑 LLM 维度。**
+
+原计划写的是「重新体检」。照做的话每次优化都要额外等几分钟、花约 $0.9。改成只重算静态维度,并把两个 LLM 维度标成 `pending` + reason「规则已变动,请重新体检以刷新 AI 分析」。
+
+为什么不能把上一轮的 LLM 结论原样留着:那些 issue 指向的文件可能已经被移走了,展示出来就是在报不存在的问题。指纹缓存不受影响 —— 注释维度的源码没动,用户点「重新体检」时会直接命中缓存,不会重复计费。
+
+**连带影响**:总分口径在优化前后不一致(优化前 LLM 维度参与加权,优化后被 `aggregateScore` 排除并重新分摊权重),所以 `done` 事件里给的是 **rules 维度的 before/after**(`{rules: {before, after}}`),不是总分。P3-11 的 `scoreDelta` 要喂这一对。
+
+**SSE 事件**:`step`(phase 为 `plan`/`backup`/`describe`/`write-skill`/`delete-rule`/`replace-refs`/`abort`)、`file`(单个 `demoteOne` 结果)、`done`。与体检的 replay 不同,优化存的是**有序事件流**(`job.events`)而不是「按维度覆盖」,因为进度有先后语义。
+
+**顺带修的契约冲突**:`public/js/optimize-fix.logic.js` 的 `summarizeResults` 按数字读 `refsUpdated`,而 `demoteOne` 返回的是文件路径**数组** —— `Number(['a','b'])` 是 NaN,统计恒为 0。这个契约是在 `demoteOne` 实现之前先写好的,猜错了生产者的形状。已改成按数组长度计,并补了 `refsFailedTotal`(引用改写失败意味着文档里留了指向已删除文件的路径,不能只统计成功数)。
+
+**实测(kxmall-app-ui.auto 副本,真实 LLM 调用,数据目录隔离到临时目录)**——22 项断言全过:
+
+| 场景 | 结果 |
+|---|---|
+| 未体检就优化 | 抛「请先跑一次体检」 |
+| 脏工作区(git init + 1 个未提交文件) | `needsConfirm`,`dirtyCount=1`,`isRepo=true`,闸已释放 |
+| 两个 `startFix` 并发 | 一个拿 jobId,另一个 `busy.kind='fix'` 且 `busy.jobId` 指向前者 |
+| 事件流 | `plan → backup → (describe → write-skill → delete-rule → replace-refs) × 2` |
+| 结果 | 两个文件都 `done`,rules **60 → 100**,闸已释放,历史已落盘 |
+| notes | 「勾选的 comments 维度暂无自动修复能力」 |
+| SSE replay | 已完成的 job 立刻 `end()`,不把连接挂在 subs 里干等 |
+| 还原 | `restored=6 skipped=0 overwritten=0` → rules 回到 60 |
+
+`overwritten=0` 说明 `recordPostState` 生效了(有 postHash 基准,不必退化成无条件覆盖)。
+
+### ~~P3-9: 路由扩展~~ ✅ 已完成(2026-08-26)
+
+`routes-optimize.js` 现有六个接口,21 个路由测试(`routes-optimize.test.js`,真起 HTTP server + fetch)。
+
+| 方法 | 路径 | 返回 |
+|---|---|---|
+| GET | `/api/optimize/report?dir=` | `{report, history}` |
+| POST | `/api/optimize/checkup` | `{report, checkupId}` / **409** `{busy}` |
+| GET | `/api/optimize/checkup-stream?checkupId=` | SSE |
+| POST | `/api/optimize/fix` | `{jobId}` / `{needsConfirm,dirtyCount,isRepo,files}` / `{nothing,blocked}` / **409** `{busy}` / 400 未体检 |
+| GET | `/api/optimize/fix-stream?jobId=` | SSE,未知 id → 404 |
+| GET | `/api/optimize/backups?dir=` | `{backups:[{at,dirName,fileCount,dimensions,postRecorded}]}` |
+| POST | `/api/optimize/rollback` | `{restored,skipped,overwritten,report}` / **409** `{busy}` / 400 |
+
+⚠️ **原计划表里写的 `POST /fix` → `{jobId, backupDir}` 做不到**:备份目录是在 `runFix` 里创建的,POST 返回时还不存在。`backupDir` 走 SSE 的 `backup` 步骤事件和最终 `done` 载荷下发。
+
+**三处原计划没提、但必须有的东西**:
+
+1. **`POST /rollback` 也要走串行闸**。优化跑到一半时还原,两边交错写同一批文件——还原把文件写回旧版,紧接着降级又把它删掉,最终状态既不是优化后也不是优化前,比「不让还原」糟得多。
+2. **`dirName` 要按「本项目已有快照之一」做白名单**。它来自请求体且要拼进 `path.join(dir, '.claude/optimize-backup', dirName)`,`'../../evil'` 正好退回项目根再进 `evil/` —— 那里放一份 `manifest.json` 就能让还原照着攻击者写的清单往任意位置写文件。用白名单卡比过滤 `../` 的黑名单可靠。
+   > 这条的测试一开始是**空洞的**:只传 `'../../etc'`,那个位置本来就没有 manifest,不加校验也照样报「备份不存在」。改成真埋一份可达的 manifest 后,用突变测试确认过——去掉白名单该用例即失败(攻击成功)。
+3. **`POST /checkup` 要处理 `{busy}`**。这是 P3-8 给体检加闸引入的新分支,原代码直接解构 `{report, checkupId}`,被挡时回 `200 + report: undefined`,前端会当成「体检完成但没结果」把已有报告清空。
+
+**统一口径**:凡是被串行闸挡下的一律 **409**,绝不回 200 加空结果。
+
+**入参卫生**:`dimensions` 只认字符串数组(`Array.isArray(...) ? map(str).filter(Boolean) : []`)。传成 `'rules'` 这种裸字符串时当作没勾任何维度——否则脏形状会被原样写进备份 manifest。
 
 注意:`logger` 签名是 `logger.warn(tag, msg, extra)` **三段式**。
 
-### P3-11: 前端接线
+**路由测试怎么做到不发 LLM 调用**:happy path 用「报告里标了可修、但磁盘上没有」的规则文件(`ghost.md`)。`demoteOne` 在第一步前置校验就返回 `failed`(非核心失败),整条管线照常跑完并产出真实的 jobId 与可测的已完成 job,但一次 `describeSkill` 都不会发生。真实降级的验证在 P3-8 的实测里做过。
+
+### ~~P3-11: 前端接线~~ ✅ 已完成(2026-08-26)
+
+`optimize-view.js` 接上四个接口 + SSE;`optimize-fix.logic.js` 补 `stepLabel` / `dirtyConfirmMessage`(15 测试);`index.html` 加进度区与结果区;`app.css` 加对应样式。
+
+**先补了一个后端缺口**:P3-11 要展示「生成的 description 全文」,但 `demoteOne` 只返回了 `descriptionSource`,**没返回 description 本身**。已加 `description` 和 `skillFile` 两个字段——只给 source 的话,用户想复核还得自己去翻文件,那就等于没人会复核。
+
+**真实浏览器验证**(playwright,对 kxmall-app-ui 的临时副本人为退化成未优化态):
+
+| 检查项 | 结果 |
+|---|---|
+| 点击后按钮态 | 一键优化「优化中…」禁用、体检同步禁用 |
+| 进度流 | `规划要处理的文件 → 创建还原快照 → (生成技能描述 → 写入技能文件 → 删除原规则文件 → 改写文档引用) × 2` |
+| 结果区 | 3 个文件三种状态(2 done / 1 skipped),左边框按状态染色 |
+| 分数 | 「规范加载方式 49 → 80（+31）」 |
+| notes | 「勾选的 map 维度暂无自动修复能力」 |
+| 按钮 | [重新体检] [还原本次优化] 都在 |
+
+**顺手修的三个前端问题**:
+
+1. **体检按钮在 AI 分析期间可以重复点**(用户反馈的真 bug)。原来只在 POST 期间禁用,而 POST 几百毫秒就返回,LLM 维度还要跑好几分钟——用户看到按钮恢复,会以为体检结束或以为卡住又点一次,每点一次都是一整轮额度。改成三态 `checkupBusy`(`''`/`posting`/`analyzing`),`analyzing` 由 SSE 开合驱动。
+2. **`hidden` 属性被 `display:flex` 盖掉**。`.opt-progress` / `.opt-result` 默认带 `hidden`,但 CSS 的 `display:flex` 优先级更高,空盒子会一直占着一条带边框的空白(截图里看到才发现)。补 `[hidden] { display: none; }`。
+3. **勾选状态存 DOM 会被冲掉**。`render()` 每次重建全部卡片,一次 SSE 维度回填就把用户的勾选重置。改成模块级状态,且记的是**「被主动取消」的集合**而不是「被勾选」的——这样异步回填刚落地的维度会自动纳入、变得不可选的会自动剔除,不需要额外重算逻辑去追。
+
+**样式调整**(用户要求「按钮大一些、美化一下」):两个主操作按钮 14px/10px×26px,分数区做成带背景的卡片,维度卡加 hover 态,问题清单加左侧竖线。
+
+### ~~P3-11 原始要求~~(存档)
 
 `public/js/optimize-fix.logic.js` 已完成(9 测试),导出 `canFix` / `fixButtonLabel` / `summarizeResults` / `scoreDelta`。
 
@@ -265,7 +352,46 @@ P3-6 原定的验收判据是「拿 `popup-pattern` 的正文测,人工核对生
 
 **硬约束**:所有来自后端的文本一律 `createElement` + `textContent`,**禁 innerHTML**(项目硬性约定,渲染的是 LLM 产出)。
 
-### P3-12: 真实项目验证
+### ~~P3-12: 真实项目验证~~ ✅ 已完成(2026-08-26)
+
+**验证对象换了**:计划里说的 `kxmall-app-ui.auto` 已不存在,而 `kxmall-app-ui` 本身早就优化过了(rules 100)。改用 `git archive 212c76ad^`(那次优化提交的父提交)导出的**真实未优化快照**——比上一轮临时合成的退化副本可信得多:它的 rules 文件、docs 里的引用写法、CLAUDE.md 索引表都是当时的原样。
+
+全程走 HTTP 接口,数据目录未隔离(就是真实的 optimize.json),验完已清掉记录;真实仓库全程只被 `git archive` 只读访问,`git status` 确认 `.claude/rules`、`.claude/skills` 零改动。
+
+**逐项数字**:
+
+| 阶段 | 结果 |
+|---|---|
+| 完整体检(含两个 LLM 维度) | 217s;总分 **56**(needs-work)、45 项问题<br>map 64(9) / prompts 57(8) / rules 41(4) / comments 52(24) |
+| rules 可修项 | 4 个:design-system 13.7KB、popup-pattern 14.6KB、keyboard-input-pattern 7.0KB、style-system 5.8KB<br>components(2.7KB)、figma-restore(1.7KB)未达阈值,正确地没动 |
+| 一键优化 | 4 个全 `done`,**rules 41 → 100**,18 处引用改写、0 失败 |
+| 备份 | 20 个文件,`postRecorded: true` |
+| 还原 | `restored=20 skipped=0 overwritten=0` → **rules 回到 41**,六份 rules 内容逐字节一致 |
+
+**人工检查生成的 skill**:3 份 LLM 产出「是什么 + 什么时候调」两部分齐全、触发场景都用了动作词,与仓库里人工写的同名 description 质量相当。注意 `popup-pattern` 是**被污染的样本**(它的人工 description 正是提示词里的 few-shot,见坑 9),不能拿它当泛化证据;`style-system` 在真实仓库里没有对应 skill,是干净样本,质量同样合格。
+
+**跨规则引用的处理顺序在真实项目上得到验证**:`.claude/rules/popup-pattern.md` 引用了另外两个待降级的规则,它在自己被降级**之前**先被改写了引用;之后 style-system 降级时又改写了已生成的 `.claude/skills/popup-pattern/SKILL.md`。最终 popup-pattern 的正文与原文有且只有 **3 行**不同,全是引用替换——这说明原验收判据「正文与原 rules 文件完全一致」**是不完整的**,没考虑规则之间互相引用的情况。
+
+#### 实测揪出的两个缺陷
+
+**① `DESCRIBE_TIMEOUT_MS = 120s` 太紧 —— 坑 2 的原样重演(重要)。**
+
+`keyboard-input-pattern` 的 description 落了机械兜底。查日志:调用 08:50:05 发起,`✔ runClaude {"ms":127091}` —— **模型成功返回了**,但 race 在 122s(budget+2s)就放弃,答案晚到 5 秒。127091 这个数字和 `check-prompts` 当初撞的**完全一样**。
+
+同一次跑里另外三个是 91.6s / 34.9s / 35.3s,**波动接近 4 倍**:模块注释里那个 54.5s 是单独跑一次测出来的,而连续多次调用、赶上限流排队时的长尾远超它。已提到 300s(对齐 `BATCH_TIMEOUT_MS`),并用同一份输入复跑验证:**107s、`source: llm`、119 字、质量合格**,确认根因是超时而非内容。
+
+**教训补充**:超时预算不能按「单次实测值 + 一点余量」定,要按**并发/连续跑的长尾**定。
+
+**② 引用替换后的空格清理是按助词枚举的,补不完。**
+
+原实现只有 `技能 的` → `技能的` 和 `技能 「` → `技能「` 两条写死规则。真实项目里撞到第三种:popup-pattern.md 写的是「以 \`xxx.md\` 为准」,替换后留下「技能 为准」。改成按字符类判定(后接中日韩文字或中文标点就收紧,跟拉丁字母时保留空格),两条特例合并成一条通则。
+
+#### 附带确认
+
+- **兜底路径有了第二次真实观测**。它**没有任何刺眼信号**——分数照涨、状态照样 `done`,唯一线索是结果区里那句读起来像模板的描述。这正是把 description 全文摊在 UI 上的理由。
+- **`notes` 的索引表提示在真实项目上命中**:根 CLAUDE.md 里四个规则的裸文件名都还在(那是一张「规则文件 | 覆盖范围」的表格),自动替换只认带反引号的完整路径,确实需要人工处理。
+
+### ~~P3-12 原始要求~~(存档)
 
 **先复制副本再动**,不要直接改 `kxmall-app-ui.auto`:
 
@@ -305,5 +431,7 @@ node -e "const fs=require('fs'),os=require('os'),path=require('path');const t=pa
 1. **注释维度的抽样有系统性偏差**:`extractCommentBlocks` 取文件的**前 10 块**而非随机 10 块,而文件头通常是写得最认真的模块 JSDoc → 对大文件天然偏乐观,埋在函数体中段的死代码/过时注释**系统性采不到**。另有 `MAX_TOTAL_BLOCKS = 48` 的成本闸,30 个采样文件里实际只有 5 个被判定,score 密度口径偏宽松。
 2. **抽样浪费在文件副本上**:`SKIP_DIR` 没有 `target`,也没有跨文件内容去重,同一文件的三份拷贝会各吃一份配额。
 3. **提示词维度的章节判据带项目语汇色彩**:`DESCRIPTIVE_HEADING` 词表是从 kxmall 的文档模板归纳的,换个命名习惯的项目效果打折。已在代码注释里用 ⚠️ 标注,并留了两个安全阀(⛔/✅ 直通、义务词开头的祈使句)。
-4. **失败降级只做了推演验证**:`partial`/`error` 路径的正确性靠 `aggregateScore` 排除逻辑的实测 + 单测覆盖,没有真跑出一次 LLM 失败来端到端确认。
+4. ~~**失败降级只做了推演验证**~~ **2026-08-26 撞到一次真的**:P3-11 浏览器验证期间,`keyboard-input` 的 description 生成失败(日志 `LLM 未产出 description，改用机械兜底`,reason 为「调用失败/超时/额度耗尽」),`describeSkill` 如设计落了 `fallbackDescription`,兜底文案一路正常传到 UI 并渲染出来,降级本身照常完成。至此这条路径有了一次端到端的真实观测。
+   注意它**没有任何刺眼的信号**——分数照涨、状态照样 `done`,唯一的线索就是结果区里那句读起来像模板的描述和 `⚠️ 提示` 行。这正是 `describe-skill.js` 开头说的那种失败,也是把 description 全文摊在 UI 上的理由。
+   `partial`/`error` 维度路径仍只有单测覆盖,没真跑出来过。
 5. **`verdictLog` 跟着 SSE 和报告一起下发**,一次几 KB。候选量大时 `optimize.json` 单项目记录会变胖。

@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractFirstJsonObject } from './llm-classify.js';
+import { extractFirstJsonObject, classifyOutcome } from './llm-classify.js';
 
-// 只测纯提取函数：runClassifierOnce 会发起真实 LLM 调用（烧额度），单测一律不碰。
+// 只测纯函数：runClassifierOnce 会发起真实 LLM 调用（烧额度），单测一律不碰。
 // 提取逻辑正是 2026-08-19 埋点统计冒烟暴露的故障点，抽出来单独钉死。
+// classifyOutcome 是 2026-08-26「超时被误报成没听懂」那次事故的判定核心，同样钉死。
 
 /** 断言：提取出的原文能 JSON.parse，且结构与期望深相等 */
 const parsed = (text) => JSON.parse(extractFirstJsonObject(text));
@@ -83,4 +84,61 @@ test('提取不出时返回 null（与旧正则的失败语义一致）', () => 
   assert.equal(extractFirstJsonObject('{"range": {"start": "2026-07-21"'), null);
   // 未闭合的字符串里即使有 }，也不算配平
   assert.equal(extractFirstJsonObject('{"a": "未闭合 }'), null);
+});
+
+test('classifyOutcome：正常输出 → 数据到手、无失败原因', () => {
+  const r = classifyOutcome({ text: '{"target":"page"}' });
+  assert.deepEqual(r.data, { target: 'page' });
+  assert.equal(r.reason, null);
+});
+
+test('classifyOutcome：额度耗尽的 fail-fast 单独成因', () => {
+  // 不能和「没听懂」混为一谈：额度问题让用户改说法是纯粹的误导，他改一百遍也没用
+  const r = classifyOutcome({ exhausted: true, text: '' });
+  assert.equal(r.data, null);
+  assert.equal(r.reason, 'exhausted');
+});
+
+test('classifyOutcome：超时且无有效输出 → timeout', () => {
+  // 2026-08-26 事故：阶段 A 47s 预算用尽，回话却说「没听懂这个统计需求」
+  const r = classifyOutcome({ aborted: true, text: '' });
+  assert.equal(r.data, null);
+  assert.equal(r.reason, 'timeout');
+});
+
+test('classifyOutcome：超时但已攒到完整 JSON → 照样采纳', () => {
+  // 关键改进：abort 只说明「流没按时结束」，不代表没拿到答案。
+  // 模型常在早期就把 JSON 吐完，SDK 流却迟迟不收尾（限流时尤其明显）——
+  // 此时丢掉手里已经完整的结果去回一句失败，是白烧了一次额度还骗了用户。
+  const r = classifyOutcome({ aborted: true, text: '{"target":"event","keywords":["分享"]}' });
+  assert.deepEqual(r.data, { target: 'event', keywords: ['分享'] });
+  assert.equal(r.reason, null);
+});
+
+test('classifyOutcome：未超时但输出里没有 JSON → unparsable', () => {
+  const r = classifyOutcome({ text: '我不太确定你想统计什么' });
+  assert.equal(r.data, null);
+  assert.equal(r.reason, 'unparsable');
+});
+
+test('classifyOutcome：截出来了却 parse 不了，仍归 unparsable', () => {
+  // 大括号配平但内容非法（如尾逗号）：属于模型输出质量问题，不是超时
+  const r = classifyOutcome({ aborted: false, text: '{"a":1,}' });
+  assert.equal(r.data, null);
+  assert.equal(r.reason, 'unparsable');
+});
+
+test('classifyOutcome：超时且输出是残缺 JSON → timeout（而非 unparsable）', () => {
+  // 被截断正是超时的典型表现，归因必须落在超时上，否则排查会往「模型不听话」的方向跑偏
+  const r = classifyOutcome({ aborted: true, text: '{"range": {"start": "2026-08-01"' });
+  assert.equal(r.data, null);
+  assert.equal(r.reason, 'timeout');
+});
+
+test('classifyOutcome：脏输入不炸', () => {
+  for (const bad of [undefined, null, {}, { text: null }, { text: 123 }]) {
+    const r = classifyOutcome(bad);
+    assert.equal(r.data, null);
+    assert.ok(typeof r.reason === 'string');
+  }
 });

@@ -971,6 +971,40 @@ Expected: 全部 PASS，无 skip。
 
 ---
 
+## 执行记录（2026-08-26）
+
+Task 1–11 全部完成。全量测试 **1545 tests / 1543 pass / 2 fail**，2 条失败是仓库既有问题
+（`public/js/chat.path.test.js` 的中文路径截断，把 `chat.js` 暂存回 HEAD 后依然失败，与本次无关）。
+
+### 与计划的两处偏离
+
+1. **新增 `public/js/req-map.edges.test.js`（9 条 jsdom 回归测试）。** 计划原写「渲染层靠人工走查」，
+   但项目已有 `req-view.sessiontree.test.js` 这个先例：用户报的 bug 落成 jsdom 回归测试并在头注释
+   里写清背景。连线渲染完全可以这样锁住，比让用户眼看更可靠。覆盖：边数与箭头 marker、
+   marker 的 SVG 命名空间、父子连线走纵向的精确端点、hub 居中、选中高亮/淡出、入口徽标、
+   抽屉上下游、空上游占位。
+
+2. **`initMinimap` 里多删一行克隆体的 `<defs>`。** 写测试时发现鸟瞰图的 `cloneNode(true)` 会把
+   `marker#rq-arrow` 一起复制，导致同一个 id 在文档里出现两份。功能上无害（两份 marker 内容
+   一样），但属实打实的 id 撞车，顺手删掉克隆体的 defs——克隆体的 `marker-end` 自然引用主画布
+   那份。已由「鸟瞰图克隆体不复制 defs」一条测试锁住。
+
+   写测试时踩到的坑值得记下来：`.rq-minimap` 在骨架里排在 `.rq-canvas-host` **之前**，所以
+   任何全文档选择器（`.rq-node` / `.rq-edges > path`）都会优先命中那份**没有事件监听**的克隆体。
+   测试里一律限定在 `.rq-canvas-host` 内。
+
+### 仍需人工确认的项
+
+鸟瞰图拖拽方向已由 `req-map-minimap.logic.test.js` 的纯函数测试锁住（含「panX 增大时框向左走」
+这条专门的回归护栏），但下面几项必须在真实应用里看：
+
+- 鸟瞰图上沿与工具条齐平、缩略图显示整张地图（Task 6 Step 6 / Task 7 Step 2）
+- 连线在真实数据下的观感：箭头、label 是否还有重叠（Task 9 Step 2）
+- **端到端（Task 12 Step 2–3）：历史版本落盘的 `edges` 已是空数组，必须重新触发一次地图生成
+  才能验证。这一步会消耗 LLM 额度，留给用户决定何时跑。**
+
+---
+
 ## 自查：Spec 覆盖对照
 
 | Spec 章节 | 落到哪个 Task |

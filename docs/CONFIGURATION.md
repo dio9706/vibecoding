@@ -19,11 +19,14 @@ cp .env.example .env          # Windows: copy .env.example .env
 node server.js                # 打开 http://127.0.0.1:3000
 
 # 3b. 接飞书 bot——需要 .env 里的凭证
-node --env-file=.env feishu.js
+node feishu.js                # .env 自动加载，不必再写 --env-file
 ```
 
 > Web 入口 (`server.js`) 本机自用，无需任何凭证即可跑；
 > 飞书入口 (`feishu.js`) 必须有 `LARK_APP_ID` / `LARK_APP_SECRET`。
+>
+> 三个入口（`server.js` / `feishu.js` / `src/entrypoints/console/index.js`）都会自动加载 `.env`，
+> `--env-file=.env` 仍然可用且优先级更高，但不再是必须的 —— 见下节「`.env` 从哪里被读取」。
 
 ---
 
@@ -31,6 +34,28 @@ node --env-file=.env feishu.js
 
 复制 `.env.example` 为 `.env` 后按下表填写。代码里所有 env 的唯一读取入口是
 `src/shared/config.js`。
+
+### `.env` 从哪里被读取
+
+加载由 `src/shared/load-env.js` 统一负责，按下表**取第一个存在的文件**，不叠加：
+
+| 顺序 | 位置 | 适用形态 |
+|:---:|------|---------|
+| 1 | `$APP_DATA_DIR/.env`，Windows 桌面版即 `%APPDATA%\com.vibecoding.desktop\.env` | 打包版（安装目录只读，配置必须放可写目录，改配置无需重装） |
+| 2 | 仓库根 `.env` | 开发态 |
+
+两条重要性质：
+
+- **不覆盖已有变量。** 底层是 `process.loadEnvFile`，它不改写进程里已存在的键。所以显式
+  `--env-file`、Tauri 注入的 `APP_DATA_DIR`/`PORT`、CI 里的外部变量一律优先，文件只做兜底。
+- **`.env` 不会被打进安装包**（`scripts/prepare-sidecar.mjs` 的拷贝清单里没有它），
+  生产库密码不随包分发。因此**桌面版首次使用需手工放一份 `.env` 到上表位置 1**。
+
+> 为什么要有这套兜底（2026-08-26 事故）：桌面版由 Tauri 拉起，只注入 `APP_DATA_DIR` + `PORT`；
+> 飞书凭证另有来源（基础设置里的机器人配置，存在 `APP_DATA_DIR`），于是**机器人一切正常，
+> 只有依赖纯环境变量的埋点统计在运行期报「缺少 `TRACKING_DB_*`」**。同一个坑在开发态也有：
+> `npm start` 就是裸 `node server.js`，漏掉 `--env-file` 会静默丢掉全部配置。
+> 两种失效都不在启动时报错，而是等功能被用到才炸 —— 排查成本极高。
 
 | 变量 | 必填 | 默认值 | 说明 / 从哪来 |
 |------|:---:|--------|--------------|

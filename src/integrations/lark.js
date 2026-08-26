@@ -40,6 +40,9 @@ export function resetApiClient(creds) {
   // 换号即失效：拿旧机器人的 id 判 @ 会让新号在群里彻底不响应；负缓存同时清掉，新号无需等 TTL
   _botOpenId = null;
   _botOpenIdFailedAt = 0;
+  // 换号后 id 归属可能变，姓名缓存必须一起失效
+  _userNames.clear();
+  _userNameFailedAt.clear();
 }
 
 /**
@@ -69,6 +72,54 @@ export async function getBotOpenId() {
   } catch (e) {
     _botOpenIdFailedAt = Date.now();
     logger.warn('lark', '获取机器人 open_id 失败（群聊将不做 @ 过滤）', { err: e?.message || String(e) });
+    return null;
+  }
+}
+
+// —— 用户姓名解析（机器人日志展示用）——
+/** 姓名正缓存：id → name */
+const _userNames = new Map();
+/** 失败负缓存：id → 失败时刻。**按 id 粒度**，否则一个查不到的离职用户会连带压掉所有人的解析 */
+const _userNameFailedAt = new Map();
+/** 负缓存 TTL，与 BOT_OPEN_ID_FAIL_TTL 同值：权限缺失时不必每条消息都打一次 HTTP + 刷一条 warn，
+ *  带 TTL 则权限修好后无需重启即可恢复 */
+const USER_NAME_FAIL_TTL = 60_000;
+
+/**
+ * openId / userId → 姓名。取不到返回 null（调用方降级为显示 id 尾号），**绝不抛错**。
+ *
+ * user_id_type 必须按前缀动态判定：ctx.user.id 并非恒为 open_id ——
+ * card-actions.js 的卡片回调路径是「优先 userId（飞书内部 ID），回退 openId」。
+ * 写死 open_id 会让卡片按钮触发的动作日志全部解析失败。
+ *
+ * 需应用开通 contact:user.base:readonly。未开通时负缓存生效，一分钟最多一次无效请求。
+ */
+export async function getUserName(id) {
+  if (!id) return null;
+  const key = String(id);
+  const hit = _userNames.get(key);
+  if (hit) return hit;
+  const failedAt = _userNameFailedAt.get(key);
+  if (failedAt && Date.now() - failedAt < USER_NAME_FAIL_TTL) return null;
+  try {
+    const r = await getClient().request({
+      method: 'GET',
+      url: `/open-apis/contact/v3/users/${encodeURIComponent(key)}`,
+      params: { user_id_type: key.startsWith('ou_') ? 'open_id' : 'user_id' },
+    });
+    // SDK generic request 不校验业务 code：HTTP 200 + code!=0 也是失败
+    if (r?.code) throw new Error(`contact users get 失败: ${r.msg || r.code}`);
+    const name = r?.data?.user?.name || r?.user?.name || null;
+    if (!name) throw new Error('响应中无 user.name');
+    _userNames.set(key, name);
+    _userNameFailedAt.delete(key);
+    return name;
+  } catch (e) {
+    _userNameFailedAt.set(key, Date.now());
+    logger.warn('lark', '用户姓名解析失败（降级为显示 id 尾号）', {
+      id: key,
+      err: e?.message || String(e),
+    });
     return null;
   }
 }

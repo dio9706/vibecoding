@@ -131,6 +131,25 @@ test('buildUnderstandPrompt：目录为空时给出占位而不是空行', () =>
   assert.ok(p.includes('（暂无模块目录）'));
 });
 
+test('buildUnderstandPrompt：必须列出五类禁区并要求输出 scope', () => {
+  // 回归锚点：设计文档 §6 早就写明这五类不做，但实现里一度没有任何机制让边界对用户可见 ——
+  // 越界需求会被当成普通关键词召回，产出一份答非所问却看着有效的报告。
+  // 这几个词从 prompt 里掉出去，守卫就整体失效，而且不会有任何用例变红（模型照样返回 JSON）。
+  const p = buildUnderstandPrompt('付费用户的行为轨迹', miniDict(), '2026-08-26');
+  for (const forbidden of ['漏斗', '留存', '下钻', '多事件关联', '用户分群']) {
+    assert.ok(p.includes(forbidden), `prompt 必须点明禁区「${forbidden}」`);
+  }
+  assert.match(p, /"scope"/, '必须要求输出 scope 字段');
+  assert.match(p, /supported/, '必须说明 supported 的语义');
+});
+
+test('buildUnderstandPrompt：明确引导「拿不准就给 supported」', () => {
+  // 假阳性是本守卫的主要风险：把正常需求判成越界，会让功能变得难用。
+  // prompt 必须把天平压向 true 一侧。
+  const p = buildUnderstandPrompt('分享功能点击', miniDict(), '2026-08-26');
+  assert.match(p, /拿不准|不确定|倾向/, 'prompt 需要有降低误判的引导语');
+});
+
 test('buildPickPrompt：候选事件与候选页面都出现在 prompt 里', () => {
   const p = buildPickPrompt('分享功能', {
     events: [{ name: 'dish_share_wechat', label: '分享到微信' }],

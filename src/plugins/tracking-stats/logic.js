@@ -331,6 +331,100 @@ export function validateSelection(picked, dict) {
   };
 }
 
+/**
+ * 阶段 A 失败原因 → 用户可见回话。
+ *
+ * 为什么非要分开写（2026-08-26 事故）：用户发「统计从 2026 年 8 月 1 日至今，
+ * 所有付费用户的行为轨迹」，机器人回「没听懂这个统计需求，换个说法试试」。
+ * 而日志显示模型 52.2s 就把结果算出来了，只是超过了 47s 预算被丢弃 ——
+ * 需求表述毫无问题。这句错误归因的代价是：用户会反复改写一句本来就正确的话，
+ * 而真正该做的是等一分钟重发。回话必须说出真实原因，否则就是在指挥用户做无用功。
+ *
+ * 只有 unparsable 这一条分支，「换个说法」才是有效建议。
+ *
+ * @param {'timeout'|'exhausted'|'unparsable'|string|null|undefined} reason
+ */
+export function buildUnderstandFailureReply(reason) {
+  if (reason === 'timeout') {
+    return [
+      '⏳ 需求我收到了，但理解阶段等模型响应超时了 —— 不是你说得不清楚，别改说法。',
+      '通常是账号额度受限或网络拥塞，隔一两分钟原样再发一次就行。',
+    ].join('\n');
+  }
+  if (reason === 'exhausted') {
+    return [
+      '⏳ Claude 额度暂时用尽，埋点统计要靠它理解需求，现在走不下去。',
+      '需求本身没问题，等额度恢复后原样再发一次即可。',
+    ].join('\n');
+  }
+  // 兜底也走这条：新增 reason 却忘了加分支时，回一句能用的话总比 undefined 好
+  return '没听懂这个统计需求，换个说法试试～例如「帮我统计埋点: 最近7天分享功能的点击」';
+}
+
+/**
+ * 越界时报告使用的固定标题。
+ *
+ * 为什么是固定值、而不是让模型重写一个：用户拍板「报告附件不加边界声明」，
+ * title 因此成为报告**脱离对话后唯一的防线**。让这条防线依赖模型是自相矛盾的 ——
+ * 模型正是越界 title（如「付费用户行为轨迹统计」）的来源。
+ *
+ * 也不能在原 title 前面加前缀：「PV/UV 口径 · 付费用户行为轨迹统计」被截图转发出去
+ * 照样是错的。必须整体替换。损失掉的信息（到底统计了哪些事件）报告表格里本来就有。
+ *
+ * 刻意不以「埋点统计」开头：buildReportFileName 已经加了 `埋点统计_` 前缀，
+ * 重复一遍会得到「埋点统计_埋点统计 · …」这种文件名。
+ */
+export const SCOPE_SAFE_TITLE = '事件与页面 PV/UV 汇总';
+
+/** 能做的口径 —— 回话里必须说清楚，否则用户不知道手里这份数据算的是什么 */
+const SUPPORTED_DESC =
+  '事件/页面在某段时间内的触发次数（PV）与去重人数（UV），可按天看趋势、跟上一周期环比';
+
+/**
+ * 阶段 A 的 scope 字段形状兜底。
+ *
+ * **默认 supported=true 是本守卫最重要的安全属性**：模型漏字段或给错类型时，
+ * 行为退回「今天的样子」（照常统计），而不是把所有需求都判成越界。
+ * 反过来设计的话，模型一次抽风就能让整个功能对所有人失灵。
+ *
+ * 「声明了越界却说不出是哪一项」同样归为支持：拿一个讲不出理由的判定去打标签，
+ * 用户会收到一句既无法理解、也无法据此修改需求的说明 —— 那比直接给数据更糟。
+ *
+ * @param {unknown} raw 阶段 A 的 scope 原始产出
+ * @returns {{supported: boolean, unsupported: string[]}}
+ */
+export function normalizeScope(raw) {
+  const fallback = { supported: true, unsupported: [] };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return fallback;
+  const unsupported = Array.isArray(raw.unsupported)
+    ? raw.unsupported.map((s) => String(s || '').trim()).filter(Boolean)
+    : [];
+  // 只有显式 false 才算越界：非布尔的真值（比如字符串 'yes'）不该被读成越界信号
+  if (raw.supported !== false || !unsupported.length) return fallback;
+  return { supported: false, unsupported };
+}
+
+/**
+ * 越界声明 —— 拼在摘要**前面**一起发出（不是脚注：脚注会被跳过）。
+ *
+ * 三件事必须说到：越界在哪、替代口径是什么、真正的出路是什么。
+ * 少了最后一条，用户只会反复改写措辞去试探边界。原设计 §6 的结论是
+ * 「真遇到复杂需求，人工写 SQL 反而更快」—— 这句话得传达给用户，而不是躺在文档里。
+ *
+ * @param {string[]} unsupported 命中的禁区名
+ */
+export function buildScopeNotice(unsupported) {
+  const items = Array.isArray(unsupported)
+    ? unsupported.map((s) => String(s || '').trim()).filter(Boolean)
+    : [];
+  // 兜底措辞：调用方已由 normalizeScope 保证非空，这里只防被单独调用时印出 undefined
+  const what = items.length ? items.join('、') : '这个需求里的部分诉求';
+  return [
+    `⚠️ ${what} 这类分析做不到 —— 埋点统计只能给：${SUPPORTED_DESC}。`,
+    '下面是最接近的替代口径，别把它当成你要的那个结论；真要做这类分析，人工写 SQL 会快得多。',
+  ].join('\n');
+}
+
 /** 千分位 */
 function fmtNum(n) {
   return Number(n || 0).toLocaleString('en-US');

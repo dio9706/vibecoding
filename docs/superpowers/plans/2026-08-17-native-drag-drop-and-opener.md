@@ -1134,7 +1134,7 @@ Run: `npm run tauri:dev`
 
 - [ ] **1. 单文件零副本**：拖一个文件进输入框 → chip 显示真实路径；确认 `.uploads` 无新增文件
 
-  Run（拖之前记数，拖之后再记一次）：`ls "$APPDATA/com.claudeagent.desktop/.uploads" | wc -l`
+  Run（拖之前记数，拖之后再记一次）：`ls "$APPDATA/com.vibecoding.desktop/.uploads" | wc -l`
   Expected: 两次数字相同
 
 - [ ] **2. 文件夹**：拖一个文件夹进输入框 → chip 显示 📁 与真实路径（这是原先完全没有的能力）
