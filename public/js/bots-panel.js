@@ -3,6 +3,7 @@
 import { $ } from './util.js';
 import { toast, confirmDialog } from './ui.js';
 import { setActionsBot } from './actions-panel.js';
+import { iconHtml, DELETE_ICON_SVG, EDIT_ICON_SVG } from './icons.js';
 
 let editingId = null; // 非空 = 编辑既有机器人
 let messagesMeta = []; // 可配文案元数据 [{key,label,defaultText}]（GET /api/bots 返回）
@@ -49,8 +50,8 @@ export async function renderBotList() {
       '<span class="t-vendor">飞书</span>' +
       '<span class="t-base bot-appid"></span>' +
       '<span class="spacer"></span>' +
-      '<button class="t-act edit" title="编辑">✎</button>' +
-      '<button class="t-act del" title="删除">🗑</button>';
+      '<button class="t-act edit" title="编辑">' + iconHtml(EDIT_ICON_SVG) + '</button>' +
+      '<button class="t-act del" title="删除">' + iconHtml(DELETE_ICON_SVG) + '</button>';
     row.querySelector('.t-label').textContent = b.name || '(未命名)';
     row.querySelector('.bot-appid').textContent = b.appId || '(未配置凭证)';
     const chk = row.querySelector('.pretty-check');

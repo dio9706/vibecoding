@@ -96,47 +96,49 @@ export function bindTauriNav({ showView, openConv }) {
             if (basicAutostartSec) basicAutostartSec.style.display = '';
 
             // ── 自定义窗口控制按钮（invoke Rust 命令，最可靠方式）────
-            const winControls = document.getElementById('winControls');
-            if (winControls) {
-              winControls.hidden = false;
-              console.log('[WinCtrl] initialized, invoke ready');
+            // 按类而非 id 收集：标题栏有两处 —— 主界面顶栏 (#winControls) 与启动罩内
+            // (.ob-titlebar，罩子盖住顶栏期间的替身)。同一段逻辑绑到两处，不写第二份实现。
+            const winControls = document.querySelectorAll('.win-controls');
+            if (winControls.length) {
+              winControls.forEach((c) => { c.hidden = false; });
+              console.log('[WinCtrl] initialized, invoke ready ×' + winControls.length);
 
               // 全部走 invoke → Rust 自定义命令，无需 window.__TAURI__
-              document.getElementById('winMin')?.addEventListener('click', (e) => {
+              document.querySelectorAll('.wc-min').forEach((btn) => btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 console.log('[WinCtrl] minimize');
                 invoke('win_minimize');
-              });
+              }));
 
-              const winMaxBtn = document.getElementById('winMax');
+              const winMaxBtns = document.querySelectorAll('.wc-max');
               const updateMaxIcon = async () => {
                 try {
                   const isMax = await invoke('win_is_maximized');
-                  winMaxBtn.querySelector('svg').innerHTML = isMax
+                  const svg = isMax
                     ? '<rect x="2.5" y="0.5" width="6" height="6" fill="none" stroke="currentColor"/><rect x="0.5" y="2.5" width="6" height="6" fill="none" stroke="currentColor"/>'
                     : '<rect x="0.5" y="0.5" width="8" height="8" fill="none" stroke="currentColor"/>';
+                  winMaxBtns.forEach((b) => { const s = b.querySelector('svg'); if (s) s.innerHTML = svg; });
                 } catch(err) { console.warn('[WinCtrl] isMax err', err); }
               };
-              winMaxBtn?.addEventListener('click', (e) => {
+              winMaxBtns.forEach((btn) => btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 console.log('[WinCtrl] toggleMaximize');
                 invoke('win_toggle_maximize').then(updateMaxIcon);
-              });
+              }));
               updateMaxIcon();
 
-              document.getElementById('winClose')?.addEventListener('click', (e) => {
+              document.querySelectorAll('.wc-close').forEach((btn) => btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 console.log('[WinCtrl] hide');
                 invoke('win_hide');
-              });
+              }));
 
               // 拖拽 & 双击最大化：全部由 data-tauri-drag-region 原生处理（webview 层直接响应）。
               // 最大化态下拖标题栏还原并跟随鼠标是 Windows 原生行为，无需 JS 接管——
               // 曾加过 mousedown 接管，但按下即触发导致「单击也还原」，故移除。
-              // 双击原生最大化后同步一次图标状态。
-              document.getElementById('topbarDragArea')?.addEventListener('dblclick', () => {
-                setTimeout(updateMaxIcon, 50);
-              });
+              // 双击原生最大化后同步一次图标状态（两处拖拽区都要）。
+              document.querySelectorAll('#topbarDragArea, .ob-titlebar-drag').forEach((el) =>
+                el.addEventListener('dblclick', () => { setTimeout(updateMaxIcon, 50); }));
             }
 
             // ── 开机自启动 toggle ─────────────────────────────────

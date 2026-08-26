@@ -370,6 +370,7 @@ function normalizeOversized(entry) {
  */
 export function evaluatePrompts({ candidates = [], oversizedFiles = [], duplicateGroups = [], verdicts = null } = {}) {
   const issues = [];
+  const verdictLog = [];
   let score = 100;
   let status;
 
@@ -380,6 +381,25 @@ export function evaluatePrompts({ candidates = [], oversizedFiles = [], duplicat
     // 表现为 issue 的 meta.text 取到另一个文件同行号的原文，理由和原条目对不上号。
     const keyOf = (file, line) => `${file}#${line}`;
     const byKey = new Map(candidates.map((c) => [keyOf(c.file, c.line), c]));
+
+    // 全部判定原样留档（含 acceptable / not-a-rule）。
+    //
+    // 为什么需要它：只有 over-broad/conflicting 会变成 issue，其余 verdict 连同模型给的 reason
+    // 一起被丢弃。于是出现「0 over-broad」这种结果时，无法区分「模型认真判了且都合格」和
+    // 「模型摆烂 / 漏判了大半条目」——2026-08-25 升档实测就撞上了这个盲区，一次跑出 0 条
+    // over-broad 却没法判断是好消息还是坏消息。留档后，任何一轮结果都能逐条回溯与横向对比。
+    //
+    // 截断是为了别把 optimize.json 撑爆：一次体检几十条候选，每条 text+reason 不设限会到几十 KB。
+    for (const v of verdicts) {
+      const src = byKey.get(keyOf(v.file, v.line)) || {};
+      verdictLog.push({
+        file: v.file ?? src.file ?? null,
+        line: v.line,
+        verdict: v.verdict,
+        text: String(src.text ?? '').slice(0, 200),
+        reason: String(v.reason ?? '').slice(0, 300),
+      });
+    }
 
     for (const v of verdicts) {
       if (v.verdict !== 'over-broad' && v.verdict !== 'conflicting') continue;
@@ -450,5 +470,6 @@ export function evaluatePrompts({ candidates = [], oversizedFiles = [], duplicat
     score: Math.max(0, Math.min(100, Math.round(score))),
     status,
     issues,
+    verdictLog,
   };
 }

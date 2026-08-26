@@ -149,6 +149,58 @@ test('config：需求不存在 → 404', async () => {
   assert.equal(r.status, 404);
 });
 
+test('config：reqDoc 透传 url/fetchedAt（在线来源的溯源信息，界面据此给「刷新」）', async () => {
+  const req = await createReq('reqDoc溯源测试需求');
+  const url = 'https://x.feishu.cn/docx/AbCd1234';
+  const at = '2026-08-25T06:30:00.000Z';
+  const r = await put('/api/req/config', {
+    id: req.id,
+    reqDoc: { name: '来自飞书.md', text: '正文', url, fetchedAt: at },
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.reqDoc.url, url);
+  assert.equal(r.json.reqDoc.fetchedAt, at);
+  assert.ok(fs.existsSync(r.json.reqDoc.path), '带 url 的 text 来源仍要落盘');
+
+  // 粘贴/上传来源不该凭空长出这两个字段，否则界面会给一个刷不动的「刷新」按钮
+  const plain = await put('/api/req/config', { id: req.id, reqDoc: { name: '手打.md', text: '正文' } });
+  assert.equal(plain.json.reqDoc.url, undefined);
+  assert.equal(plain.json.reqDoc.fetchedAt, undefined);
+});
+
+test('doc-from-link：需求不存在 404；非评审期 409', async () => {
+  const bad = await post('/api/req/doc-from-link', { id: 'r_not_exist', url: 'https://x.feishu.cn/docx/A1' });
+  assert.equal(bad.status, 404);
+
+  const req = await createReq('飞书链接非评审期测试需求');
+  updateRequirement(req.id, { phase: 'dev' });
+  const r = await post('/api/req/doc-from-link', { id: req.id, url: 'https://x.feishu.cn/docx/A1' });
+  assert.equal(r.status, 409);
+});
+
+test('doc-from-link：非飞书链接 / 空链接 → 400（且错误里说清支持什么）', async () => {
+  const req = await createReq('飞书链接校验测试需求');
+
+  const notFeishu = await post('/api/req/doc-from-link', { id: req.id, url: 'https://example.com/doc/123' });
+  assert.equal(notFeishu.status, 400);
+  assert.match(notFeishu.json.error, /docx|wiki/);
+
+  // 没传 url 且 reqDoc 也没有 url（不是飞书来源）→ 无从刷起
+  const empty = await post('/api/req/doc-from-link', { id: req.id });
+  assert.equal(empty.status, 400);
+  assert.match(empty.json.error, /链接/);
+});
+
+test('doc-from-link：链接合法但飞书调用失败 → 502，且提示补权限的做法', async () => {
+  // 顶部已清空 LARK_APP_ID/SECRET，Lark SDK 在空凭证下必然失败——正是要覆盖的那条路径：
+  // 用户最常见的失败是机器人没被加为文档协作者，错误里必须给出解法而不只是转述 SDK 原文
+  const req = await createReq('飞书链接拉取失败测试需求');
+  const r = await post('/api/req/doc-from-link', { id: req.id, url: 'https://x.feishu.cn/docx/AbCd1234' });
+  assert.equal(r.status, 502);
+  assert.match(r.json.error, /协作者/);
+  assert.equal(getRequirement(req.id).reqDoc, null, '拉取失败不得改动已有配置');
+});
+
 test('docgen：非评审期 → 409（对齐 config/supplement/apidoc/guidelines 同类守卫）', async () => {
   const req = await createReq('docgen非评审期测试需求');
   updateRequirement(req.id, { phase: 'dev' });

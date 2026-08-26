@@ -78,6 +78,62 @@ test('入参缺失时兜底为空布局', () => {
   assert.deepEqual(layoutMap({}).positions, {});
 });
 
+test('layoutMap 外露 entries（入度 0 的页面）与 layerOf', () => {
+  const r = layoutMap({
+    pages: [pg('a'), pg('b'), pg('c')],
+    edges: [{ from: 'a', to: 'b' }, { from: 'b', to: 'c' }],
+  });
+  assert.deepEqual(r.entries, ['a']);
+  assert.equal(r.layerOf.get('a'), 0);
+  assert.equal(r.layerOf.get('b'), 1);
+  assert.equal(r.layerOf.get('c'), 2);
+});
+
+test('layoutMap 全图成环时 entries 为空，但仍然出得来坐标', () => {
+  const r = layoutMap({ pages: [pg('a'), pg('b')], edges: [{ from: 'a', to: 'b' }, { from: 'b', to: 'a' }] });
+  assert.deepEqual(r.entries, []);
+  assert.ok(r.positions.a && r.positions.b);
+});
+
+test('单父多子时父节点水平居中于子节点组', () => {
+  const r = layoutMap({
+    pages: [pg('hub'), pg('a'), pg('b'), pg('c')],
+    edges: [{ from: 'hub', to: 'a' }, { from: 'hub', to: 'b' }, { from: 'hub', to: 'c' }],
+  });
+  const cx = (id) => r.positions[id].x + r.nodeW / 2;
+  assert.equal(cx('hub'), (cx('a') + cx('c')) / 2);
+  assert.equal(cx('hub'), cx('b')); // 三个等距子节点，正中那个就是中心
+});
+
+test('居中后同层不重叠，且保持 pages 的原始左右顺序', () => {
+  // h1 的子节点在右、h2 的子节点在左：居中会想把 h2 拉到 h1 左边，保序推挤必须拦住
+  const r = layoutMap({
+    pages: [pg('h1'), pg('h2'), pg('x'), pg('y')],
+    edges: [{ from: 'h1', to: 'y' }, { from: 'h2', to: 'x' }],
+  });
+  assert.ok(r.positions.h2.x - r.positions.h1.x >= r.nodeW);
+});
+
+test('居中后画布宽度仍然包住所有节点', () => {
+  const r = layoutMap({
+    pages: [pg('hub'), pg('a'), pg('b'), pg('c')],
+    edges: [{ from: 'hub', to: 'a' }, { from: 'hub', to: 'b' }, { from: 'hub', to: 'c' }],
+  });
+  for (const id of ['hub', 'a', 'b', 'c']) {
+    assert.ok(r.positions[id].x + r.nodeW <= r.size.w, id + ' 超出画布宽度');
+  }
+});
+
+test('同层边与回边不参与居中计算', () => {
+  // b→a 是回边（a 在更浅层），不能把 b 往 a 身上拽
+  const r = layoutMap({
+    pages: [pg('a'), pg('b'), pg('c')],
+    edges: [{ from: 'a', to: 'b' }, { from: 'b', to: 'c' }, { from: 'b', to: 'a' }],
+  });
+  const cx = (id) => r.positions[id].x + r.nodeW / 2;
+  assert.equal(cx('b'), cx('c')); // b 只有 c 一个更深层子节点
+});
+
 test('同层内保持 pages 原始顺序', () => {
   const r = layoutMap({ pages: [pg('z'), pg('y'), pg('x')], edges: [] });
   assert.ok(r.positions.z.x < r.positions.y.x);

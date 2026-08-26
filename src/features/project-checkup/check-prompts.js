@@ -43,14 +43,25 @@ const OVERSIZE_LINES = 200;
 const MIN_DUPLICATE_LEN = 12;
 
 /**
- * 判定模型。
+ * 判定模型。null = 跟随会话默认模型（claude.js 对 falsy 的 model 会整个跳过该参数）。
  *
- * 选 haiku 而不是默认（更强）模型的理由：这个判定任务的难点不在推理深度，而在**判据是否说清楚**——
- * prompt 里已经把口径（「判据是否依赖解释」）和两个 few-shot（一正一反）给死了，
- * 剩下的是模式匹配而非开放推理。而候选量实测上百条、要分多批调用，模型档位直接乘以批数。
- * 若实测判定质量不达标（尤其是把 acceptable 误判成 over-broad），这里换成默认模型即可。
+ * 原本选 haiku，理由是「难点不在推理深度而在判据是否说清楚，prompt 里口径和 few-shot 都给死了，
+ * 剩下的是模式匹配」。**2026-08-24 实测证伪，已换回默认模型。** 三个症状同源于模型档位：
+ *
+ *   1. 判定不稳：同一输入连跑三次，over-broad 为 4/8/6；更要命的是条目层面——
+ *      三次并集 9 条里只有 1 条三次都命中，A 和 C 两次基本「整批换人」。
+ *      用户跑两次体检会看到两份几乎不相交的整改清单，比分数摆动更伤信任。
+ *   2. 抽象判据学不会：加了 not-a-rule 这一档后，模型只会照抄 few-shot 里给的那条，
+ *      换一条没见过的纯描述性条目（`✅ 整体风格关键词：深紫渐变主调…`）仍判 over-broad。
+ *      即它没抓住「主语是代码还是作者」这条抽象判据，只学到了句式。
+ *   3. 指令遵循度差：prompt 明确要求 over-broad 必须给 suggestion，6 条里 3 条没给。
+ *
+ * 对照组：同一次跑里非 LLM 路径的 P3_OVERSIZED_RULE 恒定 7 条，波动全部来自判定层。
+ *
+ * 成本：候选收窄到 39 条后单次约 4 批。haiku 单次 ~$0.15，默认模型约 10 倍。
+ * 体检是低频操作且有指纹缓存（文件没变直接复用结果），这个代价可接受。
  */
-const JUDGE_MODEL = 'claude-haiku-4-5';
+const JUDGE_MODEL = null;
 
 /**
  * 单批候选数上限。
@@ -78,8 +89,17 @@ const MAX_CONCURRENCY = 4;
  *
  * 默认的 30s 是给「一句话分类」设计的；这里每批要读 20 条规则并各写一段具体的 reason，
  * 输出 token 量高一到两个数量级，30s 必然不够。
+ *
+ * 2026-08-25 从 120s 提到 300s。原值是按 haiku 校准的，换成默认模型后每批实测
+ * 60/94/114/127/127/127 秒——日志里三批赫然是 `✔ runClaude {"ms":127093}`，
+ * 即**模型成功返回了，但 race 在 122s（budget+2s）就放弃**，`out` 只拿到半截流，
+ * extractFirstJsonObject 配不平大括号 → null → 重试再超 → 整批废 → 整个维度 partial。
+ * 而 partial 的维度会被 aggregateScore 踢出总分，等于功能没有。
+ *
+ * 教训：超时预算是**模型速度的依赖变量**，换模型档位必须同步重校准，
+ * 否则测到的是超时扛不住，而不是模型判定质量。
  */
-const BATCH_TIMEOUT_MS = 120_000;
+const BATCH_TIMEOUT_MS = 300_000;
 
 /**
  * 合法 verdict 白名单。
@@ -326,10 +346,15 @@ function buildPrompt(batch) {
  *
  * @returns {Array|null} 合法则返回判定数组，否则 null
  */
-function validateVerdicts(raw) {
+function validateVerdicts(raw, expectedCount) {
   if (!raw || !Array.isArray(raw.verdicts)) return null;
   const list = raw.verdicts;
   if (list.length === 0) return null;
+  // 条数必须对得上。原实现只校验「非空 + 每条结构合法」，模型只判 12 条里的 3 条也照样放行——
+  // 剩下 9 条既不在 verdicts 里、也就不会产出 issue，被**静默当成 acceptable**，而 status 仍是 done。
+  // 这个组合能通过大括号计数（JSON 对象本身是完整的，只是条目不全），所以截断检测挡不住它。
+  // 后果是「0 over-broad」这种结果无法区分「都合格」和「模型漏判了大半」。
+  if (typeof expectedCount === 'number' && list.length !== expectedCount) return null;
   for (const v of list) {
     if (!v || typeof v !== 'object') return null;
     if (!VALID_VERDICTS.has(v.verdict)) return null;
@@ -360,7 +385,7 @@ async function judgeBatch(batch, index) {
       logTag: `checkup/prompts#${index}`,
       timeoutMs: BATCH_TIMEOUT_MS,
     });
-    const list = raw ? validateVerdicts(raw) : null;
+    const list = raw ? validateVerdicts(raw, batch.length) : null;
     if (list) return list;
     logger.warn('check-prompts', 'LLM 判定失败（无输出或结构不合法）', {
       batch: index,

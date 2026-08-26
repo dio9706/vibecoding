@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { skillNameOf, stripFrontmatter, buildSkillFile, replaceRuleRefs, isArchivedPath } from './fix-rules.logic.js';
+import { skillNameOf, stripFrontmatter, buildSkillFile, replaceRuleRefs, hasRuleRef, isArchivedPath } from './fix-rules.logic.js';
 
 test('skill 名由文件名推导', () => {
   assert.equal(skillNameOf('design-system.md'), 'design-system');
@@ -69,6 +69,37 @@ test('一行里多处引用全部替换', () => {
   assert.equal(replaceRuleRefs(md, 'a'), '`/a` 技能 和 `/a` 技能');
 });
 
+test('hasRuleRef 认出反引号包裹的引用', () => {
+  assert.equal(hasRuleRef('先读 `.claude/rules/popup-pattern.md`，照模板写。', 'popup-pattern'), true);
+  assert.equal(hasRuleRef('先读 `.claude/rules/other.md`', 'popup-pattern'), false);
+  assert.equal(hasRuleRef('完全无关的一段话', 'popup-pattern'), false);
+});
+
+test('hasRuleRef 不认裸写的路径', () => {
+  // 与 replaceRuleRefs 的口径必须一致：它只替换反引号包裹的形式，
+  // 这里多认一种，执行层就会去改一个 replaceRuleRefs 根本不会动的文件
+  assert.equal(hasRuleRef('见 .claude/rules/popup-pattern.md 那份', 'popup-pattern'), false);
+});
+
+test('hasRuleRef 与 replaceRuleRefs 口径一致', () => {
+  // 这两个函数必须同进同退：hasRuleRef 为 false 却被 replaceRuleRefs 改了，
+  // 意味着执行层会漏改；反过来则意味着白写一次文件。
+  // 「技能 的」这条清理规则是全局的，正是最容易让两者脱钩的地方。
+  const cases = [
+    ['见 `.claude/rules/a.md` 的说明', 'a'],
+    ['无关文本，但含「技能 的」这三个字', 'a'],
+    ['见 `.claude/rules/b.md`', 'a'],
+    ['', 'a'],
+  ];
+  for (const [md, name] of cases) {
+    assert.equal(
+      hasRuleRef(md, name),
+      replaceRuleRefs(md, name) !== md,
+      `口径不一致: ${JSON.stringify(md)}`,
+    );
+  }
+});
+
 test('归档路径判定', () => {
   assert.equal(isArchivedPath('docs/specs/x.md'), true);
   assert.equal(isArchivedPath('docs/plans/x.md'), true);
@@ -85,4 +116,27 @@ test('归档判定对反斜杠路径同样生效', () => {
 
 test('嵌套在子目录下的归档目录也算', () => {
   assert.equal(isArchivedPath('sub/docs/specs/x.md'), true);
+});
+
+test('docs 与 specs/plans 之间隔着中间层级也算归档', () => {
+  // 2026-08-26 实测发现的漏网之鱼：kxmall-app-ui 和本仓库都把设计文档放在
+  // docs/superpowers/specs|plans/ 下，而原实现只认紧挨着的 docs/specs/。
+  // 结果一次降级改写了 13 份历史设计文档——那些文档里的
+  // 「见 `.claude/rules/xxx.md`」在当时是事实，改掉就是伪造历史记录。
+  assert.equal(isArchivedPath('docs/superpowers/specs/2026-05-27-design.md'), true);
+  assert.equal(isArchivedPath('docs/superpowers/plans/2026-06-24-plan.md'), true);
+  assert.equal(isArchivedPath('docs/a/b/c/migration/x.md'), true);
+});
+
+test('docs 下的非归档目录仍要参与引用替换', () => {
+  // 模块文档是活文档，路径变了就该跟着改；把它一起保护起来会留下失效引用
+  assert.equal(isArchivedPath('docs/modules/baby-food.md'), false);
+  assert.equal(isArchivedPath('docs/README.md'), false);
+});
+
+test('没有 docs 祖先的 specs/plans 目录不算归档', () => {
+  // 收窄误伤面：业务代码里正常会有叫 plans 的目录（订阅套餐、行程计划等），
+  // 那不是历史存档，把它保护起来等于留下一条失效引用
+  assert.equal(isArchivedPath('src/pages/plans/README.md'), false);
+  assert.equal(isArchivedPath('src/specs/x.md'), false);
 });

@@ -1,0 +1,316 @@
+/* 新用户引导态：启动罩原地转成「左 LOGO + 右配置面板」。
+ * 只在 #bootOverlay 上加 .ob-arm / .ob-open 两个类时生效，
+ * 不加类时这里的规则要让启动罩看起来与改造前完全一样。
+ * 配色一律走 app.css :root 的主题变量，不自带色值。 */
+
+:root {
+  /* 引导态的水平位移。视觉盒推导：
+   *   LOGO 96(=120×0.8) + gap 56 + 面板 420 = 572 → 左边缘 -286
+   *   LOGO 中心 = -286 + 96/2  = -238
+   *   面板中心 = -286 + 96 + 56 + 420/2 = 76
+   * 改了 --ob-panel-w 就要按上面的公式重算这两个值。 */
+  --ob-logo-x: -238px;
+  --ob-panel-x: 76px;
+  --ob-panel-w: 420px;
+}
+
+/* ---- 品牌区（LOGO / 标题 / 启动文案）---- */
+
+/* 绝对定位 + translate(-50%,-50%) 而不是靠父级 flex 居中：
+ * 位移动画必须走纯 transform（width/flex 那类属性不上合成层，会掉帧）。
+ * 垂直方向恒为 -50%，所以启动文案隐藏后高度收缩了也还是居中，
+ * 不需要任何硬编码的垂直偏移。 */
+.ob-brand {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px; /* 与改造前 .boot-overlay 的 gap 一致，保证非引导态零回归 */
+  transition: transform 0.46s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ob-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+/* ---- 阶段一 .ob-arm：六芒星切成单次播放 ---- */
+
+/* 罩子在后端冷启动期间已经转了不定圈数，等当前周期的 animationend 的话
+ * 等待时间是 0~2.6s 随机，给不了确定的开场。这里换成单次 keyframe 并由 JS
+ * 强制 reflow 重起播，拿到一个确定的 780ms 起点。 */
+@keyframes vibeSpinOnce {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(120deg); }
+}
+@keyframes vibeSpinOnceRev {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(-120deg); }
+}
+.boot-overlay.ob-arm #bootStar #btri1,
+.boot-overlay.ob-arm #bootStar #btri2 {
+  animation: vibeSpinOnce 780ms cubic-bezier(0.7, 0, 0.25, 1) 1 both;
+}
+.boot-overlay.ob-arm #bootStar #btri2 {
+  animation-name: vibeSpinOnceRev;
+}
+
+/* ---- 阶段二 .ob-open：LOGO 左移、标题淡出、启动文案撤场 ---- */
+
+.boot-overlay.ob-open .ob-brand {
+  transform: translate(calc(-50% + var(--ob-logo-x)), -50%) scale(0.8);
+}
+/* 标题淡出后用 visibility 收尾，而不是 display:none 或从 flex 流里摘掉：
+ * visibility:hidden 会把它移出可访问性树、也不再能被选中，但**保留占位** ——
+ * 这点很关键，.ob-brand 的盒宽是由这行标题撑开的（比 LOGO 宽），
+ * 一旦不占位，brand 宽度突变，而它靠 translate(-50%) 居中，LOGO 会跟着横向跳一下。
+ * transition 里 visibility 延迟到淡出结束才生效，否则会瞬间消失、看不到淡出。 */
+.boot-overlay.ob-open #bootTitle {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-6px);
+  transition: opacity 0.22s ease, transform 0.22s ease, visibility 0s linear 0.22s;
+  pointer-events: none;
+}
+.boot-overlay.ob-open .ob-status {
+  display: none;
+}
+
+/* ---- 引导面板 ---- */
+
+.ob-panel {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: var(--ob-panel-w);
+  max-height: 78vh;
+  overflow-y: auto;
+  padding: 22px 24px 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
+  /* 进场初态：比目标位再往右 44px，配合 opacity 做「从 LOGO 右侧推出」的观感 */
+  opacity: 0;
+  transform: translate(calc(-50% + var(--ob-panel-x) + 44px), -50%);
+  transition: opacity 0.38s ease, transform 0.38s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.boot-overlay.ob-open .ob-panel:not([hidden]) {
+  opacity: 1;
+  transform: translate(calc(-50% + var(--ob-panel-x)), -50%);
+}
+
+.ob-head { margin-bottom: 14px; }
+.ob-title {
+  margin-bottom: 5px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+.ob-sub {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--faint);
+}
+
+.ob-import {
+  width: 100%;
+  margin-bottom: 16px;
+  padding: 9px 12px;
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.16s ease;
+}
+.ob-import:hover:not(:disabled) { background: var(--accent-ultra-soft); }
+.ob-import:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---- 分段 ---- */
+
+.ob-sec {
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+.ob-sec + .ob-sec { margin-top: 14px; }
+
+.ob-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-bottom: 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+}
+.ob-toggle { cursor: pointer; }
+.ob-sec-no { color: var(--accent); font-size: 12.5px; }
+.ob-sec-label { font-size: 13px; font-weight: 600; color: var(--text); }
+.ob-req { margin-left: auto; font-size: 11px; color: var(--accent); }
+.ob-opt { margin-left: auto; font-size: 11px; color: var(--faint); }
+.ob-caret {
+  font-size: 11px;
+  color: var(--faint);
+  transition: transform 0.18s ease;
+}
+.ob-sec.collapsed .ob-caret { transform: rotate(-90deg); }
+.ob-sec.collapsed .ob-sec-body { display: none; }
+.ob-sec.collapsed .ob-sec-head { margin-bottom: 0; }
+
+/* ---- Tab ---- */
+
+.ob-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.ob-tab {
+  flex: 1;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+.ob-tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---- 字段 ---- */
+
+.ob-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 9px;
+}
+.ob-label {
+  flex: 0 0 68px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.ob-field input,
+.ob-field select {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: inherit;
+}
+.ob-field input:focus,
+.ob-field select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.ob-field input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ob-hint {
+  margin: 2px 0 0 78px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--faint);
+}
+
+/* ---- 底栏 ---- */
+
+.ob-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+.ob-err {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--red);
+}
+.ob-submit {
+  flex: 0 0 auto;
+  padding: 9px 18px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: opacity 0.16s ease;
+}
+.ob-submit:hover:not(:disabled) { opacity: 0.88; }
+.ob-submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ---- 降级一：窄窗口 ---- */
+
+/* 并排布局需要 572px（LOGO 96 + gap 56 + 面板 420）再加左右边距，620px 以下
+ * 会双向溢出（实测 520px 时 LOGO 左缘 -26、面板右缘超出 26px）。
+ * 窗口没有最小宽度限制（tauri.conf.json 未配 windows），所以必须兜。
+ * 处置：收掉 LOGO —— 它是装饰，配置面板才是功能；面板转为居中 + 宽度自适应。
+ * 注意只在 .ob-open 下收 LOGO，启动罩阶段（未进引导）的居中 LOGO 不受影响。 */
+@media (max-width: 620px) {
+  .boot-overlay.ob-open .ob-brand {
+    opacity: 0;
+    visibility: hidden;
+    transform: translate(-50%, -50%); /* 覆盖左移，原地淡出更自然 */
+    transition: opacity 0.24s ease, visibility 0s linear 0.24s;
+  }
+  .ob-panel {
+    width: min(var(--ob-panel-w), calc(100vw - 32px));
+    max-height: 86vh; /* 窄窗口下 LOGO 让位，给面板更多纵向空间 */
+    /* 进场改走纵向位移：横向偏移在窄窗口会顶出视口 */
+    transform: translate(-50%, calc(-50% + 16px));
+  }
+  .boot-overlay.ob-open .ob-panel:not([hidden]) {
+    transform: translate(-50%, -50%);
+  }
+}
+
+/* ---- 降级二：系统开启「减少动态效果」时全部一步到位 ---- */
+
+@media (prefers-reduced-motion: reduce) {
+  .ob-brand,
+  .ob-panel,
+  #bootTitle,
+  .ob-caret,
+  .ob-import,
+  .ob-tab,
+  .ob-submit {
+    transition: none !important;
+  }
+  .boot-overlay.ob-arm #bootStar #btri1,
+  .boot-overlay.ob-arm #bootStar #btri2 {
+    animation: none !important;
+  }
+}

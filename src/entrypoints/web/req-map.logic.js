@@ -5,6 +5,8 @@
  * 也不让 LLM 出——见 spec §3.1，坐标由前端 req-map-layout.logic.js 分层布局算出来。
  */
 
+import { jsonrepair } from 'jsonrepair';
+
 /** 逻辑点类型别名归一：模型中英夹杂是常态，非法值一律落到 mod（宁可标成「修改」也不丢点）。 */
 const TYPE_ALIAS = {
   add: 'add', new: 'add', create: 'add', 新增: 'add', 增加: 'add',
@@ -56,8 +58,16 @@ export function parseJsonLoose(text) {
   if (start < 0 || end <= start) {
     throw new Error(`未能从模型输出中解析出 JSON：${raw.slice(0, 200)}`);
   }
+  const candidate = stripped.slice(start, end + 1);
   try {
-    return JSON.parse(stripped.slice(start, end + 1));
+    return JSON.parse(candidate);
+  } catch {
+    /* 继续 jsonrepair 兜底 */
+  }
+
+  // 第四层：jsonrepair 专门处理 LLM 常见 JSON 破损（未转义引号、尾逗号、截断等）
+  try {
+    return JSON.parse(jsonrepair(candidate));
   } catch (e) {
     throw new Error(`JSON 解析失败（${e.message}）：${raw.slice(0, 200)}`);
   }
@@ -134,21 +144,30 @@ export function normalizeMap(raw, { prev = null } = {}) {
     });
   });
 
+  // 边端点解析：契约要求 LLM 用页面 name（见 mapOutputContract），而 id 是本地自动编号。
+  // 此处曾只按 id 校验，导致所有边被静默丢弃、画布上一条线都没有。历史数据和偶尔跑偏的
+  // 模型会给 id，所以 name 优先、id 兜底；落盘统一存 id，布局层/渲染层口径才不用分叉。
   const pageIds = new Set(pages.map((p) => p.id));
+  const idByName = new Map();
+  for (const p of pages) if (!idByName.has(p.name)) idByName.set(p.name, p.id); // 同名取首个
+  const resolveEnd = (v) => {
+    const s = String(v ?? '').trim();
+    if (!s) return '';
+    return idByName.get(s) || (pageIds.has(s) ? s : '');
+  };
+
   const seenEdges = new Set();
-  const edges = (Array.isArray(raw?.edges) ? raw.edges : [])
-    .map((e) => ({
-      from: String(e?.from ?? '').trim(),
-      to: String(e?.to ?? '').trim(),
-      label: String(e?.label ?? '').trim(),
-    }))
-    .filter((e) => pageIds.has(e.from) && pageIds.has(e.to) && e.from !== e.to)
-    .filter((e) => {
-      const k = `${e.from}>${e.to}`;
-      if (seenEdges.has(k)) return false;
-      seenEdges.add(k);
-      return true;
-    });
+  const edges = [];
+  for (const e of Array.isArray(raw?.edges) ? raw.edges : []) {
+    const from = resolveEnd(e?.from);
+    const to = resolveEnd(e?.to);
+    if (!from || !to || from === to) continue;
+    // 去重键用解析后的 id：同一对页面一次用 name 一次用 id，不能在画布上画出重影
+    const k = `${from}>${to}`;
+    if (seenEdges.has(k)) continue;
+    seenEdges.add(k);
+    edges.push({ from, to, label: String(e?.label ?? '').trim() });
+  }
 
   const annots = raw?.annots && typeof raw.annots === 'object' && !Array.isArray(raw.annots) ? raw.annots : {};
   return { pages, edges, annots };
@@ -183,6 +202,10 @@ function mapOutputContract() {
     `硬性要求：\n` +
     `- **不要输出任何坐标字段**（x/y/position），布局由前端计算。\n` +
     `- edges 的 from/to 必须精确等于某个 page 的 name。\n` +
+    `- **必须标出入口页**：用户从哪个页面进入本次需求涉及的功能。其余页面都应能顺着 edges 从它走到。\n` +
+    `- 除入口页外，每个页面至少要有一条入边；确实无法到达的，在该页 points 里说清原因。\n` +
+    `- hub 型页面（点进去能到多个子页面的那种）必须列出**全部下钻链路**，不能只列改动最大的几条。\n` +
+    `- edges 的 label 写用户动作（如「点击 今晚吃什么」），不写 router.push 这类技术描述。\n` +
     `- 本次需求不改动、但与改动页面有跳转关系的页面也要列出，state 填 untouched、points 留空数组——\n` +
     `  用户需要据此判断「你是认为不用改，还是压根没看到」。\n` +
     `- 逻辑点要写用户视角的行为变化，不要写「重构了某个函数」这类纯技术描述。`

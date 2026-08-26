@@ -262,3 +262,79 @@ test('分数下限为 0', () => {
   const r = evaluatePrompts({ candidates: many, oversizedFiles: [], duplicateGroups: [], verdicts: null });
   assert.equal(r.score, 0);
 });
+
+// —— verdictLog：判定层可审计 ——
+// 只有 over-broad/conflicting 会变成 issue，acceptable/not-a-rule 连同模型给的 reason 一起被丢弃。
+// 后果是出现「0 over-broad」这种结果时，无法区分「模型认真判了且都合格」和「模型摆烂/漏判」。
+// verdictLog 把全部判定原样留档，不产 issue、不扣分，纯供事后审计与回归对比。
+
+test('verdictLog 记录全部判定，不只是有问题的那些', () => {
+  const r = evaluatePrompts({
+    candidates: [
+      { file: 'a.md', line: 1, text: '条目一' },
+      { file: 'a.md', line: 2, text: '条目二' },
+      { file: 'b.md', line: 3, text: '条目三' },
+    ],
+    oversizedFiles: [], duplicateGroups: [],
+    verdicts: [
+      { file: 'a.md', line: 1, verdict: 'over-broad', reason: 'r1', suggestion: 's1' },
+      { file: 'a.md', line: 2, verdict: 'acceptable', reason: 'r2' },
+      { file: 'b.md', line: 3, verdict: 'not-a-rule', reason: 'r3' },
+    ],
+  });
+  assert.equal(r.verdictLog.length, 3);
+  assert.deepEqual(r.verdictLog.map((v) => v.verdict), ['over-broad', 'acceptable', 'not-a-rule']);
+  // 只有 over-broad 进 issues
+  assert.equal(r.issues.filter((i) => i.code === 'P1_OVER_BROAD').length, 1);
+});
+
+test('verdictLog 每条带原文与理由，按 file#line 精确回锚', () => {
+  const r = evaluatePrompts({
+    candidates: [
+      { file: 'a.md', line: 47, text: '来自 a 的原文' },
+      { file: 'b.md', line: 47, text: '来自 b 的原文' },
+    ],
+    oversizedFiles: [], duplicateGroups: [],
+    verdicts: [
+      { file: 'a.md', line: 47, verdict: 'acceptable', reason: 'ra' },
+      { file: 'b.md', line: 47, verdict: 'acceptable', reason: 'rb' },
+    ],
+  });
+  const a = r.verdictLog.find((v) => v.file === 'a.md');
+  const b = r.verdictLog.find((v) => v.file === 'b.md');
+  assert.equal(a.text, '来自 a 的原文');
+  assert.equal(a.reason, 'ra');
+  assert.equal(b.text, '来自 b 的原文');
+  assert.equal(b.reason, 'rb');
+});
+
+test('verdictLog 截断超长文本，避免 optimize.json 膨胀', () => {
+  const r = evaluatePrompts({
+    candidates: [{ file: 'a.md', line: 1, text: 'x'.repeat(500) }],
+    oversizedFiles: [], duplicateGroups: [],
+    verdicts: [{ file: 'a.md', line: 1, verdict: 'acceptable', reason: 'y'.repeat(800) }],
+  });
+  assert.ok(r.verdictLog[0].text.length <= 200);
+  assert.ok(r.verdictLog[0].reason.length <= 300);
+});
+
+test('没有判定时 verdictLog 为空数组', () => {
+  const r = evaluatePrompts({
+    candidates: [{ file: 'a.md', line: 1, text: 'x' }],
+    oversizedFiles: [], duplicateGroups: [], verdicts: null,
+  });
+  assert.deepEqual(r.verdictLog, []);
+});
+
+test('verdictLog 不影响 score', () => {
+  const withLog = evaluatePrompts({
+    candidates: [{ file: 'a.md', line: 1, text: 'x' }, { file: 'a.md', line: 2, text: 'y' }],
+    oversizedFiles: [], duplicateGroups: [],
+    verdicts: [
+      { file: 'a.md', line: 1, verdict: 'acceptable', reason: 'r' },
+      { file: 'a.md', line: 2, verdict: 'not-a-rule', reason: 'r' },
+    ],
+  });
+  assert.equal(withLog.score, 100); // 两条都不扣分
+  assert.equal(withLog.verdictLog.length, 2);
+});

@@ -383,3 +383,23 @@ host.addEventListener(
 本设计通过 **DOM 缩放** 方案实现 Minimap，同时 **移除 Ctrl 限制** 以支持纯滚轮缩放，为用户提供更直观、高效的地图导航体验。
 
 代码改动集中在 `req-map.js`，无需触及数据模型或后端 API，可独立测试和迭代。
+
+---
+
+## 实现状态
+
+- [x] Task 1: Minimap 基础 DOM 和样式（CSS 位于 `public/css/req-v2.css`）
+- [x] Task 2: Minimap 初始化和 Canvas 克隆（含 transform-origin bug 修复）
+- [x] Task 3: 视口框位置和尺寸同步
+- [x] Task 4: Minimap 拖拽视口框交互（含内存泄漏防护）
+- [x] Task 5: Minimap 点击跳转交互
+- [x] Task 6: 滚轮缩放优化 - 移除 Ctrl 限制
+- [x] Task 7: 工具条提示 - 标注滚轮缩放快捷键
+
+**完成日期:** 2026-08-26
+
+**改动文件:**
+- `public/js/req-map.js` — ~160 行新增/修改（Minimap 初始化、视口框同步、拖拽/点击交互、滚轮缩放）
+- `public/css/req-v2.css` — ~60 行新增（Minimap 样式、拖拽状态样式、工具条提示样式）
+
+**未提交说明:** 所有改动留在工作区，待用户确认后手动提交。

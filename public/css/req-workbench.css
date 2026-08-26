@@ -8,7 +8,7 @@
    1. 限宽 1280 + 居中 + 右侧 300px 辅助栏 —— 旧版 #reqPage 限宽 880 却没居中，
       宽屏右侧一千多像素纯空。
    2. 工程配置从横排 chips 提为配置阶段的主栏主角；文档产出后降为右栏只读树。
-   3. 问卷改模态（.rqw-mask），不再整页接管。
+   3. 问卷就地占主栏（.rqw-quiz），既不整页接管、也不弹模态。
 
    类名一律 rqw- 前缀，不复用 .req- / .rq-（两者已被旧布局与需求 v2 占用）。
    颜色全部走 app.css 的 token，不写死值。
@@ -400,6 +400,31 @@
   align-items: center;
   gap: 7px;
 }
+/* 粘贴正文时改纵向：textarea 与「保存」并排会把输入框挤成一条缝 */
+.rqw-slot-row.col {
+  flex-direction: column;
+  align-items: stretch;
+}
+.rqw-doc-ta {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 11.5px;
+  font-family: inherit;
+  line-height: 1.6;
+  resize: vertical;
+}
+.rqw-doc-ta:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.rqw-doc-ta::placeholder {
+  color: var(--faint);
+}
 .rqw-path {
   flex: 1;
   min-width: 0;
@@ -436,6 +461,14 @@
 }
 .rqw-slot-ft .ok {
   color: var(--green);
+}
+/* 需求文档的来源链接（飞书原文），点开另开一页核对 */
+.rqw-slot-ft a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.rqw-slot-ft a:hover {
+  text-decoration: underline;
 }
 .rqw-tag {
   display: inline-flex;
@@ -973,41 +1006,18 @@
   flex: none;
 }
 
-/* ══ 问卷模态 ═══════════════════════════════════════════════════════════
-   问卷是「点生成之后」才发生的事，不是独立阶段，所以做覆盖层而非整页接管：
-   底层配置页仍在，用户清楚这是生成流程中的一道闸。
+/* ══ 问卷面板 ═══════════════════════════════════════════════════════════
+   问卷题目就绪后就地占据主栏（取代配置卡的位置），不再是覆盖层——用户抱怨的
+   正是「点生成后弹一个框」。内部 mhead/mbody/mfoot 三段结构原样保留。
 
    必答规则：每题都要选，未选时「下一题」禁用。逃生口不是整体跳过，而是每题
    末尾的「不确定」—— 用户至少被迫看过一遍这些点，而看一遍本身就常常触发
-   「哦这个不对」。
+   「哦这个不对」。改内联后失去了遮罩的物理阻挡，必答只剩按钮禁用这一道。
    ══════════════════════════════════════════════════════════════════════ */
-.rqw-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  background: rgba(8, 9, 12, 0.72);
-  backdrop-filter: blur(3px);
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 5vh 20px 20px;
-  overflow-y: auto;
-  animation: rqw-fade 0.2s ease;
-}
-@keyframes rqw-fade {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-.rqw-modal {
-  width: min(680px, 100%);
+.rqw-quiz {
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--panel);
-  box-shadow: 0 26px 80px rgba(0, 0, 0, 0.62);
   overflow: hidden;
   animation: rqw-pop 0.26s cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -1056,34 +1066,6 @@
 }
 .rqw-mbody {
   padding: 17px 20px 20px;
-}
-/* 题目是后端异步产出的（quiz 202 + 轮询 ready），点「生成」到题目出现之间有
-   十几秒空档，必须有等待态，否则模态弹出来是空的 */
-.rqw-qload {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 13px;
-  padding: 44px 20px 46px;
-  text-align: center;
-}
-.rqw-qload .sp {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
-  animation: rqw-spin 0.8s linear infinite;
-}
-.rqw-qload .t {
-  font-size: 13px;
-  color: var(--text);
-}
-.rqw-qload .s {
-  font-size: 11.5px;
-  color: var(--faint);
-  line-height: 1.6;
-  max-width: 380px;
 }
 /* 进度分段而非连续条：一眼看出总共几题、答了几题、哪几题是蒙的 */
 .rqw-qsegs {
@@ -1147,6 +1129,9 @@
   background: var(--bg);
   cursor: pointer;
   font-family: inherit;
+  /* button 不继承父级 color，UA 默认 buttontext 是黑的：漏掉这行，选项标题
+     （.rqw-qlab 自身不设色）就会在深色卡片上黑底黑字，只剩带 muted 的描述行可读 */
+  color: var(--text);
   transition: 0.15s;
 }
 .rqw-qopt:hover {
@@ -1308,4 +1293,71 @@
 }
 .rqw-mfoot .req.blocked {
   color: var(--amber);
+}
+
+/* ---- docgen busy bar：停止按钮 + 实时日志 ---- */
+.docgen-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+/* 停止按钮：幽灵胶囊风格。默认低调（accent 半透明描边），与橙色 busy bar 协调；
+   hover 转红提示「这是中断操作」。相对定位 + z-index 压过 .rqw-bar.busy::after 的扫光层，
+   否则按钮会被扫光动画蒙住一层。 */
+.rqw-btn-small {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  padding: 4px 13px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent-hi);
+  border: 1px solid var(--accent-soft);
+  background: transparent;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1.5;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.rqw-btn-small:hover:not(:disabled) {
+  color: var(--red);
+  border-color: rgba(229, 104, 122, 0.55);
+  background: rgba(229, 104, 122, 0.1);
+}
+
+.rqw-btn-small:active:not(:disabled) {
+  background: rgba(229, 104, 122, 0.16);
+}
+
+.rqw-btn-small:disabled {
+  color: var(--faint);
+  border-color: var(--border-soft);
+  cursor: not-allowed;
+}
+
+.docgen-livelog {
+  position: relative;
+  z-index: 1;
+  margin-top: 8px;
+  padding: 5px 8px;
+  background: var(--accent-extra-soft);
+  border-left: 2px solid var(--accent-soft);
+  border-radius: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* liveLog 后端保证始终为单行（onText 提取最后一行），nowrap 截断超长行 */
+.docgen-livelog code {
+  font-family: monospace;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+  max-width: 100%;
 }

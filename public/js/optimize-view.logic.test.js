@@ -38,6 +38,57 @@ test('从报告生成维度列表,带上可勾选状态', () => {
   assert.equal(list.find((d) => d.key === 'prompts').selectable, false);
 });
 
+test('analyzing 维度转圈、不可勾选、不显示分数', () => {
+  const list = dimListFrom({
+    dims: { prompts: { score: null, status: 'analyzing', issues: [], reason: 'AI 分析中…' } },
+  });
+  const prompts = list.find((d) => d.key === 'prompts');
+  assert.equal(prompts.busy, true);
+  assert.equal(prompts.selectable, false);
+  assert.equal(prompts.scoreText, '--');
+});
+
+test('非 analyzing 维度 busy 为 false', () => {
+  const list = dimListFrom({ dims: { map: { score: 80, status: 'done', issues: [] } } });
+  assert.ok(list.every((d) => d.busy === false));
+});
+
+test('partial 维度显示分数但标注未深度分析,且不可勾选', () => {
+  const list = dimListFrom({
+    dims: { prompts: { score: 42, status: 'partial', issues: [], reason: 'LLM 分析未完成' } },
+  });
+  const prompts = list.find((d) => d.key === 'prompts');
+  assert.equal(prompts.scoreText, '42');
+  assert.equal(prompts.selectable, false); // 结论不完整,不该参与一键优化
+  assert.equal(prompts.busy, false);
+  assert.ok(prompts.note.includes('未深度分析'), `note 应标注未深度分析,实际:${prompts.note}`);
+});
+
+test('partial 但没分数时仍显示 --', () => {
+  // 注释维度的 partial 是 score:null（提示词维度则给保守占位分），两种都要能渲染
+  const list = dimListFrom({
+    dims: { comments: { score: null, status: 'partial', issues: [], reason: 'LLM 分析未完成' } },
+  });
+  const comments = list.find((d) => d.key === 'comments');
+  assert.equal(comments.scoreText, '--');
+  assert.ok(comments.note.includes('未深度分析'));
+});
+
+test('done 维度没有附加标注', () => {
+  const list = dimListFrom({ dims: { map: { score: 80, status: 'done', issues: [] } } });
+  assert.equal(list.find((d) => d.key === 'map').note, '');
+});
+
+test('error 维度不可勾选且不转圈', () => {
+  const list = dimListFrom({
+    dims: { comments: { score: null, status: 'error', issues: [], reason: '分析失败：超时' } },
+  });
+  const comments = list.find((d) => d.key === 'comments');
+  assert.equal(comments.selectable, false);
+  assert.equal(comments.busy, false);
+  assert.equal(comments.reason, '分析失败：超时');
+});
+
 test('score 为 0 时不能显示成 --', () => {
   // 0 分是合法分数（比如项目根本没有 CLAUDE.md），不是「无结果」
   const list = dimListFrom({ dims: { map: { score: 0, status: 'done', issues: [] } } });

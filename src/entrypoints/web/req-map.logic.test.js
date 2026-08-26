@@ -86,7 +86,7 @@ test('normalizeMap 保留模型显式声明的 new 页面', () => {
   assert.equal(m.pages[0].state, 'new');
 });
 
-test('normalizeMap 丢弃指向不存在页面的孤儿边', () => {
+test('normalizeMap 边端点按 id 兜底时，丢弃指向不存在页面的孤儿边', () => {
   const m = normalizeMap({
     pages: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }],
     edges: [{ from: 'a', to: 'b' }, { from: 'a', to: 'ghost' }, { from: 'nope', to: 'b' }],
@@ -94,7 +94,7 @@ test('normalizeMap 丢弃指向不存在页面的孤儿边', () => {
   assert.equal(m.edges.length, 1);
 });
 
-test('normalizeMap 去重同向重复边', () => {
+test('normalizeMap 边端点按 id 兜底时，去重同向重复边', () => {
   const m = normalizeMap({
     pages: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }],
     edges: [{ from: 'a', to: 'b', label: '点1' }, { from: 'a', to: 'b', label: '点2' }],
@@ -102,9 +102,45 @@ test('normalizeMap 去重同向重复边', () => {
   assert.equal(m.edges.length, 1);
 });
 
-test('normalizeMap 丢弃自环边', () => {
+test('normalizeMap 边端点按 id 兜底时，丢弃自环边', () => {
   const m = normalizeMap({ pages: [{ id: 'a', name: 'A' }], edges: [{ from: 'a', to: 'a' }] });
   assert.equal(m.edges.length, 0);
+});
+
+test('normalizeMap 按页面 name 解析边端点，落盘统一存 id', () => {
+  // 契约要求 LLM 用 name（mapOutputContract），而 id 是本地自动编号 —— 这正是原 bug 现场
+  const m = normalizeMap({
+    pages: [{ name: '游戏广场' }, { name: '今晚吃什么转盘' }],
+    edges: [{ from: '游戏广场', to: '今晚吃什么转盘', label: '点击 今晚吃什么' }],
+  });
+  const [square, wheel] = m.pages;
+  assert.deepEqual(m.edges, [{ from: square.id, to: wheel.id, label: '点击 今晚吃什么' }]);
+});
+
+test('normalizeMap 边端点 name / id 混用都能解析', () => {
+  const m = normalizeMap({
+    pages: [{ id: 'a', name: '广场' }, { id: 'b', name: '转盘' }],
+    edges: [{ from: '广场', to: 'b' }],
+  });
+  assert.deepEqual(m.edges.map((e) => [e.from, e.to]), [['a', 'b']]);
+});
+
+test('normalizeMap 跨表达方式的重复边只留首条', () => {
+  // 去重键必须用解析后的 id，否则同一对页面「一次 name 一次 id」会在画布上画出重影
+  const m = normalizeMap({
+    pages: [{ id: 'a', name: '广场' }, { id: 'b', name: '转盘' }],
+    edges: [{ from: '广场', to: '转盘', label: '点击' }, { from: 'a', to: 'b', label: '再点' }],
+  });
+  assert.equal(m.edges.length, 1);
+  assert.equal(m.edges[0].label, '点击');
+});
+
+test('normalizeMap 同名页面的边指向首次出现的那个', () => {
+  const m = normalizeMap({
+    pages: [{ id: 'a', name: '重名' }, { id: 'b', name: '重名' }, { id: 'c', name: '目标' }],
+    edges: [{ from: '重名', to: '目标' }],
+  });
+  assert.deepEqual(m.edges.map((e) => [e.from, e.to]), [['a', 'c']]);
 });
 
 test('normalizeMap 输入完全非法时返回空地图而不抛', () => {
@@ -296,4 +332,11 @@ test('markFreshPoints 全新页面上的点全部标为本轮变化', () => {
   const next = normalizeMap({ pages: [{ name: '新弹窗', points: [{ title: '范围选择', type: 'add' }] }] });
   markFreshPoints(prev, next);
   assert.equal(next.pages[0].points[0].fresh, true);
+});
+
+test('地图输出契约把 edges 列为硬性要求', () => {
+  const p = buildMapgenPrompt({});
+  for (const kw of ['入口页', '至少要有一条入边', '全部下钻链路']) {
+    assert.ok(p.includes(kw), '契约缺少要求：' + kw);
+  }
 });

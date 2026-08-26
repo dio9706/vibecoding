@@ -8,6 +8,7 @@
  * 不用 innerHTML 拼接——骨架用 innerHTML，数据用 DOM API。
  */
 import { layoutMap } from './req-map-layout.logic.js';
+import { viewportBox, panFromViewport } from './req-map-minimap.logic.js';
 
 const SYM = { add: '＋', mod: '~', del: '－' };
 const TYPE_CN = { add: '新增逻辑点', mod: '修改逻辑点', del: '删除逻辑点' };
@@ -19,6 +20,15 @@ function el(tag, cls, text) {
   if (cls) n.className = cls;
   if (text != null) n.textContent = text;
   return n;
+}
+
+/** 三次贝塞尔在 t 处的点。只有连线标签定位这一个消费者，所以不单独开 logic 文件。 */
+function bezierAt(p0, p1, p2, p3, t) {
+  const u = 1 - t;
+  return {
+    x: u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
+    y: u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y,
+  };
 }
 
 /**
@@ -44,11 +54,14 @@ export function mountMap(container, opts) {
     panY: 0,
     annots: { ...(map.annots || {}) },
     saveTimer: null,
+    minimapScale: 1,                    // 鸟瞰图缩略比，由 viewportBox 算出后缓存给拖拽用
+    minimapInteractionsAttached: false, // window 级监听只绑一次
   };
 
   container.innerHTML =
     '<div class="rq-map">' +
     '<div class="rq-tools">' +
+    '<span class="rq-tip-icon" title="鼠标滚轮缩放">🔍</span>' +
     '<button class="rq-fchip rq-f-add on" data-f="add">＋ 新增 <b>0</b></button>' +
     '<button class="rq-fchip rq-f-mod on" data-f="mod">~ 修改 <b>0</b></button>' +
     '<button class="rq-fchip rq-f-del on" data-f="del">－ 删除 <b>0</b></button>' +
@@ -58,6 +71,10 @@ export function mountMap(container, opts) {
     '<span class="rq-zoom"><button class="rq-z-out">−</button><i class="rq-z-val">100%</i>' +
     '<button class="rq-z-in">＋</button><button class="rq-z-fit">适应</button></span>' +
     '<span class="rq-ver"></span>' +
+    '</div>' +
+    '<div class="rq-minimap">' +
+    '<div class="rq-minimap-content"></div>' +
+    '<div class="rq-minimap-viewport"></div>' +
     '</div>' +
     '<div class="rq-canvas-host">' +
     '<div class="rq-canvas"><svg class="rq-edges"></svg><div class="rq-nodes"></div></div>' +
@@ -79,6 +96,113 @@ export function mountMap(container, opts) {
   const foot = root.querySelector('.rq-foot');
 
   let layout = layoutMap(map);
+
+  // ---------- Minimap ----------
+  let mmDrag = null; // Minimap 拖拽状态
+
+  /** 当前视口在鸟瞰图坐标系里的框（含缩略比）。三处消费者共用，避免尺寸常量到处硬编码。 */
+  function mmBox() {
+    return viewportBox({
+      panX: state.panX,
+      panY: state.panY,
+      zoom: state.zoom,
+      hostW: host.clientWidth,
+      hostH: host.clientHeight,
+      contentW: layout.size.w,
+      contentH: layout.size.h,
+    });
+  }
+
+  function initMinimap() {
+    const mmContent = root.querySelector('.rq-minimap-content');
+    mmContent.innerHTML = '';
+
+    // 克隆体必须中和 transform：cloneNode 会把主画布的内联 translate/scale 一起带过来，
+    // 外层再叠一次缩略比，缩略图就跟着主画布跑了（原 bug：鸟瞰图里内容被推出可视区）。
+    const canvasClone = canvas.cloneNode(true);
+    canvasClone.style.transform = 'none';
+    mmContent.appendChild(canvasClone);
+
+    // 以左上角为基准缩放，避免默认居中缩放把内容顶出可视区
+    mmContent.style.transformOrigin = '0 0';
+    const b = mmBox();
+    state.minimapScale = b.scale;
+    mmContent.style.transform = 'scale(' + b.scale + ')';
+
+    updateMinimapViewport();
+
+    // 只在首次绑定，避免浮层反复开关后堆积 window 级监听
+    if (!state.minimapInteractionsAttached) {
+      attachMinimapInteractions();
+      state.minimapInteractionsAttached = true;
+    }
+  }
+
+  function updateMinimapViewport() {
+    const vp = root.querySelector('.rq-minimap-viewport');
+    const b = mmBox();
+    state.minimapScale = b.scale;
+    vp.style.left = b.x + 'px';
+    vp.style.top = b.y + 'px';
+    vp.style.width = Math.max(0, b.w) + 'px';
+    vp.style.height = Math.max(0, b.h) + 'px';
+  }
+
+  function attachMinimapInteractions() {
+    const minimap = root.querySelector('.rq-minimap');
+    const mmViewport = root.querySelector('.rq-minimap-viewport');
+
+    // ---- 拖拽视口框 ----
+    mmViewport.addEventListener('mousedown', (e) => {
+      e.stopPropagation();
+      mmDrag = {
+        x: e.clientX,
+        y: e.clientY,
+        vx: parseFloat(mmViewport.style.left) || 0,
+        vy: parseFloat(mmViewport.style.top) || 0,
+      };
+      mmViewport.classList.add('dragging');
+    });
+
+    const onMinimapMove = (e) => {
+      if (!mmDrag) return;
+      // 反推 pan 走 panFromViewport：这里原先是 panX = vx / scale（正相关且漏了 zoom），
+      // 所以「视口框往右拖，画面往左滚」。互逆关系由 req-map-minimap.logic 的单测兜着。
+      const p = panFromViewport({
+        vx: mmDrag.vx + (e.clientX - mmDrag.x),
+        vy: mmDrag.vy + (e.clientY - mmDrag.y),
+        zoom: state.zoom,
+        scale: state.minimapScale,
+      });
+      state.panX = p.panX;
+      state.panY = p.panY;
+      applyTransform(); // 内部会调 updateMinimapViewport()
+    };
+
+    const onMinimapUp = () => {
+      mmDrag = null;
+      mmViewport.classList.remove('dragging');
+    };
+
+    window.addEventListener('mousemove', onMinimapMove);
+    window.addEventListener('mouseup', onMinimapUp);
+
+    // ---- 点击鸟瞰图空白处：把该点作为视口中心 ----
+    minimap.addEventListener('click', (e) => {
+      if (e.target === mmViewport || mmViewport.contains(e.target)) return; // 框上的点击交给拖拽
+      const rect = minimap.getBoundingClientRect();
+      const b = mmBox();
+      const p = panFromViewport({
+        vx: e.clientX - rect.left - b.w / 2,
+        vy: e.clientY - rect.top - b.h / 2,
+        zoom: state.zoom,
+        scale: b.scale,
+      });
+      state.panX = p.panX;
+      state.panY = p.panY;
+      applyTransform();
+    });
+  }
 
   // ---------- 版本切换 ----------
   if (versions.length > 1) {
@@ -127,6 +251,7 @@ export function mountMap(container, opts) {
     canvas.style.transform =
       'translate(' + state.panX + 'px,' + state.panY + 'px) scale(' + state.zoom + ')';
     root.querySelector('.rq-z-val').textContent = Math.round(state.zoom * 100) + '%';
+    updateMinimapViewport();
   }
   // 工具条与标注汇总条都是浮在画布上的，「适应」时要把它们的高度让出来，
   // 否则第一层节点会被工具条压住（缩得越小压得越狠）
@@ -139,7 +264,7 @@ export function mountMap(container, opts) {
     state.zoom = Math.max(ZOOM_MIN, Math.min(1, Math.min((w - 40) / layout.size.w, usableH / layout.size.h)));
     state.panX = Math.max(0, (w - layout.size.w * state.zoom) / 2);
     state.panY = TOP_INSET;
-    applyTransform();
+    applyTransform(); // 内部已含 updateMinimapViewport()
   }
   root.querySelector('.rq-z-in').addEventListener('click', () => {
     state.zoom = Math.min(ZOOM_MAX, state.zoom + 0.1);
@@ -152,10 +277,12 @@ export function mountMap(container, opts) {
   root.querySelector('.rq-z-fit').addEventListener('click', fitView);
 
   let drag = null;
-  canvas.addEventListener('mousedown', (e) => {
+  // 监听在 host 而非 canvas：缩放后 canvas 视觉尺寸缩小，
+  // host 背景（点网格）区域应同样可拖拽，不能只绑在 canvas 上
+  host.addEventListener('mousedown', (e) => {
     if (e.target.closest('.rq-node')) return; // 节点内不触发平移，否则点不中逻辑点
     drag = { x: e.clientX, y: e.clientY, px: state.panX, py: state.panY };
-    canvas.classList.add('grabbing');
+    host.classList.add('grabbing');
   });
   const onMove = (e) => {
     if (!drag) return;
@@ -165,17 +292,17 @@ export function mountMap(container, opts) {
   };
   const onUp = () => {
     drag = null;
-    canvas.classList.remove('grabbing');
+    host.classList.remove('grabbing');
   };
   window.addEventListener('mousemove', onMove);
   window.addEventListener('mouseup', onUp);
   host.addEventListener(
     'wheel',
     (e) => {
-      if (!e.ctrlKey && !e.metaKey) return; // 不劫持普通滚动
       e.preventDefault();
       state.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, state.zoom - Math.sign(e.deltaY) * 0.08));
       applyTransform();
+      // applyTransform() 内部已包含 updateMinimapViewport() 调用
     },
     { passive: false },
   );
@@ -192,6 +319,7 @@ export function mountMap(container, opts) {
   // ---------- 节点 ----------
   function renderNodes() {
     nodesBox.innerHTML = '';
+    const entrySet = new Set(layout.entries || []);
     for (const page of map.pages) {
       const pts = visiblePoints(page);
       const counts = { add: 0, mod: 0, del: 0 };
@@ -210,6 +338,8 @@ export function mountMap(container, opts) {
       const head = el('div', 'rq-nhead');
       const top = el('div', 'rq-ntop');
       top.appendChild(el('span', 'rq-nname', page.name));
+      // 「入口」放在最前：先告诉用户从哪进来，再说这页是新增还是有稿
+      if (entrySet.has(page.id)) top.appendChild(el('span', 'rq-nflag rq-entry', '入口'));
       if (page.state === 'new') top.appendChild(el('span', 'rq-nflag', '新页面'));
       if (page.figma) top.appendChild(el('span', 'rq-nflag rq-figma', page.restoredAt ? '🎨 已还原' : '🎨 已挂稿'));
       head.appendChild(top);
@@ -254,53 +384,75 @@ export function mountMap(container, opts) {
     canvas.style.width = layout.size.w + 'px';
     canvas.style.height = layout.size.h + 'px';
     drawEdges();
+    initMinimap(); // 每次节点重绘后同步 Minimap
   }
 
   function drawEdges() {
     svg.setAttribute('width', layout.size.w);
     svg.setAttribute('height', layout.size.h);
-    svg.innerHTML = '';
+    // 两个 marker：常态 / 高亮。marker 内的 path 不能被 `.rq-edges > path` 的 fill:none 命中，
+    // 所以边线样式用直接子选择器，见 req-v2.css。
+    svg.innerHTML =
+      '<defs>' +
+      '<marker id="rq-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">' +
+      '<path d="M0 0 L8 4 L0 8 z" class="rq-ahead"></path></marker>' +
+      '<marker id="rq-arrow-hl" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto">' +
+      '<path d="M0 0 L8 4 L0 8 z" class="rq-ahead-hl"></path></marker>' +
+      '</defs>';
+
     const NS = 'http://www.w3.org/2000/svg';
+    const layerOf = layout.layerOf || new Map();
+    const selPage = state.sel?.kind === 'page' ? state.sel.id : null;
+
     for (const e of map.edges || []) {
       const a = layout.positions[e.from];
       const b = layout.positions[e.to];
       if (!a || !b) continue;
       const w = layout.nodeW;
-      const dx = b.x + w / 2 - (a.x + w / 2);
-      const dy = b.y + b.h / 2 - (a.y + a.h / 2);
+
+      // 走向按**层级关系**判，不按 |dx| vs |dy|：hub 连最左侧子页时 |dx| 会大于 |dy|，
+      // 按大小判会误判成横向，画出一条绕到侧面的怪线。
       let p1;
       let p2;
       let c1;
       let c2;
-      if (Math.abs(dx) > Math.abs(dy)) {
-        // 横向：右边 → 左边
-        p1 = { x: a.x + w, y: a.y + 34 };
-        p2 = { x: b.x, y: b.y + 34 };
-        const m = Math.max(40, Math.abs(p2.x - p1.x) / 2);
-        c1 = { x: p1.x + m, y: p1.y };
-        c2 = { x: p2.x - m, y: p2.y };
-      } else {
-        // 纵向：下边 → 上边
+      if ((layerOf.get(e.to) ?? 0) > (layerOf.get(e.from) ?? 0)) {
+        // 纵向：下沿 → 上沿
         p1 = { x: a.x + w / 2, y: a.y + a.h };
         p2 = { x: b.x + w / 2, y: b.y };
         const m = Math.max(30, Math.abs(p2.y - p1.y) / 2);
         c1 = { x: p1.x, y: p1.y + m };
         c2 = { x: p2.x, y: p2.y - m };
+      } else {
+        // 同层横向。目标在左时要从左沿出、右沿进，否则线会从节点内部穿出去。
+        const rightward = b.x >= a.x;
+        p1 = { x: rightward ? a.x + w : a.x, y: a.y + 34 };
+        p2 = { x: rightward ? b.x : b.x + w, y: b.y + 34 };
+        const m = Math.max(40, Math.abs(p2.x - p1.x) / 2) * (rightward ? 1 : -1);
+        c1 = { x: p1.x + m, y: p1.y };
+        c2 = { x: p2.x - m, y: p2.y };
       }
+
+      const hit = !!selPage && (e.from === selPage || e.to === selPage);
       const path = document.createElementNS(NS, 'path');
-      path.setAttribute('d', 'M' + p1.x + ' ' + p1.y + ' C' + c1.x + ' ' + c1.y + ' ' + c2.x + ' ' + c2.y + ' ' + p2.x + ' ' + p2.y);
+      path.setAttribute(
+        'd',
+        'M' + p1.x + ' ' + p1.y + ' C' + c1.x + ' ' + c1.y + ' ' + c2.x + ' ' + c2.y + ' ' + p2.x + ' ' + p2.y,
+      );
+      path.setAttribute('data-from', e.from);
+      path.setAttribute('data-to', e.to);
+      if (selPage) path.setAttribute('class', hit ? 'hl' : 'dim');
+      path.setAttribute('marker-end', hit ? 'url(#rq-arrow-hl)' : 'url(#rq-arrow)');
       svg.appendChild(path);
-      const dot = document.createElementNS(NS, 'circle');
-      dot.setAttribute('cx', p2.x);
-      dot.setAttribute('cy', p2.y);
-      dot.setAttribute('r', 3);
-      svg.appendChild(dot);
+
       if (e.label) {
+        // 标签从中点挪到贴近目标端（t≈0.75）：hub 有多条出边时，中点会全挤在同一处
+        const q = bezierAt(p1, c1, c2, p2, 0.75);
         const t = document.createElementNS(NS, 'text');
-        t.setAttribute('x', (p1.x + p2.x) / 2);
-        t.setAttribute('y', (p1.y + p2.y) / 2 - 5);
+        t.setAttribute('x', q.x);
+        t.setAttribute('y', q.y - 5);
         t.setAttribute('text-anchor', 'middle');
-        t.setAttribute('class', 'rq-elabel');
+        t.setAttribute('class', 'rq-elabel' + (selPage ? (hit ? ' hl' : ' dim') : ''));
         t.textContent = e.label;
         svg.appendChild(t);
       }
@@ -441,6 +593,14 @@ export function mountMap(container, opts) {
 
     dBody.appendChild(buildFigmaSection(page));
 
+    const edges = map.edges || [];
+    dBody.appendChild(
+      buildLinkSection('从哪来', edges.filter((e) => e.to === id).map((e) => ({ pid: e.from, label: e.label }))),
+    );
+    dBody.appendChild(
+      buildLinkSection('去哪', edges.filter((e) => e.from === id).map((e) => ({ pid: e.to, label: e.label }))),
+    );
+
     const ps = section('本页逻辑点 ' + (page.points || []).length);
     const list = el('div', 'rq-jump');
     for (const pt of page.points || []) {
@@ -454,6 +614,27 @@ export function mountMap(container, opts) {
     ps.appendChild(list);
     dBody.appendChild(ps);
     setDrawerOpen(true);
+  }
+
+  /**
+   * 上下游页面列表。链路是给非技术人员看的，所以行文本是「页面名 · 跳转动作」而不是 id。
+   * 点击切到目标页抽屉，顺带把画布高亮也带过去（openPage 会重绘连线）。
+   */
+  function buildLinkSection(label, items) {
+    const s = section(label);
+    const list = el('div', 'rq-jump');
+    for (const it of items) {
+      const target = map.pages.find((p) => p.id === it.pid);
+      if (!target) continue;
+      const row = el('div', 'rq-jump-item');
+      row.appendChild(el('span', null, target.name));
+      if (it.label) row.appendChild(el('i', 'rq-elink', '· ' + it.label));
+      row.addEventListener('click', () => openPage(target.id));
+      list.appendChild(row);
+    }
+    if (!list.childElementCount) list.appendChild(el('div', 'rq-nempty', '无'));
+    s.appendChild(list);
+    return s;
   }
 
   function buildFigmaSection(page) {

@@ -5,8 +5,12 @@ import { confirmDialog, promptDialog, textareaDialog } from './ui.js';
 import { loadConvs } from './conv-store.js';
 import { openConv, createReqConv, isConvRunning, getCurrentConvId, sendMessageProgrammatically } from './chat.js';
 import { convSetTitle, convDelete } from './conv-store.js';
-import { startGenerateFlow, resetQuizState } from './req-quiz.js';
+import { startGenerateFlow, resetQuizState, renderQuizPanel, runDocgenDirect } from './req-quiz.js';
 import { mountMap } from './req-map.js';
+import {
+  iconEl, setIconText, PIN_ICON_SVG, FRONTEND_ICON_SVG, BACKEND_ICON_SVG, DOC_ICON_SVG,
+  ATTACH_ICON_SVG, REFRESH_ICON_SVG, WAITING_ICON_SVG, SETTINGS_ICON_SVG, EDIT_ICON_SVG,
+} from './icons.js';
 
 let _showView = () => {};
 
@@ -44,6 +48,17 @@ let primeFiles = []; // [{ name, path: string|null }]
 let primeSaveTimer = null;
 let primeSavedAt = 0; // 上次保存成功的时刻，用于「已保存」微提示
 let archiveNoteDraft = ''; // 归档备注草稿：同 supplementDraftText 思路，busy/轮询触发的整页重建不清空
+// 需求文档槽位的就地编辑态：null=展示已配置的文档，'link'|'text'=编辑中。
+// 与上面几个草稿同理提到模块级——busy 轮询每 3s 触发整页重建，若只活在渲染函数里，
+// 用户正在输入链接或粘贴正文时会被一次轮询打回展示态、输入全丢。
+let docSlotEdit = null;
+let docSlotLinkDraft = '';
+let docSlotTextDraft = '';
+let cfgSummaryEditing = false; // 文档产出后，右栏配置卡是否处于就地编辑态
+// 问卷面板是否占据主栏。点「生成开发文档」时置 true，它同时也是「这一轮生成由用户主动发起」
+// 的标记——出题结束的 busy 下降沿据此决定是开面板还是走无歧义降级，不会去接管别处触发的 quizgen。
+let quizInlineOpen = false;
+let wasBusyKind = null; // 上一次已知的 busy.kind：busy 清空后就取不到了，只能提前记下
 
 // ---- 优化汇总（retro）进度 ----
 // map-reduce 全程在前端编排，req.busy 永远不会被写（busy 只由服务端系统任务落盘），
@@ -248,7 +263,12 @@ function renderReqList() {
     el.innerHTML = '';
     return;
   }
-  el.hidden = false;
+  // 只在「需求」tab 激活时才取消隐藏——显隐由 initSidebarSwitch 统一管控，
+  // 此处若无条件 el.hidden = false，轮询/rerenderLocal 会覆盖对话模式的隐藏状态，
+  // 导致需求列表和对话列表同时出现在侧边栏。
+  if (document.querySelector('.switch-btn[data-target="req"]')?.classList.contains('active')) {
+    el.hidden = false;
+  }
   el.innerHTML = '';
   const frag = document.createDocumentFragment();
 
@@ -363,7 +383,7 @@ function makeReqRow(r) {
     const pinIc = document.createElement('span');
     pinIc.className = 'req-pin-ic';
     pinIc.title = '已钉住';
-    pinIc.innerHTML = '<svg viewBox="0 0 1024 1024" width="11" height="11" fill="currentColor"><path d="M574.4 192l-64 192H320l64-64-128-192 192 64-64 64 192-64zM832 576L640 384l-128 192 128 64-192 320 64-256-64-128 192 64z"/></svg>';
+    pinIc.innerHTML = PIN_ICON_SVG;
     row.appendChild(pinIc);
   }
   const title = document.createElement('span');
@@ -416,15 +436,6 @@ function makeSessionRow(session, reqId) {
   indent.style.width = '24px';
   row.appendChild(indent);
 
-  // Kind 标记
-  const kindIc = document.createElement('span');
-  kindIc.className = 'req-session-kind-ic';
-  kindIc.title = session.kind;
-  if (session.kind === 'main') kindIc.textContent = '⚡';
-  else if (session.kind === 'retro') kindIc.textContent = '🔍';
-  else kindIc.textContent = '💬';
-  row.appendChild(kindIc);
-
   // 标题
   const title = document.createElement('span');
   title.className = 'req-session-title';
@@ -449,7 +460,7 @@ function makeSessionRow(session, reqId) {
   renameBtn.type = 'button';
   renameBtn.className = 'req-session-menu-btn';
   renameBtn.title = '重命名';
-  renameBtn.textContent = '✎';
+  setIconText(renameBtn, EDIT_ICON_SVG);
   renameBtn.onclick = (e) => {
     e.stopPropagation();
     renameSession(reqId, session.convId, session.title);
@@ -725,7 +736,7 @@ function applyFetchedReq(id, data, { allowNav = false } = {}) {
   // 把它合成为 busy 展示，busy 条 / 按钮禁用 / 3s 轮询全部立即生效——否则 202 后立刷拿到
   // busy=null，页面静止在旧态，用户重开需求才能看到「生成中」。
   if (data.phase === 'review' && !data.busy && data.queued) {
-    data.busy = { kind: 'docgen', startedAt: null };
+    data.busy = { kind: data.queuedKind || 'docgen', startedAt: null };
   }
   const isFreshOpen = id !== currentReqId;
   if (isFreshOpen) {
@@ -743,6 +754,13 @@ function applyFetchedReq(id, data, { allowNav = false } = {}) {
       primeSaveTimer = null;
     }
     resetQuizState(); // 换需求：上一份问卷的答案与游标不该跟过来
+    // 同理，配置槽位的就地编辑态、草稿与问卷面板都属于「上一个需求」，不能跟着翻过来
+    docSlotEdit = null;
+    docSlotLinkDraft = '';
+    docSlotTextDraft = '';
+    cfgSummaryEditing = false;
+    quizInlineOpen = false;
+    wasBusyKind = null;
     // 切到另一个需求：旧需求的 busy 轮询立即失效。不清掉的话 busyTimer 仍非空，
     // 下面「data.busy && !busyTimer」会误判为「已在轮询」而跳过新需求的轮询重建——
     // 双 busy 需求 A→B 场景下，B 将永远等不到轮询（A 的旧定时器只会在下一拍自证失效后清空，
@@ -778,12 +796,62 @@ function applyFetchedReq(id, data, { allowNav = false } = {}) {
   _showView('req');
   if (wasBusy && !data.busy) docOverride = null; // 生成刚结束：回到最新版展示
   wasBusy = !!data.busy;
+  settleQuizgen(data);
   renderReqPage(data);
   if (data.busy && !busyTimer) startBusyPolling(id);
   if (!data.busy && busyTimer) {
     clearInterval(busyTimer);
     busyTimer = null;
   }
+}
+
+/**
+ * quizgen 的收尾判定，挂在 busy 的下降沿上。
+ *
+ * 这是「出题结束了没有」的**唯一**判据：runQuizGen 的两个终态（成功写 quiz.status='ready'，
+ * 失败写 quiz=null）都会清 busy。早先前端另用一套 2 分钟超时来判，一超时就把还在跑的
+ * quizgen 当成「没找出歧义」，丢掉问卷去发 docgen，而那时后端 busy 未清、docgen 被 409
+ * 挡回——界面转两分钟后一切照旧，后台却还在跑。没有超时就没有这个误判。
+ *
+ * 只在 quizInlineOpen 为真时接管：别处触发的 quizgen 不该把用户拽进问卷。
+ */
+function settleQuizgen(data) {
+  const prevKind = wasBusyKind;
+  wasBusyKind = data.busy?.kind || null;
+  if (prevKind !== 'quizgen' || data.busy || !quizInlineOpen) return;
+  if (data.quiz?.status === 'ready' && data.quiz.questions?.length) return; // 有题：面板自然渲染出来
+  // 跑完了却没题 = 没找出歧义或解析失败。这不该挡住生成，直接跳到读代码。
+  quizInlineOpen = false;
+  runDocgenDirect(data.id, () => loadAndRenderReq(data.id), '未发现明显歧义，直接生成开发文档');
+}
+
+/**
+ * 「生成开发文档」的统一入口。占面板 → 发起 → 立刻刷新页面，其余交给 busy 轮询。
+ *
+ * 出题没起来时要把面板收回来，否则 quizInlineOpen 会一直挂着，下一次 quizgen 结束时
+ * 会被误认成「这一轮是用户发起的」而自动弹出问卷。
+ */
+async function beginGenerate(req, forceNewQuiz) {
+  const r = await startGenerateFlow({
+    req,
+    forceNewQuiz,
+    onRefresh: () => loadAndRenderReq(req.id),
+    onOpenPanel: () => {
+      quizInlineOpen = true;
+      renderReqPage(currentReq);
+    },
+  });
+  if (r?.failed) {
+    quizInlineOpen = false;
+    renderReqPage(currentReq);
+  }
+}
+
+/** 收回问卷面板（取消作答、或答完提交后）。 */
+function closeQuizPanel() {
+  quizInlineOpen = false;
+  resetQuizState();
+  if (currentReqId) loadAndRenderReq(currentReqId);
 }
 
 /**
@@ -1018,6 +1086,13 @@ function renderMainCol(req) {
   const busyBar = renderBusyBar(req);
   if (busyBar) col.appendChild(busyBar);
 
+  // 问卷就绪且用户正走在生成流程上：它是此刻唯一该做的事，占据主栏。
+  // 出题期间走不到这里（还没有题），主栏仍是配置卡 + 顶部 busy 条。
+  if (quizInlineOpen && req.quiz?.status === 'ready' && req.quiz.questions?.length) {
+    col.appendChild(renderQuizPanel(req, { onClose: closeQuizPanel, onRefresh: () => loadAndRenderReq(req.id) }));
+    return col;
+  }
+
   if (hasDevDoc(req)) {
     col.appendChild(renderReportArea(req));
     // 补充说明是「对已有文档提调整」，没有文档时提交没有意义。
@@ -1039,8 +1114,8 @@ function renderMainCol(req) {
  * 什么、开发还是只读、完整路径是什么。这里每槽一张子卡把这些摊开——它们正是
  * 「文档会不会生成错」的判断依据。
  *
- * 路径与需求文档的编辑仍走 openConfigModal（那里有目录选择器与文件上传，已验证），
- * 只有读写模式开关就地生效：它高频、低风险，为它开一次弹层不划算。
+ * 三个槽位全部就地编辑，不再有配置弹层：工程目录直接调系统文件夹框，需求文档在槽位内
+ * 切换「在线链接 / 粘贴文本 / 上传文件」。留一个弹层等于两套并行的配置写法，行为迟早走偏。
  */
 function renderConfigCard(req) {
   const card = e('div', 'rqw-cfg');
@@ -1049,11 +1124,6 @@ function renderConfigCard(req) {
   const hd = e('div', 'rqw-cfg-hd');
   hd.appendChild(e('h4', null, '工程配置'));
   hd.appendChild(e('span', 'cnt', `${dirs + (req.reqDoc ? 1 : 0)} / 3 已配置`));
-  hd.appendChild(e('span', 'gap'));
-  const editAll = e('button', 'rqw-iconbtn', '✏️ 编辑全部');
-  editAll.type = 'button';
-  editAll.onclick = () => openConfigModal(req);
-  hd.appendChild(editAll);
   card.appendChild(hd);
 
   const note = e('div', 'rqw-cfg-note');
@@ -1065,8 +1135,8 @@ function renderConfigCard(req) {
   card.appendChild(note);
 
   const slots = e('div', 'rqw-slots');
-  slots.appendChild(makeProjSlot(req, 'frontend', '前端工程', '🖥'));
-  slots.appendChild(makeProjSlot(req, 'backend', '后端工程', '🗄'));
+  slots.appendChild(makeProjSlot(req, 'frontend', '前端工程', FRONTEND_ICON_SVG));
+  slots.appendChild(makeProjSlot(req, 'backend', '后端工程', BACKEND_ICON_SVG));
   slots.appendChild(makeDocSlot(req));
   // 功能模块标签由 docgen 自动识别，没文档时还没有值，展示它只会是个空槽
   if (req.featureTag) slots.appendChild(makeTagSlot(req));
@@ -1074,12 +1144,13 @@ function renderConfigCard(req) {
   return card;
 }
 
+/** @param {string} icon 内联 SVG（icons.js 的常量），不是 emoji */
 function makeProjSlot(req, key, label, icon) {
   const p = req.projects?.[key];
   const slot = e('div', 'rqw-slot' + (p ? '' : ' blank'));
 
   const top = e('div', 'rqw-slot-top');
-  top.appendChild(e('span', 'rqw-slot-ic', icon));
+  top.appendChild(iconEl(icon, 'rqw-slot-ic'));
   top.appendChild(e('span', 'rqw-slot-k', label));
   // 后端可空是刻意的：只有前端改动的需求很常见，不该拿一个红叉逼用户填
   if (key === 'backend' && !p) top.appendChild(e('span', 'rqw-slot-opt', '可留空'));
@@ -1091,17 +1162,21 @@ function makeProjSlot(req, key, label, icon) {
   if (p) {
     const path = e('input', 'rqw-path');
     path.value = p.dir;
-    path.readOnly = true; // 改路径走弹层（那里有目录选择器），这里只作展示与全路径查看
+    path.readOnly = true; // 改路径一律走系统文件夹框，手打容易打出不存在的路径
     path.title = p.dir;
     row.appendChild(path);
     const change = e('button', 'rqw-btn sm', '更改');
     change.type = 'button';
-    change.onclick = () => openConfigModal(req);
+    change.onclick = () => pickProjectDir(req, key, change);
     row.appendChild(change);
+    const clear = e('button', 'rqw-btn sm', '清除');
+    clear.type = 'button';
+    clear.onclick = () => saveProjectSlot(req, key, null);
+    row.appendChild(clear);
   } else {
     const btn = e('button', 'rqw-btn sm', '选择工程目录');
     btn.type = 'button';
-    btn.onclick = () => openConfigModal(req);
+    btn.onclick = () => pickProjectDir(req, key, btn);
     row.appendChild(btn);
   }
   slot.appendChild(row);
@@ -1120,34 +1195,17 @@ function makeProjSlot(req, key, label, icon) {
   return slot;
 }
 
-/** 读写模式二段开关。就地保存：projects 是全量替换，故要把另一侧原样带上。 */
+/** 读写模式二段开关，就地保存。 */
 function makeDevSeg(req, key, p) {
   const seg = e('span', 'rqw-seg');
   const mk = (mode, text) => {
     const b = e('button', p.dev === (mode === 'dev') ? 'on' : '', text);
     b.type = 'button';
     b.dataset.m = mode;
-    b.onclick = async () => {
+    b.onclick = () => {
       const want = mode === 'dev';
       if (p.dev === want) return;
-      const projects = {
-        frontend: req.projects?.frontend ? { ...req.projects.frontend } : null,
-        backend: req.projects?.backend ? { ...req.projects.backend } : null,
-      };
-      if (!projects[key]) return;
-      projects[key].dev = want;
-      try {
-        const r = await fetch('/api/req/config', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: req.id, projects }),
-        });
-        const d = await r.json();
-        if (!r.ok) return window.toast.error(d.error || '保存失败');
-        await loadAndRenderReq(req.id);
-      } catch {
-        window.toast.error('网络错误');
-      }
+      saveProjectSlot(req, key, { ...p, dev: want });
     };
     return b;
   };
@@ -1155,42 +1213,256 @@ function makeDevSeg(req, key, p) {
   return seg;
 }
 
+/**
+ * 保存单个工程槽位，value 为 null 表示清除。
+ *
+ * 只提交被改动的那一个键：buildProjectsPatch 只处理 `key in input` 的键，全量拼装等于
+ * 拿渲染那一刻的旧快照把另一侧原样写回去——两处槽位先后操作时会互相覆盖。
+ */
+async function saveProjectSlot(req, key, value) {
+  try {
+    const r = await fetch('/api/req/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: req.id, projects: { [key]: value } }),
+    });
+    const d = await r.json();
+    if (!r.ok) return window.toast.error(d.error || '保存失败');
+    await loadAndRenderReq(req.id);
+  } catch {
+    window.toast.error('网络错误');
+  }
+}
+
+/**
+ * 直接调系统文件夹对话框选工程目录。
+ *
+ * 起框走的是服务端 PowerShell（routes-files.js:handlePickDir），有 1~2 秒延迟、超时长达
+ * 3 分钟，期间必须禁用按钮并改文案，否则用户会连点、开出好几个框。
+ *
+ * 新配的工程一律按只读登记：选完再点一下旁边的「开发」开关成本极低，而误把只读工程
+ * 当成开发工程，代价是模型在一个本不该动的工程里改代码——两边不对称，取保守侧。
+ */
+async function pickProjectDir(req, key, btn) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '选择中…';
+  try {
+    const d = await (await fetch('/api/dirs/pick')).json();
+    if (d.error) return window.toast.error(d.error);
+    if (!d.path) return; // 用户在系统框里点了取消：什么都不做，不打扰
+    await saveProjectSlot(req, key, { dir: d.path, dev: req.projects?.[key]?.dev ?? false });
+  } catch {
+    window.toast.error('调用系统对话框失败');
+  } finally {
+    // 保存成功会整页重建、这个按钮已不在 DOM 上，恢复是给失败与取消两条路径用的
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+/**
+ * 需求文档槽位。三种来源就地切换，在线链接是主位——实际需求几乎都是飞书文档。
+ *
+ * 链接来源存的是拉取那一刻的快照（后端 doc-from-link 落盘成 req-doc.md），不是每次生成
+ * 实时取：同一份需求的首版与多次修订必须基于同一份正文，否则文档中途被人改过，问题就
+ * 复现不出来。代价是飞书那边改了不会自动同步，靠脚注的拉取时间与「刷新」按钮兜住。
+ */
 function makeDocSlot(req) {
   const d = req.reqDoc;
+  // 没有文档时恒为编辑态：此时展示态没有任何可展示的东西
+  const mode = docSlotEdit || (d ? null : 'link');
   const slot = e('div', 'rqw-slot' + (d ? '' : ' blank'));
+
   const top = e('div', 'rqw-slot-top');
-  top.appendChild(e('span', 'rqw-slot-ic', '📄'));
+  top.appendChild(iconEl(DOC_ICON_SVG, 'rqw-slot-ic'));
   top.appendChild(e('span', 'rqw-slot-k', '需求文档'));
   top.appendChild(e('span', 'gap'));
-  const btn = e('button', 'rqw-iconbtn', d ? '重新上传' : '上传');
-  btn.type = 'button';
-  btn.onclick = () => openConfigModal(req);
-  top.appendChild(btn);
+  if (mode) {
+    const seg = e('span', 'rqw-seg');
+    const mk = (m, text) => {
+      const b = e('button', mode === m ? 'on' : '', text);
+      b.type = 'button';
+      b.onclick = () => setDocSlotEdit(m);
+      return b;
+    };
+    seg.append(mk('link', '在线链接'), mk('text', '粘贴文本'));
+    top.appendChild(seg);
+    const up = e('button', 'rqw-iconbtn', '上传文件');
+    up.type = 'button';
+    up.onclick = () => pickDocFile(req);
+    top.appendChild(up);
+    if (d) {
+      // 已有文档时才给取消：否则用户能把自己关进一个没有文档、也退不出编辑态的界面
+      const cancel = e('button', 'rqw-iconbtn', '取消');
+      cancel.type = 'button';
+      cancel.onclick = () => setDocSlotEdit(null);
+      top.appendChild(cancel);
+    }
+  } else {
+    if (d.url) {
+      const refresh = e('button', 'rqw-iconbtn');
+      setIconText(refresh, REFRESH_ICON_SVG, '刷新');
+      refresh.type = 'button';
+      refresh.title = '重新拉取飞书文档的最新内容';
+      refresh.onclick = () => fetchDocFromLink(req, '', refresh);
+      top.appendChild(refresh);
+    }
+    const change = e('button', 'rqw-iconbtn', '更换');
+    change.type = 'button';
+    change.onclick = () => setDocSlotEdit('link');
+    top.appendChild(change);
+  }
   slot.appendChild(top);
 
-  const row = e('div', 'rqw-slot-row');
-  if (d) {
+  const row = e('div', 'rqw-slot-row' + (mode === 'text' ? ' col' : ''));
+  if (mode === 'link') {
+    const input = e('input', 'rqw-path');
+    input.placeholder = '粘贴飞书文档链接…';
+    input.value = docSlotLinkDraft || d?.url || '';
+    input.addEventListener('input', () => {
+      docSlotLinkDraft = input.value;
+    });
+    const go = e('button', 'rqw-btn sm', '拉取');
+    go.type = 'button';
+    const submit = () => fetchDocFromLink(req, input.value.trim(), go);
+    go.onclick = submit;
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') submit();
+    });
+    row.append(input, go);
+  } else if (mode === 'text') {
+    const ta = e('textarea', 'rqw-doc-ta');
+    ta.rows = 6;
+    ta.placeholder = '粘贴需求文档全文…';
+    ta.value = docSlotTextDraft;
+    ta.addEventListener('input', () => {
+      docSlotTextDraft = ta.value;
+    });
+    const save = e('button', 'rqw-btn sm', '保存');
+    save.type = 'button';
+    save.onclick = () => saveDocText(req, save);
+    row.append(ta, save);
+  } else {
     const path = e('input', 'rqw-path');
     path.value = d.name;
     path.readOnly = true;
     path.title = d.path || d.name;
     row.appendChild(path);
-  } else {
-    const pick = e('button', 'rqw-btn sm', '粘贴文本或上传文件');
-    pick.type = 'button';
-    pick.onclick = () => openConfigModal(req);
-    row.appendChild(pick);
   }
   slot.appendChild(row);
 
   const ft = e('div', 'rqw-slot-ft');
-  ft.appendChild(
-    d
-      ? e('span', 'ok', '✓ 已就绪，生成时会通读全文')
-      : e('span', 'warn', '必填：没有需求文档无法生成开发文档'),
-  );
+  if (mode === 'link') {
+    ft.appendChild(e('span', null, '支持飞书云文档（/docx/ 或 /wiki/ 链接），需先把机器人加为该文档的协作者'));
+  } else if (mode === 'text') {
+    ft.appendChild(e('span', null, '整篇粘进来即可，生成时会通读全文'));
+  } else {
+    ft.appendChild(e('span', 'ok', '✓ 已就绪，生成时会通读全文'));
+    if (d.url) {
+      ft.appendChild(e('span', 'br'));
+      const link = e('a', null, '🔗 飞书文档');
+      link.href = d.url;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      link.title = d.url;
+      ft.appendChild(link);
+      if (d.fetchedAt) ft.appendChild(e('span', null, ` · ${fmtFetchedAt(d.fetchedAt)} 拉取，文档有更新时点「刷新」`));
+    }
+  }
   slot.appendChild(ft);
   return slot;
+}
+
+function setDocSlotEdit(mode) {
+  docSlotEdit = mode;
+  renderReqPage(currentReq);
+}
+
+/** 拉取时间只用于「快照有多旧」的粗判，精确到分钟足够，不引入日期库。 */
+function fmtFetchedAt(iso) {
+  const t = new Date(iso);
+  if (Number.isNaN(t.getTime())) return iso;
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}`;
+}
+
+/** 从飞书链接拉取需求文档快照。url 传空串 = 刷新（后端会用已存的 reqDoc.url 重拉）。 */
+async function fetchDocFromLink(req, url, btn) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '拉取中…';
+  try {
+    const r = await fetch('/api/req/doc-from-link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: req.id, url }),
+    });
+    const d = await r.json();
+    if (!r.ok) return window.toast.error(d.error || '拉取失败');
+    docSlotEdit = null;
+    docSlotLinkDraft = '';
+    window.toast.success(`已拉取「${d.reqDoc?.name || '需求文档'}」`);
+    await loadAndRenderReq(req.id);
+  } catch {
+    window.toast.error('网络错误');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+async function saveDocText(req, btn) {
+  const text = docSlotTextDraft.trim();
+  if (!text) return window.toast.error('请先粘贴需求文档正文');
+  btn.disabled = true;
+  btn.textContent = '保存中…';
+  try {
+    const r = await fetch('/api/req/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: req.id, reqDoc: { name: '需求文档.md', text } }),
+    });
+    const d = await r.json();
+    if (!r.ok) return window.toast.error(d.error || '保存失败');
+    docSlotEdit = null;
+    docSlotTextDraft = '';
+    window.toast.success('需求文档已保存');
+    await loadAndRenderReq(req.id);
+  } catch {
+    window.toast.error('网络错误');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '保存';
+  }
+}
+
+/** 上传文件作为需求文档：走浏览器原生 file input（不是服务端对话框），沿用 /api/upload。 */
+function pickDocFile(req) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      const up = await fetch('/api/upload?name=' + encodeURIComponent(file.name), { method: 'POST', body: file });
+      const ud = await up.json();
+      if (!ud.path) throw new Error(ud.error || '上传失败');
+      const r = await fetch('/api/req/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: req.id, reqDoc: { name: ud.name || file.name, path: ud.path } }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '保存失败');
+      docSlotEdit = null;
+      window.toast.success('需求文档已上传');
+      await loadAndRenderReq(req.id);
+    } catch (err) {
+      window.toast.error('上传失败：' + (err?.message || err));
+    }
+  };
+  input.click();
 }
 
 function makeTagSlot(req) {
@@ -1213,7 +1485,8 @@ function makeTagEditor(req) {
   const show = (tag) => {
     host.innerHTML = '';
     host.append(tag || '未识别');
-    const ed = e('button', 'rqw-iconbtn', '✏️');
+    const ed = e('button', 'rqw-iconbtn');
+    setIconText(ed, EDIT_ICON_SVG);
     ed.type = 'button';
     ed.title = '修改功能模块标签';
     ed.onclick = () => edit(tag);
@@ -1331,7 +1604,8 @@ function renderPrimeBox(req) {
   fileInput.type = 'file';
   fileInput.multiple = true;
   fileInput.hidden = true;
-  const attach = e('button', 'rqw-btn sm', '📎 附件');
+  const attach = e('button', 'rqw-btn sm');
+  setIconText(attach, ATTACH_ICON_SVG, '附件');
   attach.type = 'button';
   attach.onclick = () => fileInput.click();
   fileInput.addEventListener('change', async () => {
@@ -1418,9 +1692,20 @@ function renderActionCard(req, hasDoc) {
   const card = e('div', 'rqw-act');
 
   if (req.busy) {
-    card.appendChild(e('div', 'rqw-act-t', hasDoc ? '正在修订' : '正在生成'));
-    card.appendChild(e('div', 'rqw-act-d', '可以关掉页面去做别的，完成后回来查看，或勾上机器人通知。'));
-    const b = e('button', 'rqw-btn full', '生成中…');
+    // 出题与生成是两件事，耗时差一个数量级。出题阶段显示「正在生成开发文档」是假话，
+    // 会让用户以为卡住了（十几秒的事被当成十几分钟的事等）。
+    const quizzing = req.busy.kind === 'quizgen';
+    card.appendChild(e('div', 'rqw-act-t', quizzing ? '正在分析' : hasDoc ? '正在修订' : '正在生成'));
+    card.appendChild(
+      e(
+        'div',
+        'rqw-act-d',
+        quizzing
+          ? '模型在通读需求文档，找出没写清、但会影响实现的地方。通常十几秒，出题后会请你逐题确认。'
+          : '可以关掉页面去做别的，完成后回来查看，或勾上机器人通知。',
+      ),
+    );
+    const b = e('button', 'rqw-btn full', quizzing ? '分析中…' : '生成中…');
     b.type = 'button';
     b.disabled = true;
     card.appendChild(b);
@@ -1454,12 +1739,7 @@ function renderActionCard(req, hasDoc) {
   const gen = e('button', 'rqw-btn primary full', failed ? '重新生成' : '生成开发文档 →');
   gen.type = 'button';
   gen.disabled = !ready;
-  gen.onclick = () =>
-    startGenerateFlow({
-      req,
-      fetchReq: fetchRequirement,
-      onRefresh: () => loadAndRenderReq(req.id),
-    });
+  gen.onclick = () => beginGenerate(req, false);
   card.appendChild(gen);
 
   const pre = e('div', 'rqw-precheck');
@@ -1509,18 +1789,37 @@ function renderFlowCard(req) {
   return card;
 }
 
-/** 文档产出后配置降级为只读树：此时它已不是主角，但仍要能一眼核对。 */
+/**
+ * 文档产出后配置降级为只读树：此时它已不是主角，但仍要能一眼核对。
+ *
+ * 「编辑」就地展开成主栏那套槽位，而不是另开一套编辑界面——两处编辑配置的写法必须是同一份，
+ * 否则「主栏能清除、右栏不能」这类差异会慢慢长出来。
+ */
 function renderCfgSummaryCard(req) {
   const card = e('div', 'rqw-card');
   const hd = e('div', 'rqw-card-h');
-  hd.appendChild(e('span', 'ic', '⚙'));
+  hd.appendChild(iconEl(SETTINGS_ICON_SVG, 'ic'));
   hd.appendChild(e('span', null, '工程配置'));
   hd.appendChild(e('span', 'gap'));
-  const edit = e('button', 'rqw-iconbtn', '编辑');
+  const edit = e('button', 'rqw-iconbtn', cfgSummaryEditing ? '完成' : '编辑');
   edit.type = 'button';
-  edit.onclick = () => openConfigModal(req);
+  edit.onclick = () => {
+    cfgSummaryEditing = !cfgSummaryEditing;
+    renderReqPage(currentReq);
+  };
   hd.appendChild(edit);
   card.appendChild(hd);
+
+  if (cfgSummaryEditing) {
+    const body = e('div', 'rqw-card-b');
+    const slots = e('div', 'rqw-slots');
+    slots.appendChild(makeProjSlot(req, 'frontend', '前端工程', FRONTEND_ICON_SVG));
+    slots.appendChild(makeProjSlot(req, 'backend', '后端工程', BACKEND_ICON_SVG));
+    slots.appendChild(makeDocSlot(req));
+    body.appendChild(slots);
+    card.appendChild(body);
+    return card;
+  }
 
   const body = e('div', 'rqw-card-b');
   const tree = e('div', 'rqw-tree');
@@ -1567,13 +1866,7 @@ function renderQuizSummaryCard(req) {
   if (!req.busy) {
     const btn = e('button', 'rqw-iconbtn', answered ? '重答' : '去作答');
     btn.type = 'button';
-    btn.onclick = () =>
-      startGenerateFlow({
-        req,
-        fetchReq: fetchRequirement,
-        onRefresh: () => loadAndRenderReq(req.id),
-        forceNewQuiz: answered, // 重答要新题；「去作答」沿用已出的题
-      });
+    btn.onclick = () => beginGenerate(req, answered); // 重答要新题；「去作答」沿用已出的题
     hd.appendChild(btn);
   }
   card.appendChild(hd);
@@ -1694,24 +1987,25 @@ function renderReadonlyDoc(req) {
 
 // ---- 归档期：只读芯片条（复用评审期芯片条的展示样式，去掉可点击/编辑入口） ----
 
-// 图标改为 🖥/🗄 区分前后端，与评审期工作台的 makeProjSlot、以及开发/测试期横幅
-// renderBanner 三处对齐。原先此处统一用 🖥，是为了跟已删除的评审期芯片条一致；
-// 那条链断了之后，同一份工程数据在不同页面显示不同图标只会让人以为看错了需求。
+// 前端/后端/文档三种图标与评审期工作台的 makeProjSlot、开发/测试期横幅 renderBanner 共用
+// icons.js 的同一份常量。原先此处三处各写一个 emoji，同一份工程数据在不同页面图标不一致，
+// 只会让人以为看错了需求。
 function renderReadonlyChipsBar(req) {
   const bar = document.createElement('div');
   bar.className = 'req-chips';
-  const addChip = (text, title) => {
+  const addChip = (icon, text, title) => {
     const chip = document.createElement('span');
     chip.className = 'req-chip req-chip-readonly';
-    chip.textContent = text;
+    chip.appendChild(iconEl(icon));
+    chip.appendChild(document.createTextNode(text));
     if (title) chip.title = title;
     bar.appendChild(chip);
   };
   const f = req.projects?.frontend;
   const b = req.projects?.backend;
-  if (f) addChip(`🖥 ${dirTail(f.dir)} · ${f.dev ? '开发' : '只读'}`, f.dir);
-  if (b) addChip(`🗄 ${dirTail(b.dir)} · ${b.dev ? '开发' : '只读'}`, b.dir);
-  if (req.reqDoc) addChip(`📄 ${req.reqDoc.name}`, req.reqDoc.name);
+  if (f) addChip(FRONTEND_ICON_SVG, `${dirTail(f.dir)} · ${f.dev ? '开发' : '只读'}`, f.dir);
+  if (b) addChip(BACKEND_ICON_SVG, `${dirTail(b.dir)} · ${b.dev ? '开发' : '只读'}`, b.dir);
+  if (req.reqDoc) addChip(DOC_ICON_SVG, req.reqDoc.name, req.reqDoc.name);
   return bar;
 }
 
@@ -1786,7 +2080,7 @@ function renderArchivingPage(req) {
   const retroBtn = document.createElement('button');
   retroBtn.type = 'button';
   retroBtn.className = 'btn req-retro-summary-btn';
-  retroBtn.textContent = '✨ 优化汇总';
+  retroBtn.textContent = '优化汇总';
   retroBtn.onclick = () => startRetroSummary(req.id);
   btnRow.appendChild(retroBtn);
 
@@ -1797,7 +2091,7 @@ function renderArchivingPage(req) {
     const viewBtn = document.createElement('button');
     viewBtn.type = 'button';
     viewBtn.className = 'btn req-retro-view-btn';
-    viewBtn.textContent = '🔍 查看汇总会话';
+    viewBtn.textContent = '查看汇总会话';
     viewBtn.onclick = () => openRetroConv(req, retroSession);
     btnRow.appendChild(viewBtn);
   }
@@ -1805,7 +2099,7 @@ function renderArchivingPage(req) {
   const confirmBtn = document.createElement('button');
   confirmBtn.type = 'button';
   confirmBtn.className = 'btn primary req-archive-confirm-btn';
-  confirmBtn.textContent = '📦 确认归档';
+  confirmBtn.textContent = '确认归档';
   confirmBtn.onclick = () => confirmArchive(req.id, confirmBtn);
   btnRow.appendChild(confirmBtn);
 
@@ -1837,7 +2131,11 @@ function renderRetroProgress(hostEl) {
   const label = RETRO_PHASE_LABEL[p.phase] || p.phase;
   const counter = p.phase === 'map' && p.total ? ` [${p.current}/${p.total}]` : '';
   const who = p.phase === 'map' && p.title ? ` 《${p.title}》` : '';
-  line.textContent = `${p.phase === 'done' || p.phase === 'failed' ? '' : '⏳ '}${label}${counter}${who}`;
+  // 跑完/中断就不再挂等待图标：那时这行是结论，不是进度
+  const running = p.phase !== 'done' && p.phase !== 'failed';
+  const lineText = `${label}${counter}${who}`;
+  if (running) setIconText(line, WAITING_ICON_SVG, lineText);
+  else line.textContent = lineText;
   host.appendChild(line);
 
   if (p.total) {
@@ -2519,15 +2817,73 @@ function renderBusyBar(req) {
   const startedAt = req.busy.startedAt;
   const mins = startedAt ? Math.max(0, Math.floor((Date.now() - startedAt) / 60000)) : 0;
   const body = e('div');
+  // 出题阶段不能套用「开发文档生成中」那套文案与时长口径：它只跑十几秒、且不读工程代码
+  if (req.busy.kind === 'quizgen') {
+    body.appendChild(e('span', null, '正在分析需求文档中的不确定点…'));
+    body.appendChild(document.createElement('br'));
+    body.append(
+      req.prime?.text
+        ? '模型在通读需求文档并结合你补充的背景，找出没写清、但会影响实现的地方。你已说明的部分不会再问。通常十几秒。'
+        : '模型在通读需求文档，找出没写清、但会影响实现的地方。通常十几秒。分析不出结果也不影响生成，会直接跳到读代码。',
+    );
+    bar.appendChild(body);
+    return bar;
+  }
+  // 头部：文案 + 停止按钮（同一行）
+  const headRow = e('div', 'docgen-head-row');
   const head = e('span', null, hasDevDoc(req) ? '开发文档修订中…' : '开发文档生成中…');
-  body.appendChild(head);
+  const stopBtn = e('button', 'rqw-btn-small', '停止');
+  stopBtn.type = 'button';
+  stopBtn.onclick = async () => {
+    stopBtn.disabled = true;
+    stopBtn.textContent = '停止中…';
+    try {
+      const r = await fetch('/api/req/docgen/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: req.id }),
+      });
+      if (!r.ok) {
+        window.toast?.error('停止失败，请稍后重试');
+        stopBtn.disabled = false;
+        stopBtn.textContent = '停止';
+      } else {
+        // 兜底：若 10s 后轮询仍未重渲（服务端异常不清 busy），恢复按钮让用户可再试
+        setTimeout(() => {
+          if (stopBtn.disabled) {
+            stopBtn.disabled = false;
+            stopBtn.textContent = '停止';
+          }
+        }, 10000);
+      }
+      // 成功：3s busy 轮询感知 busy=null 后整页重渲，按钮自动消失
+    } catch (_e) {
+      window.toast?.error('网络错误');
+      stopBtn.disabled = false;
+      stopBtn.textContent = '停止';
+    }
+  };
+  headRow.appendChild(head);
+  headRow.appendChild(stopBtn);
+  body.appendChild(headRow);
+
   if (startedAt) body.appendChild(e('span', 'el', `（已运行 ${mins} 分钟）`));
   body.appendChild(document.createElement('br'));
+
   const answeredCount = Object.keys(req.quiz?.answers || {}).length;
   body.append(
     (answeredCount ? `已采纳你的 ${answeredCount} 项问卷结论，` : '') +
-      '正在阅读工程实际代码。通常几分钟、大型工程更久，可先离开，完成后回来查看。',
+      '正在阅读工程实际代码。无时间限制，可先离开，完成后回来查看。',
   );
+
+  // 实时日志（liveLog 由 GET /api/req/get 每 3s 带回）
+  if (req.liveLog) {
+    const logDiv = e('div', 'docgen-livelog');
+    const logCode = e('code', null, req.liveLog);
+    logDiv.appendChild(logCode);
+    body.appendChild(logDiv);
+  }
+
   bar.appendChild(body);
   return bar;
 }
@@ -2780,146 +3136,6 @@ async function finalizeAttempt(id, force) {
   window.toast.error(d.error || '定稿失败');
 }
 
-// ---- 评审期：配置弹层 ----
-
-function projRowHtml(key, label) {
-  return (
-    `<div class="req-proj-row" data-key="${key}">` +
-    `<span class="req-proj-label">${label}</span>` +
-    `<input class="req-proj-dir" placeholder="工程目录，如 C:\\path\\to\\project" autocomplete="off" />` +
-    `<button type="button" class="btn dir-pick-btn req-proj-pick" title="选择文件夹">选择</button>` +
-    `<label class="req-proj-dev-label"><input type="checkbox" class="pretty-check req-proj-dev" /> 开发工程</label>` +
-    `<button type="button" class="btn req-proj-clear">清除</button>` +
-    `</div>`
-  );
-}
-
-function openConfigModal(req) {
-  // 仅评审期可编辑；chips 条本身也只在评审期渲染，此处保留守卫防御非常规调用路径。
-  if (!req || req.phase !== 'review') return;
-  const mask = document.createElement('div');
-  mask.className = 'mask';
-  mask.innerHTML =
-    '<div class="modal req-config-modal">' +
-    '<div class="head"><h3>需求配置</h3><button class="close">✕</button></div>' +
-    '<div class="body">' +
-    '<div class="sec-label">工程</div>' +
-    projRowHtml('frontend', '前端工程') +
-    projRowHtml('backend', '后端工程') +
-    '<div class="sec-label" style="margin-top:16px;">需求文档</div>' +
-    '<div class="req-doc-tabs">' +
-    '<button type="button" class="req-doc-tab-btn active" data-tab="text">粘贴文本</button>' +
-    '<button type="button" class="req-doc-tab-btn" data-tab="file">上传文件</button>' +
-    '</div>' +
-    '<div class="req-doc-tab-panel" data-panel="text">' +
-    '<textarea class="req-doc-textarea" rows="8" placeholder="粘贴需求文档全文…"></textarea>' +
-    '</div>' +
-    '<div class="req-doc-tab-panel" data-panel="file" hidden>' +
-    '<input type="file" class="req-doc-file-input" />' +
-    '<div class="req-doc-file-status"></div>' +
-    '</div>' +
-    '</div>' +
-    '<div class="confirm-foot"><button class="btn cancel">取消</button><button class="btn primary save">保存</button></div>' +
-    '</div>';
-  document.body.appendChild(mask);
-
-  // 回填工程行现值
-  for (const key of ['frontend', 'backend']) {
-    const p = req.projects?.[key];
-    if (!p) continue;
-    const row = mask.querySelector(`.req-proj-row[data-key="${key}"]`);
-    row.querySelector('.req-proj-dir').value = p.dir;
-    row.querySelector('.req-proj-dev').checked = !!p.dev;
-  }
-  // 目录「选择」/「清除」：复用 /api/dirs/pick 原生对话框（与设置页机器人项目文件夹同一模式）
-  mask.querySelectorAll('.req-proj-row').forEach((row) => {
-    const dirInput = row.querySelector('.req-proj-dir');
-    const pickBtn = row.querySelector('.req-proj-pick');
-    pickBtn.addEventListener('click', async () => {
-      pickBtn.disabled = true;
-      try {
-        const r = await (await fetch('/api/dirs/pick')).json();
-        if (r.path) dirInput.value = r.path;
-        else if (r.error) window.toast.error(r.error);
-      } catch {
-        window.toast.error('调用系统对话框失败');
-      } finally {
-        pickBtn.disabled = false;
-      }
-    });
-    row.querySelector('.req-proj-clear').addEventListener('click', () => {
-      dirInput.value = '';
-      row.querySelector('.req-proj-dev').checked = false;
-    });
-  });
-
-  // 需求文档：文本/文件 tab 切换
-  let docFileResult = null; // { name, path } | null，仅上传成功后才有值
-  const tabBtns = [...mask.querySelectorAll('.req-doc-tab-btn')];
-  tabBtns.forEach((btn) => {
-    btn.addEventListener('click', () => {
-      tabBtns.forEach((b) => b.classList.toggle('active', b === btn));
-      mask.querySelectorAll('.req-doc-tab-panel').forEach((p) => (p.hidden = p.dataset.panel !== btn.dataset.tab));
-    });
-  });
-  const fileInput = mask.querySelector('.req-doc-file-input');
-  const fileStatus = mask.querySelector('.req-doc-file-status');
-  fileInput.addEventListener('change', async () => {
-    const file = fileInput.files[0];
-    if (!file) return;
-    docFileResult = null;
-    fileStatus.textContent = '上传中…';
-    try {
-      const r = await fetch('/api/upload?name=' + encodeURIComponent(file.name), { method: 'POST', body: file });
-      const d = await r.json();
-      if (!d.path) throw new Error(d.error || '上传失败');
-      docFileResult = { name: d.name || file.name, path: d.path };
-      fileStatus.textContent = '已选择：' + docFileResult.name;
-    } catch (e) {
-      fileStatus.textContent = '';
-      window.toast.error('上传失败：' + (e?.message || e));
-    }
-  });
-
-  const close = () => mask.remove();
-  mask.querySelector('.close').addEventListener('click', close);
-  mask.querySelector('.cancel').addEventListener('click', close);
-  mask.addEventListener('click', (e) => {
-    if (e.target === mask) close();
-  });
-
-  mask.querySelector('.save').addEventListener('click', async () => {
-    const projects = {};
-    for (const key of ['frontend', 'backend']) {
-      const row = mask.querySelector(`.req-proj-row[data-key="${key}"]`);
-      const dir = row.querySelector('.req-proj-dir').value.trim();
-      projects[key] = dir ? { dir, dev: row.querySelector('.req-proj-dev').checked } : null;
-    }
-    const payload = { id: req.id, projects };
-    const activeTab = tabBtns.find((b) => b.classList.contains('active'))?.dataset.tab;
-    if (activeTab === 'text') {
-      const text = mask.querySelector('.req-doc-textarea').value.trim();
-      if (text) payload.reqDoc = { name: '需求文档.md', text };
-    } else if (docFileResult) {
-      payload.reqDoc = docFileResult;
-    }
-    try {
-      const r = await fetch('/api/req/config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const d = await r.json();
-      if (!r.ok) return window.toast.error(d.error || '保存失败');
-      close();
-      window.toast.success('配置已保存');
-      await loadAndRenderReq(req.id);
-    } catch {
-      window.toast.error('网络错误');
-    }
-  });
-}
-
 // ---- 评审期：底部补充说明框 ----
 
 function renderSupplementBox(req) {
@@ -2979,7 +3195,7 @@ function renderSupplementBox(req) {
   attachBtn.type = 'button';
   attachBtn.className = 'btn req-attach-btn';
   attachBtn.title = '添加附件';
-  attachBtn.textContent = '📎';
+  setIconText(attachBtn, ATTACH_ICON_SVG);
   attachBtn.onclick = () => fileInput.click();
 
   fileInput.addEventListener('change', async () => {

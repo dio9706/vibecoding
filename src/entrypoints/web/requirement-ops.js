@@ -412,10 +412,14 @@ export async function runDocgen(req, payload = {}) {
     if (req) updateRequirement(req.id, {}, `开发文档生成被拒：${DOCGEN_GUIDE}`); // 不写 busy，只留痕给前端看见
     throw new Error(DOCGEN_GUIDE);
   }
-  const t0 = Date.now();
-  let capturedTokens = { inputTokens: 0, outputTokens: 0 };
   // 同步写 busy（在第一个 await 之前）：队列 fire-and-forget 派发后，下个 tick 立刻能看见 busy 已占用
   updateRequirement(req.id, { busy: { kind: 'docgen', startedAt: Date.now() } }, '开始生成开发文档');
+  // 清除该 reqId 的旧生成状态（防止重复触发时前次 abort 无法被停止）
+  docgenAborts.delete(req.id);
+  userStoppedSet.delete(req.id);
+  docgenLiveLine.delete(req.id);
+  const t0 = Date.now();
+  let capturedTokens = { inputTokens: 0, outputTokens: 0 };
   try {
     // 队列合并多条补充说明后 payload.supplements 是数组；单条直传（或历史遗留）时 payload.supplement 是单个对象
     const supplements = payload.supplements?.length ? payload.supplements : payload.supplement ? [payload.supplement] : [];
@@ -450,48 +454,39 @@ export async function runDocgen(req, payload = {}) {
     let capturedSession = null;
     let resultText = '';
     const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), DOCGEN_TIMEOUT_MS);
-    let raceTimer;
-    try {
-      const call = runClaude(prompt, {
-        ...claudeAuthOpts(),
-        cwd,
-        ...(addDirs.length ? { additionalDirectories: addDirs } : {}),
-        // dontAsk：文档生成只需读代码，未列出的工具直接拒绝。
-        // allowedTools 单用只是免确认，挡不住 Write/Edit/Bash（见 team-tools/review/index.js 注释）。
-        permissionMode: 'dontAsk',
-        allowedTools: ['Read', 'Grep', 'Glob'],
-        ...(canRevise ? { resume: req.docSession } : {}),
-        abortController: abort,
-        onInit: (i) => {
-          capturedSession = i.session_id;
-        },
-        onText: (t) => {
-          resultText += t;
-        },
-        onResult: (info) => {
-          if (!resultText && info.result) resultText = info.result;
-          // 捕获 token 数和成本（来自 claude.js 的 onResult 回调）
-          if (info.inputTokens) capturedTokens.inputTokens = info.inputTokens;
-          if (info.outputTokens) capturedTokens.outputTokens = info.outputTokens;
-        },
-      });
-      // abort 走 SDK 优雅关闭，可能迟迟不结束 → race 兜底到点不管流死活直接往下走；
-      // race 放弃后该 promise 仍可能 reject，预挂 catch 防 unhandled（对齐 llm-classify 的手法）
-      call.catch((e) => logger.warn('req-ops', 'docgen 调用异常（已落兜底）', { reqId: req.id, err: e?.message || String(e) }));
-      const timeoutPromise = new Promise((resolve) => {
-        raceTimer = setTimeout(resolve, DOCGEN_TIMEOUT_MS + 2_000);
-      });
-      // 兜底分支（race 挂死）不得落版：call 迟迟不 settle（SDK 优雅关闭卡住）时，raceWithTimeoutFlag
-      // 返回 true，即便此刻 resultText 已经攒够了 ≥50 字也必须判失败——那只是 abort 前收到的部分内容，
-      // 底层调用其实还没真正结束（甚至可能仍在继续写 resultText，构造版本落盘存在竞态）。
-      if (await raceWithTimeoutFlag(call, timeoutPromise)) {
-        throw new Error('生成超时（流未结束），版本未推进');
-      }
-    } finally {
-      clearTimeout(timer);
-      clearTimeout(raceTimer); // 兜底 race 计时器也要清，否则 call 提前完成时它仍会挂到 15min+2s 后才触发
-    }
+    // 注册到全局 Map，供 POST /api/req/docgen/stop 调用
+    docgenAborts.set(req.id, abort);
+    const call = runClaude(prompt, {
+      ...claudeAuthOpts(),
+      cwd,
+      ...(addDirs.length ? { additionalDirectories: addDirs } : {}),
+      // dontAsk：文档生成只需读代码，未列出的工具直接拒绝。
+      // allowedTools 单用只是免确认，挡不住 Write/Edit/Bash（见 team-tools/review/index.js 注释）。
+      permissionMode: 'dontAsk',
+      allowedTools: ['Read', 'Grep', 'Glob'],
+      ...(canRevise ? { resume: req.docSession } : {}),
+      abortController: abort,
+      onInit: (i) => {
+        capturedSession = i.session_id;
+      },
+      onText: (t) => {
+        resultText += t;
+        // 提取最后一行到 docgenLiveLine：用 lastIndexOf 避免每次 split 全文（O(n²)）
+        const lastNl = resultText.lastIndexOf('\n');
+        const candidate = resultText.slice(lastNl + 1).trim()
+          || resultText.slice(0, lastNl).trimEnd().split('\n').pop()?.trim()
+          || '';
+        if (candidate) docgenLiveLine.set(req.id, candidate.slice(0, 200));
+      },
+      onResult: (info) => {
+        if (!resultText && info.result) resultText = info.result;
+        // 捕获 token 数和成本（来自 claude.js 的 onResult 回调）
+        if (info.inputTokens) capturedTokens.inputTokens = info.inputTokens;
+        if (info.outputTokens) capturedTokens.outputTokens = info.outputTokens;
+      },
+    });
+    // 无时间限制，直接等待完成（用户可通过 POST /api/req/docgen/stop 主动中止）
+    await call;
 
     if (!resultText || resultText.trim().length < 50) {
       throw new Error('输出为空或内容过短（可能超时或调用失败），判定生成失败');
@@ -532,9 +527,23 @@ export async function runDocgen(req, payload = {}) {
     );
   } catch (e) {
     const reason = (e?.message || String(e)).slice(0, 200);
-    updateRequirement(req.id, { busy: null }, `开发文档生成失败：${reason}`);
-    logger.error('req-ops', 'docgen 失败', { reqId: req.id, ms: Date.now() - t0, reason });
+    const isUserStop = e?.name === 'AbortError' && userStoppedSet.has(req.id);
+    if (isUserStop) {
+      updateRequirement(req.id, { busy: null }, '开发文档生成已停止');
+    } else {
+      updateRequirement(req.id, { busy: null }, `开发文档生成失败：${reason}`);
+    }
+    if (isUserStop) {
+      logger.info('req-ops', 'docgen 用户已停止', { reqId: req.id, ms: Date.now() - t0 });
+    } else {
+      logger.error('req-ops', 'docgen 异常', { reqId: req.id, ms: Date.now() - t0, reason });
+    }
     throw e;
+  } finally {
+    // 无论成功/失败/用户停止，都清理模块级状态
+    docgenAborts.delete(req.id);
+    userStoppedSet.delete(req.id);
+    docgenLiveLine.delete(req.id);
   }
 }
 

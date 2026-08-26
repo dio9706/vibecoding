@@ -242,26 +242,75 @@ function clamp(n, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
+/** verdictLog 单条的截断长度：够看懂是哪条注释、模型为什么这么判即可 */
+const LOG_TEXT_CLIP = 200;
+const LOG_REASON_CLIP = 300;
+
+/**
+ * 把模型的全部判定原样留档（含判为 ok 的）。
+ *
+ * 为什么需要它：只有 restates-code / stale / dead-code 会变成 issue，判 ok 的连同模型给的
+ * reason 一起被丢弃。于是出现「0 个问题」这种结果时，无法区分「模型认真判了且都合格」和
+ * 「模型摆烂 / 只判了一小半」——维度②（提示词质量）就因为这个盲区白跑过一轮，
+ * 一次跑出 0 条问题却没法判断是好消息还是坏消息。留档后任何一轮结果都能逐条回溯、横向对比。
+ *
+ * 注释原文取自 blocks 而不是模型回填：展示给用户的定位与原文必须来自磁盘事实，
+ * 模型转述的原文可能被改写或截断。复合键 file#line 而不是单用 line——
+ * 抽样跨 30 个文件，同一行号必然在多个文件里碰撞，只按 line 建索引会串号取到别的文件的注释。
+ *
+ * 截断是为了别把 optimize.json 撑爆：一次体检上百条注释块，text+reason 不设限会到几百 KB。
+ *
+ * @param {Array<{file?:string,line:number,verdict:string,reason?:string}>|null} verdicts
+ * @param {Array<{file:string,line:number,comment:string}>} blocks 送进 LLM 的注释块（提供原文）
+ */
+function buildVerdictLog(verdicts, blocks) {
+  if (!Array.isArray(verdicts)) return [];
+  const keyOf = (file, line) => `${file}#${line}`;
+  const byKey = new Map((Array.isArray(blocks) ? blocks : []).map((b) => [keyOf(b.file, b.line), b]));
+
+  return verdicts.map((v) => {
+    const src = byKey.get(keyOf(v.file, v.line)) || {};
+    return {
+      file: v.file ?? src.file ?? null,
+      line: v.line,
+      verdict: v.verdict,
+      text: String(src.comment ?? '').slice(0, LOG_TEXT_CLIP),
+      reason: String(v.reason ?? '').slice(0, LOG_REASON_CLIP),
+    };
+  });
+}
+
 /**
  * 按问题密度判分。
  *
- * @param {{sampledFiles:number, findings:Array<{type:string,file:string,line:number,message:string}>|null}} input
- *   findings 为 null 表示 LLM 没跑完（超时 / 报错 / 被跳过）。
+ * @param {object} input
+ * @param {number} input.sampledFiles 实际抽到的文件数（分母）
+ * @param {Array<{type:string,file:string,line:number,message:string}>|null} input.findings
+ *   null 表示 LLM 没跑完（超时 / 报错 / 被跳过）。
+ * @param {Array<{file?:string,line:number,verdict:string,reason?:string}>|null} [input.verdicts]
+ *   模型的**全部**判定（含 ok），只进 verdictLog、不参与判分。
+ * @param {Array<{file:string,line:number,comment:string}>} [input.blocks] 送进 LLM 的注释块，供 verdictLog 回填原文
+ *
+ * 为什么 findings 和 verdicts 分成两个入参而不是就地过滤：判分口径（哪些 verdict 算问题、
+ * message 怎么措辞）属于调用方的判定层，logic 层只负责「有几条问题 → 几分」这个纯计算，
+ * 保持这个边界才让已有单测不依赖 verdict 词表。
  *
  * 为什么 null 要标 partial 而不是给个默认分：分数会以确定的姿态参与总分加权，
  * 一个未经分析的「80 分」和一个真的分析出来的「80 分」在用户眼里毫无区别，
  * 会把「没查」伪装成「查过没问题」。宁可让这一维不计入总分，也不制造假确定性。
  */
-export function evaluateComments({ sampledFiles, findings } = {}) {
+export function evaluateComments({ sampledFiles, findings, verdicts = null, blocks = [] } = {}) {
   const sampled = Number(sampledFiles) || 0;
 
   // 没有可抽样文件（空仓库 / 全是被排除的文件）不是缺陷，不该扣分，也不该计入总分
   if (sampled === 0) {
-    return { score: null, status: 'na', issues: [], reason: '没有符合抽样条件的源码文件' };
+    return { score: null, status: 'na', issues: [], verdictLog: [], reason: '没有符合抽样条件的源码文件' };
   }
 
   if (findings === null || findings === undefined) {
-    return { score: null, status: 'partial', issues: [], reason: 'LLM 分析未完成，本维度不计入总分' };
+    // partial 意味着这次判定没跑成，手上没有可信的 verdicts，留档字段一律给空数组——
+    // 让调用方不必按 status 分支写两套取值逻辑
+    return { score: null, status: 'partial', issues: [], verdictLog: [], reason: 'LLM 分析未完成，本维度不计入总分' };
   }
 
   const list = Array.isArray(findings) ? findings : [];
@@ -279,5 +328,5 @@ export function evaluateComments({ sampledFiles, findings } = {}) {
     meta: { type: f.type },
   }));
 
-  return { score, status: 'done', issues };
+  return { score, status: 'done', issues, verdictLog: buildVerdictLog(verdicts, blocks) };
 }

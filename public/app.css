@@ -450,6 +450,26 @@
         margin-right: 5px;
         vertical-align: middle;
       }
+      /* ---- 通用内联 SVG 图标（见 js/icons.js）----
+         尺寸走 1em、颜色走 currentColor：图标换到横幅/槽位/弹框标题都不必各自补一条 CSS，
+         跟着宿主的 font-size 和 color 走就是对的。 */
+      .inline-ic {
+        display: inline-flex;
+        align-items: center;
+        /* 宿主给了固定宽度时（如右栏按钮的 .rq-ri 18px）居中——那边原本靠 text-align，
+           包成 flex 容器后 text-align 对 svg 不再生效 */
+        justify-content: center;
+        flex-shrink: 0;
+        /* 非 flex 上下文（弹框标题 h3 里与中文并排）时按基线排会偏低，往下压一点点补正 */
+        vertical-align: -0.125em;
+      }
+      /* 12px 下限：宿主字号低到 11px 的地方（如 .rqw-iconbtn）纯 1em 会把线条挤糊，
+         emoji 时代看不出来，换成描边 SVG 就明显了 */
+      .inline-ic svg {
+        display: block;
+        width: max(1em, 12px);
+        height: max(1em, 12px);
+      }
       .btn {
         font-family: inherit;
         font-size: 12.5px;
@@ -1683,6 +1703,60 @@
         font-size: 12px;
         white-space: nowrap;
       }
+
+      /* ---- 侧栏头部：对话/需求切换 Switch ---- */
+      .sidebar-switch {
+        display: inline-flex;
+        align-items: center;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 2px;
+        gap: 2px;
+        height: 28px;
+        flex-shrink: 0;
+      }
+
+      .switch-btn {
+        flex: 1;
+        min-width: 44px;
+        padding: 4px 10px;
+        font-size: 12px;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        font-family: inherit;
+        transition: all 0.15s;
+        white-space: nowrap;
+      }
+
+      .switch-btn:hover {
+        color: var(--text);
+      }
+
+      .switch-btn.active {
+        background: var(--accent-soft);
+        color: var(--accent);
+        border-color: var(--accent);
+        font-weight: 500;
+      }
+
+      /* ---- 侧栏底部固定栏 ---- */
+      .sidebar-footer {
+        flex-shrink: 0;
+        padding: 8px 14px;
+        border-top: 1px solid var(--border-soft);
+        background: rgba(22, 23, 31, 1);
+      }
+
+      .sidebar-footer .btn {
+        width: 100%;
+        padding: 8px 12px;
+        font-size: 12px;
+      }
+
       .icon-btn {
         display: inline-flex;
         align-items: center;
@@ -1708,13 +1782,15 @@
       }
       .icon-btn svg { display: block; pointer-events: none; }
 
-      /* ---- 侧栏：工具列表 ---- */
+      /* ---- 侧栏：工具列表（flex-start 确保从顶部堆叠，不因 flex:1 留白而居中） ---- */
       .tools-list {
         flex: 1;
         overflow-y: auto;
         padding: 8px;
         display: flex;
         flex-direction: column;
+        justify-content: flex-start;
+        align-content: flex-start;
         gap: 6px;
       }
       .tools-list[hidden] { display: none; }
@@ -2735,6 +2811,28 @@
   transition: opacity 0.3s ease;
   animation: none; /* 撤罩时让 transition 接管，否则被 bootIn 的 both 锁在 opacity:1 */
 }
+/* 罩内标题栏：罩子 inset:0 盖住 header.topbar，而窗口是无边框的（decorations(false)），
+   等待/引导期间窗口就拖不动、关不掉了。这条把拖拽区与窗口按钮补回来。
+   absolute 而非做 flex 首项：罩子是 flex 居中容器，插进流里会顶下 LOGO、改掉居中基准。 */
+.ob-titlebar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 44px; /* 与 .topbar 等高：撤罩后按钮不跳位 */
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-end;
+  z-index: 1; /* 罩内层级，压住品牌区/面板的顶部留白 */
+}
+.ob-titlebar-drag {
+  flex: 1;
+}
+/* .win-controls 是 display:flex，会压过 UA 对 [hidden] 的 display:none（同 .token-banner 的坑）——
+   非 Tauri 环境（浏览器里开）必须显式收起，否则露出三个点了没反应的按钮 */
+.ob-titlebar .win-controls[hidden] {
+  display: none;
+}
 .boot-star {
   width: 120px;
   height: 120px;
@@ -2776,20 +2874,12 @@
 
 /* ---- 侧栏需求列表：置于 #convList 之上，结构/间距对齐 .conv-list ---- */
 .req-list {
+  flex: 1;
   padding: 8px;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  border-bottom: 1px solid var(--border-soft);
-  margin-bottom: 4px;
-  /* 需求条目 = 需求数 + 全部子会话 + 每需求一个「＋新会话」行，且 dev/test 阶段默认展开，
-     一屏放不下是常态。缺 min-height:0 时 flex 子项的 automatic minimum size 会把最小高度
-     锁死在内容高度上 → 收缩算法收不动它 → 它按内容无限撑高、把 flex:1 的 .conv-list 压成 0，
-     自身溢出又被 body{overflow:hidden} 静默裁掉，结果是「看不见且没有滚动条」。
-     三条必须同在：min-height:0 解锁收缩、max-height 定上限、overflow-y 才有滚动条。 */
-  flex: 0 1 auto;
   min-height: 0;
-  max-height: 55%;
   overflow-y: auto;
 }
 .req-list[hidden] { display: none; }
@@ -2897,6 +2987,8 @@
   display: inline-flex;
   align-items: center;
   margin-right: 4px;
+  /* 橙色与侧栏会话行的 .conv-pin-ic 对齐：同一个钉住语义不该出现两种颜色 */
+  color: var(--accent);
   opacity: 0.6;
   flex-shrink: 0;
 }
@@ -3050,6 +3142,10 @@
 .req-chips .req-chip {
   font-family: inherit;
   font-size: 12px;
+  /* 内联图标 + 文本两个节点，靠 flex 的 gap 定间距（同 .req-banner .req-chip 的做法） */
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 6px 12px;
   border-radius: 20px;
   border: 1px solid var(--border);
@@ -3321,81 +3417,6 @@
 }
 .req-attach-btn { padding: 6px 11px; font-size: 14px; }
 
-/* ---- 需求配置弹层 ---- */
-.req-config-modal { width: min(620px, 92vw); }
-.req-proj-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-  flex-wrap: wrap;
-}
-.req-proj-label { flex: 0 0 64px; font-size: 12px; color: var(--faint); }
-.req-proj-dir {
-  flex: 1 1 180px;
-  min-width: 0;
-  padding: 7px 9px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--bg);
-  color: var(--text);
-  font-family: inherit;
-  font-size: 12.5px;
-}
-.req-proj-dir:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
-.req-proj-dev-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
-  cursor: pointer;
-}
-.req-proj-clear { font-size: 12px; padding: 5px 10px; }
-.req-doc-tabs { display: flex; gap: 4px; margin-bottom: 10px; }
-.req-doc-tab-btn {
-  font-family: inherit;
-  font-size: 12.5px;
-  padding: 6px 13px;
-  border-radius: 7px;
-  border: 1px solid var(--border);
-  background: none;
-  color: var(--muted);
-  cursor: pointer;
-}
-.req-doc-tab-btn:hover { color: var(--text); }
-.req-doc-tab-btn.active {
-  color: var(--text);
-  background: var(--panel-2);
-  border-color: var(--accent);
-}
-.req-doc-tab-panel[hidden] { display: none; }
-.req-doc-textarea {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  padding: 9px 11px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
-  color: var(--text);
-  font-family: inherit;
-  font-size: 12.5px;
-  line-height: 1.5;
-  resize: vertical;
-}
-.req-doc-textarea:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
-.req-doc-file-status { font-size: 12px; color: var(--faint); margin-top: 6px; }
-
 /* ---- 归档期表单视图（phase=archiving）---- */
 .req-archiving-page { display: flex; flex-direction: column; gap: 14px; }
 /* 与上方 .req-chips .req-chip 保持同一容器前缀：specificity 需一致（同为 2 级类选择器）
@@ -3443,7 +3464,6 @@
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
-.req-archive-confirm-btn { align-self: flex-start; }
 
 /* ---- 归档只读档案视图（phase=archived）---- */
 .req-archived-page { display: flex; flex-direction: column; gap: 12px; }
@@ -3493,7 +3513,10 @@
 /* 右栏：fixed 悬于消息区右侧；开启时 .app.req-rail-open 给消息区让出边距 */
 .req-rail {
   position: fixed;
-  top: 96px; /* 顶栏 + 横幅高度的保守值；横幅换行时内容仍可滚动查看 */
+  /* 顶边跟着需求横幅的实际底边走（req-chat.js 的 syncRailTop 写这个变量）。
+     曾是硬编码 96px，但 #tokenBanner / #pendingBanner 是文档流元素，一出现就把横幅
+     整体下推 → 右栏压住横幅右端的阶段按钮，[完成开发] 点不到。兜底值按无横幅时算。 */
+  top: var(--req-rail-top, 96px);
   right: 0;
   bottom: 96px; /* 让出 composer 区 */
   width: 300px;
@@ -3666,42 +3689,35 @@
 /* ---- 优化汇总（Task 5）按钮行样式 ---- */
 .req-archive-button-row {
   display: flex;
+  /* 不用默认的 stretch：按钮会被行高拉伸变形，各自内边距不同时高度还会参差 */
+  align-items: center;
   gap: 8px;
   margin-top: 16px;
 }
+/* 三颗按钮的尺寸/圆角/过渡一律吃全局 .btn，这里只补「不参与 flex 伸缩」。
+   各自重设 padding/border-radius/font-size 会和页面其余按钮对不上号。
+   min-width 是为了「优化汇总 / 确认归档」等宽：同为四字，但 primary 带 600 字重会宽出几像素，
+   撑到同一下限后两颗按钮尺寸完全一致（更长的「查看汇总会话」不受影响）。 */
+.req-archive-button-row .btn {
+  flex: 0 0 auto;
+  min-width: 88px;
+}
 
+/* 「优化汇总」：归档前的推荐动作，用暖橙弱强调（与 .btn.stop 同一套观感）
+   把它从「查看汇总会话」里拎出来，又不去抢 primary——确认归档才是终态主操作。 */
 .req-retro-summary-btn {
-  flex: 0 0 auto;
-  padding: 8px 16px;
-  background-color: var(--secondary, #6c757d);
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
-  transition: background-color 0.2s;
+  background: var(--accent-soft);
+  border-color: rgba(217, 119, 87, 0.45);
+  color: var(--accent-hi);
+  font-weight: 500;
 }
-
-.req-retro-summary-btn:hover {
-  background-color: var(--secondary-dark, #5a6268);
-}
-
-/* 「查看汇总会话」：与主操作区分，走次要按钮观感 */
-.req-retro-view-btn {
-  flex: 0 0 auto;
-  padding: 8px 16px;
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
-  transition: all 0.15s;
-}
-.req-retro-view-btn:hover {
+.req-retro-summary-btn:hover:not(:disabled) {
+  background: rgba(217, 119, 87, 0.22);
   border-color: var(--accent);
   color: var(--text);
 }
+
+/* 「查看汇总会话」：默认 .btn 的幽灵态即是所需观感，不再重复声明 */
 
 /* ---- 优化汇总进度（前端编排，req.busy 不会被写，故自带一套进度展示）---- */
 .req-retro-progress:empty { display: none; } /* idle 时不占垂直空间 */
@@ -3753,11 +3769,6 @@
 .mem-act.danger:hover { color: var(--red); }
 /* .badge-dot 是绝对定位，宿主必须建立定位上下文 */
 #toolMemory .tool-item-title { position: relative; overflow: visible; }
-
-.req-retro-summary-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
 
 /* ---- 功能模块标签 chip（Task 7） ---- */
 .req-chip--tag {
@@ -3863,6 +3874,23 @@
 .opt-dim-hint { color: var(--muted); font-size: 12px; flex: 1; }
 .opt-dim-score { font-size: 18px; font-weight: 600; min-width: 36px; text-align: right; }
 .opt-dim-badge { color: var(--muted); font-size: 12px; }
+
+/* AI 维度分析中：分数位换成转圈。宽度与 .opt-dim-score 对齐，回填成数字时卡片不跳动 */
+.opt-dim.is-busy .opt-dim-hint { color: var(--accent-hi); }
+.opt-dim-spin {
+  min-width: 36px;
+  display: flex;
+  justify-content: flex-end;
+}
+.opt-dim-spin::after {
+  content: '';
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--faint);
+  border-top-color: var(--accent-hi);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
 
 .opt-issues { margin-top: 8px; display: none; flex-direction: column; gap: 4px; }
 .opt-dim.is-open .opt-issues { display: flex; }

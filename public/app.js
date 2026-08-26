@@ -1,5 +1,6 @@
 import './js/bootstrap.js'; // 必须最先：打包模式 fetch/EventSource 补丁
-import { whenBackendReady } from './js/boot-gate.js'; // 须在 bootstrap 之后：依赖其 fetch 补丁
+import { whenBackendReady, setOverlayHandoff } from './js/boot-gate.js'; // 须在 bootstrap 之后：依赖其 fetch 补丁
+import { maybeStartOnboarding } from './js/onboarding.js';
 import { bindTauriNav } from './js/tauri-init.js';
 import { $ } from './js/util.js';
 import { initJsonTool } from './js/json-tool.js';
@@ -16,15 +17,23 @@ import { initReqChat } from './js/req-chat.js';
 import { initMemoryPanel, refreshMemBadge } from './js/memory-view.js';
 import { initOptimizePanel } from './js/optimize-view.js';
 import toast from './js/toast.js';
+import { hydrateIcons } from './js/icons.js';
 
 // 初始化 Toast 组件
 window.toast = toast;
 toast._init();
 
+// index.html 里的 data-icon 占位注水。放在最前面：顶栏图标在启动闸门撤罩前就已可见，
+// 晚一步会先闪一个空按钮。
+hydrateIcons();
+
 bindTasksNav(() => showView('tasks'), () => activeView === 'tasks'); // 视图桥：跳转 + 活跃态查询（showView 已提升；activeView 惰性读取无 TDZ）
 bindChatNav(() => showView('chat'), () => activeView === 'chat'); // 视图桥：回聊天视图跳转 + 聊天视图是否激活（供顶栏审批徽标判定）
 bindTauriNav({ showView, openConv }); // 视图桥：托盘菜单 show-view 跳视图 + 点桌面通知回到对应会话（showView 提升；openConv 由 chat.js 导出）
 bindConvNotify({ applyInjected: applyInjectedItems, getCurrentConvId }); // 🔔 飞书开关 + 补充内容收件箱轮询（getCurrentConvId 传函数引用，模块内实时取，不缓存）
+// 新用户引导：注册给 boot-gate 的撤罩钩子。必须在下方 whenBackendReady() 被调用前注册。
+// 判定为老用户（已有任意模型）时 maybeStartOnboarding 返回 false，罩子照常撤，行为零变化。
+setOverlayHandoff(maybeStartOnboarding);
 
       // ---- 嵌入式面板视图（chat=对话 | settings | tasks | logs），替代原弹层 ----
       const appEl = $('.app');
@@ -85,14 +94,26 @@ bindConvNotify({ applyInjected: applyInjectedItems, getCurrentConvId }); // 🔔
         const convList = $('#convList');
         const toolsList = $('#toolsList');
         const title = $('#sidebarTitle');
+        const sidebarSwitch = $('#sidebarSwitch');
         if (!toggle) return;
         let toolsMode = false;
         function setToolsMode(on) {
           toolsMode = on;
           toggle.classList.toggle('active', on);
-          if (convList) convList.hidden = on;
-          if (toolsList) toolsList.hidden = !on;
-          if (title) title.textContent = on ? '工具' : '对话';
+          if (on) {
+            // 进入工具模式：隐藏 convList 和对话/需求切换 tab（工具列表独占侧边栏）
+            if (convList) convList.hidden = true;
+            if (toolsList) toolsList.hidden = false;
+            if (title) title.textContent = '工具';
+            if (sidebarSwitch) sidebarSwitch.hidden = true;
+            window._setSidebarCreateVisible?.(false);
+          } else {
+            // 退出工具模式：恢复切换 tab，交由 initSidebarSwitch 接管
+            if (toolsList) toolsList.hidden = true;
+            if (sidebarSwitch) sidebarSwitch.hidden = false;
+            window._restoreSidebarMode?.();
+            window._setSidebarCreateVisible?.(true);
+          }
           // 工具态底栏（「打开…」按钮）是工具列表的附属区，切回会话态必须一起收起，
           // 否则它会挂在会话列表底下
           window._syncToolsFooter?.();
@@ -108,6 +129,92 @@ bindConvNotify({ applyInjected: applyInjectedItems, getCurrentConvId }); // 🔔
         $('#toolOptimize')?.addEventListener('click', () => showView('optimize'));
         // 工具项：Markdown 查看工具 → 主区打开面板（panelView 开关由 showView 统一管理）
         $('#toolMarkdown')?.addEventListener('click', () => showView('markdown'));
+      })();
+
+      // ---- 侧栏「对话 / 需求」切换 ----
+      (function initSidebarSwitch() {
+        const switchBtns = document.querySelectorAll('.switch-btn');
+        const convList = document.getElementById('convList');
+        const reqList = document.getElementById('reqList');
+        const sidebarTitle = document.getElementById('sidebarTitle');
+        const createBtn = document.getElementById('sidebarCreateBtn');
+
+        if (!switchBtns.length || !convList || !reqList) return;
+
+        let currentMode = localStorage.getItem('claude-sidebar-mode') || 'conv';
+
+        function setMode(mode) {
+          if (currentMode === mode) return;
+          currentMode = mode;
+
+          // 更新 Switch 按钮 active 态和 ARIA
+          switchBtns.forEach(btn => {
+            const isActive = btn.dataset.target === mode;
+            btn.classList.toggle('active', isActive);
+            btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+          });
+
+          // 切换列表显隐
+          if (convList) convList.hidden = mode !== 'conv';
+          if (reqList) reqList.hidden = mode !== 'req';
+
+          // 更新标题
+          if (sidebarTitle) sidebarTitle.textContent = mode === 'conv' ? '对话' : '需求';
+
+          // 更新新建按钮文本和 title
+          if (createBtn) {
+            const label = mode === 'conv' ? '＋ 新建对话' : '＋ 新建需求';
+            createBtn.textContent = label;
+            createBtn.title = mode === 'conv' ? '新建对话' : '新建需求';
+          }
+
+          // 保存用户偏好
+          localStorage.setItem('claude-sidebar-mode', mode);
+        }
+
+        // Switch 按钮点击
+        switchBtns.forEach(btn => {
+          btn.addEventListener('click', () => setMode(btn.dataset.target));
+        });
+
+        // 新建按钮：委托给对应的隐藏代理按钮，代理按钮上已由 chat.js/req-view.js 绑定了实际逻辑
+        createBtn?.addEventListener('click', () => {
+          if (currentMode === 'conv') {
+            document.getElementById('sidebarNew')?.click();
+          } else {
+            document.getElementById('sidebarNewReq')?.click();
+          }
+        });
+
+        // 页面加载时初始化（临时置 null 绕过 early return，再调用 setMode）
+        const initMode = currentMode;
+        currentMode = null;
+        setMode(initMode);
+
+        // 供工具模式切换时联动（工具模式下隐藏新建按钮）
+        window._setSidebarCreateVisible = (visible) => {
+          const footer = createBtn?.closest('.sidebar-footer');
+          if (footer) footer.hidden = !visible;
+        };
+
+        // 供工具模式切回时恢复 Switch 状态
+        window._restoreSidebarMode = () => {
+          // 重放当前模式状态（不触发 setMode 的 early return）
+          const mode = currentMode;
+          switchBtns.forEach(btn => {
+            const isActive = btn.dataset.target === mode;
+            btn.classList.toggle('active', isActive);
+            btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+          });
+          if (convList) convList.hidden = mode !== 'conv';
+          if (reqList) reqList.hidden = mode !== 'req';
+          if (sidebarTitle) sidebarTitle.textContent = mode === 'conv' ? '对话' : '需求';
+          if (createBtn) {
+            const label = mode === 'conv' ? '＋ 新建对话' : '＋ 新建需求';
+            createBtn.textContent = label;
+            createBtn.title = mode === 'conv' ? '新建对话' : '新建需求';
+          }
+        };
       })();
 
       // ---- 启动初始化 ----

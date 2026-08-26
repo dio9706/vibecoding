@@ -4,6 +4,7 @@
  */
 import { $ } from './util.js';
 import { confirmDialog, promptDialog } from './ui.js';
+import { setIconText, EDIT_ICON_SVG } from './icons.js';
 
 const CATEGORY_LABEL = {
   'code-style': '代码风格', collaboration: '协作习惯', writing: '写作习惯',
@@ -24,10 +25,12 @@ async function api(path, body) {
   return d;
 }
 
-function makeAct(label, title, cls, onClick) {
+/** @param {string} labelOrIcon 文本，或 icons.js 的内联 SVG（按钮上有的是文字有的是图标） */
+function makeAct(labelOrIcon, title, cls, onClick) {
   const b = document.createElement('button');
   b.className = 'mem-act' + (cls ? ' ' + cls : '');
-  b.textContent = label;
+  if (labelOrIcon.startsWith('<svg')) setIconText(b, labelOrIcon);
+  else b.textContent = labelOrIcon;
   b.title = title;
   b.onclick = onClick;
   return b;
@@ -81,7 +84,7 @@ function makeRow(it) {
     }));
   }
 
-  row.appendChild(makeAct('✎', '编辑措辞', '', async () => {
+  row.appendChild(makeAct(EDIT_ICON_SVG, '编辑措辞', '', async () => {
     const v = await promptDialog({ title: '编辑偏好', value: it.statement });
     if (v === null || v.trim() === '') return;
     try { await api('/api/memory/confirm', { id: it.id, statement: v.trim() }); window.toast.success('已保存'); refresh(); }

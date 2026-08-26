@@ -14,6 +14,7 @@ import {
 import { bindDirPopover, closeDirModal } from './dir-popover.js';
 import { AnimeAnimations } from './anim.js';
 import { registerDropZone } from './drag-bus.js';
+import { setIconText, PIN_ICON_SVG, REFRESH_ICON_SVG, WAITING_ICON_SVG } from './icons.js';
 bindDirPopover({ getCwd: () => cwd, selectDir }); // 惰性读 cwd 无 TDZ；selectDir 已提升
 // Tauri 桌面版：文件/目录拖入直接插本地路径 chip，无需上传副本。
 // 走拖拽总线而非旧的单槽位 bindTauriDrop——Markdown 查看器也要注册，单槽位会互相覆盖。
@@ -366,7 +367,7 @@ export function bindMarkdownNav(fn) {
           const pinIc = document.createElement('span');
           pinIc.className = 'conv-pin-ic';
           pinIc.title = '已钉住';
-          pinIc.innerHTML = '<svg viewBox="0 0 1024 1024" width="11" height="11" fill="currentColor"><path d="M574.4 192l-64 192H320l64-64-128-192 192 64-64 64 192-64zM832 576L640 384l-128 192 128 64-192 320 64-256-64-128 192 64z"/></svg>';
+          pinIc.innerHTML = PIN_ICON_SVG;
           row.appendChild(pinIc);
         }
         const title = document.createElement('span');
@@ -1891,7 +1892,7 @@ export function renderConvListNow() {
         }
         const shouldShow = !_isChatViewActive() && askCount > 0;
         chip.hidden = !shouldShow;
-        if (shouldShow) chip.textContent = `⏳ ${askCount} 待确认`;
+        if (shouldShow) setIconText(chip, WAITING_ICON_SVG, `${askCount} 待确认`);
       }
       // 点击顶栏审批徽标：回聊天视图 → 打开第一个有待确认的会话 → 滚动到该提问卡片
       $('#askChip')?.addEventListener('click', () => {
@@ -3110,10 +3111,10 @@ export function renderConvListNow() {
         const p = currentConvId && pendingMap[currentConvId];
         if (p && p.status === 'waiting') {
           if (p.reason === 'orphan_recovery') {
-            banner.textContent = `🔄 进程重启，任务自动续接中…`;
+            setIconText(banner, REFRESH_ICON_SVG, '进程重启，任务自动续接中…');
           } else {
             // quota_exhausted 或默认情况
-            banner.textContent = `⏳ 额度用尽，本任务将于 ${fmtResetTime(p.resetsAt)}（token 重置）后自动继续`;
+            setIconText(banner, WAITING_ICON_SVG, `额度用尽，本任务将于 ${fmtResetTime(p.resetsAt)}（token 重置）后自动继续`);
           }
           banner.hidden = false;
         } else {
@@ -3183,7 +3184,8 @@ export function renderConvListNow() {
         }
         const chip = $('#pendingChip');
         chip.hidden = waiting === 0;
-        chip.textContent = waiting ? `⏳ ${waiting} 个任务待续跑` : '';
+        if (waiting) setIconText(chip, WAITING_ICON_SVG, `${waiting} 个任务待续跑`);
+        else chip.textContent = '';
         renderPendingBanner();
       }
 

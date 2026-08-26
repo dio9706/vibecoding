@@ -10,6 +10,11 @@ import { openRequirement, refreshReqList } from './req-view.js';
 import { openChangeDialog } from './req-change.js';
 import { openUiSpecDialog } from './req-uispec.js';
 import { openMapOverlay } from './req-map-overlay.js';
+import {
+  iconEl, setIconText, FRONTEND_ICON_SVG, BACKEND_ICON_SVG, DOC_ICON_SVG,
+  MAP_ICON_SVG, DESIGN_ICON_SVG, CHANGE_ICON_SVG,
+  REFRESH_ICON_SVG, WAITING_ICON_SVG, SETTINGS_ICON_SVG,
+} from './icons.js';
 
 /**
  * 开发期首轮 develop 提示词（客户端侧，与 req-logic.js buildDevelopPrompt 保持等值）。
@@ -195,12 +200,43 @@ function renderChrome(data) {
   renderBanner(data);
   renderRail(data);
   document.querySelector('.app')?.classList.add('req-rail-open');
+  syncRailTop(); // 横幅刚重画完，此刻量到的底边才是最终值
+  observeRailTop();
 }
 
-function chip(text, cls = '') {
+/** 右栏顶边同步：#pendingBanner / #tokenBanner（如账号轮换提示）是文档流元素，一出现就把
+ *  需求横幅整体下推。右栏是 fixed，顶边若不跟着走就会压住横幅右端的阶段按钮 —— 表现为
+ *  [完成开发] 被遮住点不到。横幅自身换行变高同样覆盖。 */
+function syncRailTop() {
+  const bottom = bannerEl?.getBoundingClientRect().bottom || 0;
+  if (!bottom) return; // 横幅隐藏（面板视图/未挂载）时右栏也不可见，别写脏值进变量
+  document.documentElement.style.setProperty('--req-rail-top', Math.round(bottom) + 'px');
+}
+
+let railTopRO = null;
+
+/** 顶部这一串谁变高都要重算。注意 ResizeObserver 只在被观测元素**自身尺寸**变化时回调，
+ *  横幅「被推下去」属于位置变化、观测它自己是收不到的 —— 推它的那几个必须逐个观测。 */
+function observeRailTop() {
+  if (railTopRO) return; // 幂等：每次 mount 都会调
+  // jsdom（单元测试环境）没有 ResizeObserver。生产是 Chromium webview，必然有；
+  // 这里退化为「只在 renderChrome 时同步一次」，不能让测试环境把 mount 整条链炸掉。
+  if (typeof ResizeObserver === 'undefined') return;
+  railTopRO = new ResizeObserver(syncRailTop);
+  ['.topbar', '#pendingBanner', '#tokenBanner'].forEach((sel) => {
+    const el = document.querySelector(sel);
+    if (el) railTopRO.observe(el);
+  });
+  if (bannerEl) railTopRO.observe(bannerEl);
+}
+
+/** @param {string} [icon] 内联 SVG（见 icons.js）。图标与文本分成两个节点，
+ *  是因为 .req-chip 已是 inline-flex + gap，拼在一个文本节点里反而要靠空格凑间距。 */
+function chip(text, cls = '', icon = '') {
   const el = document.createElement('span');
   el.className = 'req-chip' + (cls ? ' ' + cls : '');
-  el.textContent = text;
+  if (icon) el.appendChild(iconEl(icon));
+  el.appendChild(document.createTextNode(text));
   return el;
 }
 
@@ -210,11 +246,11 @@ function renderBanner(data) {
 
   const f = data.projects?.frontend;
   const b = data.projects?.backend;
-  if (f?.dir) bannerEl.appendChild(chip(`🖥 ${dirTail(f.dir)} · ${f.dev ? '开发' : '只读'}`));
-  if (b?.dir) bannerEl.appendChild(chip(`🗄 ${dirTail(b.dir)} · ${b.dev ? '开发' : '只读'}`));
+  if (f?.dir) bannerEl.appendChild(chip(`${dirTail(f.dir)} · ${f.dev ? '开发' : '只读'}`, '', FRONTEND_ICON_SVG));
+  if (b?.dir) bannerEl.appendChild(chip(`${dirTail(b.dir)} · ${b.dev ? '开发' : '只读'}`, '', BACKEND_ICON_SVG));
 
   // 需求文档芯片：点开抽屉看开发文档（终稿），评审产物是开发期的施工蓝图
-  const docChip = chip('📄 开发文档', 'clickable');
+  const docChip = chip('开发文档', 'clickable', DOC_ICON_SVG);
   docChip.title = '查看开发文档终稿';
   docChip.addEventListener('click', () => openDocDrawer(data.id));
   bannerEl.appendChild(docChip);
@@ -260,7 +296,7 @@ function renderBusyChip(busy) {
   if (!el) return;
   if (busy) {
     el.hidden = false;
-    el.textContent = `⚙ 系统任务运行中（${BUSY_KIND_LABELS[busy.kind] || busy.kind || '…'}）`;
+    setIconText(el, SETTINGS_ICON_SVG, `系统任务运行中（${BUSY_KIND_LABELS[busy.kind] || busy.kind || '…'}）`);
   } else {
     el.hidden = true;
     el.textContent = '';
@@ -417,7 +453,7 @@ function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
       name.title = `${doc.name} · 更新于 ${fmtTime(doc.updatedAt)}`;
       const replace = document.createElement('button');
       replace.className = 'q-btn';
-      replace.textContent = '🔄';
+      setIconText(replace, REFRESH_ICON_SVG);
       replace.title = '替换（选择新文件上传）';
       replace.addEventListener('click', () => {
         pendingReplaceName = doc.name;
@@ -466,7 +502,7 @@ function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
     if (uploadingName) {
       const row = document.createElement('div');
       row.className = 'req-apidoc-item uploading';
-      row.textContent = `⏳ ${uploadingName} 上传中…`;
+      setIconText(row, WAITING_ICON_SVG, `${uploadingName} 上传中…`);
       listBox.appendChild(row);
     }
     if (!docs.length && !uploadingName) {
@@ -549,14 +585,13 @@ function renderReqMgmtSection(data) {
   const hasConv = !!data.convId;
   const specDir = data.devCwd || data.projects?.frontend?.dir || data.projects?.backend?.dir || '';
 
+  /** @param {string} icon 内联 SVG（icons.js 的常量），不是 emoji */
   const mk = (icon, label, sub, onClick, { highlight = false, disabled = false, tip = '' } = {}) => {
     const b = document.createElement('button');
     b.className = 'rq-railbtn' + (highlight ? ' hi' : '');
     b.disabled = disabled;
     if (tip) b.title = tip;
-    const i = document.createElement('span');
-    i.className = 'rq-ri';
-    i.textContent = icon;
+    const i = iconEl(icon, 'rq-ri');
     const t = document.createElement('span');
     t.className = 'rq-rt';
     t.appendChild(Object.assign(document.createElement('span'), { textContent: label }));
@@ -570,7 +605,7 @@ function renderReqMgmtSection(data) {
     return b;
   };
 
-  mk('⚡', '需求变动', '中途改需求 / 补口头约定', () =>
+  mk(CHANGE_ICON_SVG, '需求变动', '中途改需求 / 补口头约定', () =>
     openChangeDialog({
       reqId: data.id,
       hasMap,
@@ -580,14 +615,14 @@ function renderReqMgmtSection(data) {
   { highlight: true });
 
   mk(
-    '🗺',
+    MAP_ICON_SVG,
     '需求地图',
     hasMap ? 'v' + mapVersions[mapVersions.length - 1].v + ' · 点开查看' : '（本需求暂无地图）',
     () => openMapOverlay({ reqId: data.id, phase: data.phase }),
     { disabled: !hasMap, tip: hasMap ? '' : '评审期生成开发文档时会一并产出' },
   );
 
-  mk('🎨', 'UI 规范', specDir ? dirTail(specDir) : '（未配置工程目录）', () => openUiSpecDialog({ dir: specDir, hasConv }), {
+  mk(DESIGN_ICON_SVG, 'UI 规范', specDir ? dirTail(specDir) : '（未配置工程目录）', () => openUiSpecDialog({ dir: specDir, hasConv }), {
     disabled: !specDir,
   });
 

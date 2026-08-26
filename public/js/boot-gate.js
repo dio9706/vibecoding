@@ -12,6 +12,15 @@ const HARD_GIVEUP_MS = 90000; // 兜底放行：避免后端永久不通时卡�
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let _promise = null;
+let _handoff = null;
+
+/** 注册撤罩接管者：boot-gate 在撤罩前 await 它，返回 true 表示接管
+ *  （罩子不 hide/remove，生命周期移交给接管者）。
+ *  新用户引导用这个复用启动罩，避免另起一个 overlay 导致 LOGO 卸载重建闪断。
+ *  必须在 whenBackendReady() 被调用前注册。 */
+export function setOverlayHandoff(fn) {
+  _handoff = fn;
+}
 
 /** 后端就绪（或用户跳过 / 兜底超时）后 resolve。幂等：多次调用共用同一次探测。 */
 export function whenBackendReady() {
@@ -66,6 +75,21 @@ async function _run() {
     }
     if (elapsed > SKIP_BTN_MS && skipEl && skipEl.hidden) skipEl.hidden = false;
     await sleep(RETRY_GAP_MS);
+  }
+
+  // 撤罩前问一句有没有人接管（新用户引导要原地复用这个罩子）。
+  // 接管者抛异常也照常撤罩：引导炸了顶多没引导，把用户永久锁在罩子里是另一个量级的故障。
+  if (_handoff) {
+    let taken = false;
+    try {
+      taken = await _handoff(overlay);
+    } catch (e) {
+      console.error('[Boot] 撤罩接管者异常，照常撤罩', e);
+    }
+    if (taken) {
+      console.log('[Boot] 启动罩已移交接管者');
+      return;
+    }
   }
 
   if (overlay) {

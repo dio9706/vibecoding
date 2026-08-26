@@ -29,7 +29,12 @@ export function sortIssues(issues) {
 
 /**
  * 把报告摊平成 UI 需要的维度列表。
- * selectable 的含义是「这个维度能不能参与一键优化」——只有跑出结果的才行。
+ *
+ * selectable 的含义是「这个维度能不能参与一键优化」——只有跑出**完整**结果的才行。
+ * partial 有分数但结论不完整（LLM 只判了一部分/没判成），拿它去驱动自动修改会漏改错改，
+ * 所以照样不可勾选，只把分数亮出来并标注原因。
+ *
+ * busy 专给 analyzing：LLM 维度是异步回填的，卡片要先转圈占位，等 SSE 送来结果再变成分数。
  */
 export function dimListFrom(report) {
   return DIM_META.map((meta) => {
@@ -44,6 +49,8 @@ export function dimListFrom(report) {
       issueCount: d?.issues?.length || 0,
       issues: sortIssues(d?.issues),
       reason: d?.reason || '',
+      busy: status === 'analyzing',
+      note: status === 'partial' ? '未深度分析，分数仅供参考且不计入总分' : '',
       selectable: status === 'done',
     };
   });

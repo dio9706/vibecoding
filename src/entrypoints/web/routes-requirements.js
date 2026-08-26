@@ -1,12 +1,14 @@
 /** web 入口：需求工作流 HTTP 路由 —— 单入口 handleRequirementRoutes 按 pathname+method 分发 */
 import fs from 'node:fs';
 import { getRequirement, getRequirements, updateRequirement, createRequirement, canTransition, normalizeSessions } from '../../store/requirements.js';
-import { enqueueSystemTask, finalizeRequirement, archiveRequirement, hasQueuedTasks, reqDir, readMapVersion, DOCGEN_GUIDE } from './requirement-ops.js';
+import { enqueueSystemTask, finalizeRequirement, archiveRequirement, hasQueuedTasks, queuedTasks, reqDir, readMapVersion, DOCGEN_GUIDE, docgenAborts, userStoppedSet, docgenLiveLine } from './requirement-ops.js';
 import { pickCwdAndDirs, buildSeedPrompt } from './req-logic.js';
 import { getTopFiles, getFeatureIndex } from '../../store/feature-index.js';
 import { writePitfalls, ensureClaudeMdRef } from './req-pitfalls.js';
 import { inspectBitable, confirmBug, ignoreBug, retryBug, currentInspectIdentity } from './req-inspect.js';
 import { parseBitableLink } from '../../plugins/team-tools/bug-patrol/logic.js';
+import { extractDocLinks } from '../../channels/feishu-normalize.js';
+import { fetchDocRawContent, resolveWikiNodeObj } from '../../integrations/lark.js';
 import { hasActiveRunForConv } from '../../store/runs.js';
 import { handleReqV2Routes } from './routes-req-v2.js';
 import { sendJson } from './http-util.js';
@@ -73,10 +75,14 @@ function handleGet(url, res) {
     // 地图一并带回，省掉前端「拿到需求再拉一次地图」的第二跳（busy 轮询每 3s 一次，多一跳就是多一倍请求）
     mapLatest: readMapVersion(r),
     queued: hasQueuedTasks(id),
+    // 排队窗口期前端要合成一个 busy 来显示进度，而「分析中」与「生成中」的文案和时长口径
+    // 完全不同，光有 queued 布尔值会把 quizgen 显示成「开发文档生成中」
+    queuedKind: queuedTasks(id)[0]?.kind ?? null,
     devCwd: pickCwdAndDirs(r.projects).cwd,
     sessions: normalizeSessions(r),
     seed: r.phase === 'dev' || r.phase === 'test' ? buildSeedPrompt(r, { featureSnapshot }) : null,
     featureTag: r.featureTag ?? null,
+    liveLog: docgenLiveLine.get(id) || null,
   });
 }
 
@@ -122,21 +128,29 @@ function buildProjectsPatch(input, existing) {
   return { value: out };
 }
 
-/** reqDoc 补丁：{name,text} 落盘写入 req-doc.md；{name,path} 登记已上传文件（校验存在性） */
+/**
+ * reqDoc 补丁：{name,text} 落盘写入 req-doc.md；{name,path} 登记已上传文件（校验存在性）。
+ *
+ * url/fetchedAt 是在线来源（飞书文档）的溯源信息，只在提供时附带：下游读的始终是落盘快照，
+ * 这两个字段仅供界面显示来源、判断要不要给「刷新」按钮——粘贴与上传两种来源没有可刷新的源头。
+ */
 function buildReqDocPatch(id, reqDoc) {
   if (reqDoc === null) return { value: null };
   if (typeof reqDoc !== 'object') return { error: 'reqDoc 格式不正确' };
   const name = str(reqDoc.name);
   if (!name) return { error: 'reqDoc.name 不能为空' };
+  const origin = {};
+  if (str(reqDoc.url)) origin.url = str(reqDoc.url);
+  if (str(reqDoc.fetchedAt)) origin.fetchedAt = str(reqDoc.fetchedAt);
   if (typeof reqDoc.text === 'string') {
     const p = reqDir(id, 'req-doc.md');
     fs.writeFileSync(p, reqDoc.text, 'utf8');
-    return { value: { name, path: p } };
+    return { value: { name, path: p, ...origin } };
   }
   if (typeof reqDoc.path === 'string') {
     const p = str(reqDoc.path);
     if (!p || !fs.existsSync(p)) return { error: 'reqDoc.path 指向的文件不存在' };
-    return { value: { name, path: p } };
+    return { value: { name, path: p, ...origin } };
   }
   return { error: 'reqDoc 需提供 text 或 path' };
 }
@@ -179,6 +193,68 @@ function handleConfig(req, res) {
       backend: updated.projects?.backend?.dir || null,
       reqDoc: updated.reqDoc?.name || null,
     });
+    sendJson(res, 200, updated);
+  });
+}
+
+// ==== POST /api/req/doc-from-link {id,url?} ====
+/**
+ * 飞书云文档 → 需求文档快照。
+ *
+ * 首次拉取与「刷新」共用一个入口：url 省略时取 reqDoc.url 重拉，落盘覆盖同一份 req-doc.md。
+ * 存快照而不是每次生成时实时取，有两个原因：下游 runDocgen/runQuizGen 读的是落盘文件（同步读），
+ * 改实时取要把整条链路改成异步、且每次生成都多一个网络与权限失败点；更重要的是同一份需求的
+ * 多次生成（首版 + 若干次修订）必须基于同一份正文，否则文档中途被人改过会导致问题无法复现。
+ *
+ * 代价是文档在飞书改了不会自动同步，靠界面上的拉取时间与「刷新」按钮兜住。
+ */
+function handleDocFromLink(req, res) {
+  return withJsonBody(req, res, async (data) => {
+    const id = str(data.id);
+    const r = getRequirement(id);
+    if (!r) return sendJson(res, 404, { error: '需求不存在' });
+    if (r.phase !== 'review') return sendJson(res, 409, { error: '仅评审设计期可修改配置' });
+
+    const url = str(data.url) || str(r.reqDoc?.url); // 省略 url = 刷新当前来源
+    if (!url) return sendJson(res, 400, { error: '缺少文档链接' });
+    const link = extractDocLinks(url)[0];
+    if (!link) return sendJson(res, 400, { error: '不是飞书云文档链接，只支持 /docx/ 与 /wiki/ 两种地址' });
+
+    let content;
+    try {
+      let docToken = link.token;
+      if (link.kind === 'wiki') {
+        // wiki 链接指向的是节点不是文档，多维表格/画板同样用 wiki 地址分享，必须先问清类型，
+        // 否则会拿一个 bitable token 去调 docx 接口，报错信息与真实原因对不上
+        const node = await resolveWikiNodeObj(link.token);
+        if (!node) return sendJson(res, 400, { error: 'wiki 节点不存在，或对机器人不可见' });
+        if (node.objType !== 'docx') {
+          return sendJson(res, 400, { error: `该 wiki 节点是「${node.objType}」而不是文档，不能作为需求文档` });
+        }
+        docToken = node.objToken;
+      }
+      content = await fetchDocRawContent(docToken);
+    } catch (e) {
+      const msg = e?.message || String(e);
+      logger.warn('req-routes', '拉取飞书文档失败', { reqId: id, url, err: msg });
+      // 最高频的失败原因是机器人不是该文档的协作者，错误里必须直接给出解法，
+      // 否则用户只看到一句飞书原文的 permission denied，不知道该去哪儿点什么
+      return sendJson(res, 502, {
+        error: `拉取飞书文档失败：${msg}。请确认已把机器人加为该文档的协作者，且应用已开通云文档读取权限。`,
+      });
+    }
+
+    if (!content.trim()) return sendJson(res, 400, { error: '文档内容为空，请确认链接指向的是需求正文' });
+    const title = content.split('\n')[0]?.trim().slice(0, 30) || '飞书需求文档';
+    const dr = buildReqDocPatch(id, {
+      name: `${title}.md`,
+      text: content,
+      url,
+      fetchedAt: new Date().toISOString(),
+    });
+    if (dr.error) return sendJson(res, 400, { error: dr.error });
+    const updated = updateRequirement(id, { reqDoc: dr.value }, `拉取飞书需求文档「${title}」`);
+    logger.info('req-routes', '飞书需求文档已落地', { reqId: id, title, chars: content.length });
     sendJson(res, 200, updated);
   });
 }
@@ -608,6 +684,27 @@ function handleFeatureTag(req, res) {
   });
 }
 
+// ==== POST /api/req/docgen/stop ====
+function handleDocgenStop(req, res) {
+  return withJsonBody(req, res, (data) => {
+    const id = str(data.id);
+    if (!id) return sendJson(res, 400, { error: 'id 不能为空' });
+
+    const abort = docgenAborts.get(id);
+    if (!abort) return sendJson(res, 404, { error: '无进行中的生成任务' });
+
+    // 标记用户主动停止，runDocgen 的 catch 里据此区分事件类型
+    userStoppedSet.add(id);
+    try {
+      abort.abort(new Error('用户停止'));
+    } catch (e) {
+      logger.warn('req-routes', 'docgenStop abort 调用异常', { reqId: id, err: e?.message });
+    }
+    logger.info('req-routes', 'docgen 停止已请求', { reqId: id });
+    return sendJson(res, 200, { ok: true });
+  });
+}
+
 // ==== GET /api/feature-index ====
 function handleFeatureIndex(res) {
   sendJson(res, 200, { index: getFeatureIndex() });
@@ -624,7 +721,9 @@ export function handleRequirementRoutes(req, res, url) {
   if (pathname === '/api/req/get' && method === 'GET') return handleGet(url, res);
   if (pathname === '/api/req/doc' && method === 'GET') return handleDoc(url, res);
   if (pathname === '/api/req/config' && method === 'PUT') return handleConfig(req, res);
+  if (pathname === '/api/req/doc-from-link' && method === 'POST') return handleDocFromLink(req, res);
   if (pathname === '/api/req/docgen' && method === 'POST') return handleDocgen(req, res);
+  if (pathname === '/api/req/docgen/stop' && method === 'POST') return handleDocgenStop(req, res);
   if (pathname === '/api/req/supplement' && method === 'POST') return handleSupplement(req, res);
   if (pathname === '/api/req/finalize' && method === 'POST') return handleFinalize(req, res);
   if (pathname === '/api/req/apidoc' && method === 'POST') return handleApidocPost(req, res);

@@ -81,12 +81,19 @@
   position: absolute; inset: 0; overflow: hidden;
   background: radial-gradient(circle at 1px 1px, var(--border-soft) 1px, transparent 0) 0 0 / 22px 22px, var(--bg);
 }
-.rq-canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; cursor: grab; }
-.rq-canvas.grabbing { cursor: grabbing; }
+.rq-canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; user-select: none; }
+.rq-canvas-host { cursor: grab; }
+.rq-canvas-host.grabbing { cursor: grabbing; }
 .rq-edges { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
-.rq-edges path { fill: none; stroke: var(--border); stroke-width: 1.6; }
-.rq-edges circle { fill: var(--border); }
-.rq-elabel { fill: var(--faint); font-size: 10.5px; font-family: var(--mono, monospace); }
+/* 直接子选择器：不能让 fill:none 命中 <marker> 内部的箭头 path，否则箭头不可见 */
+.rq-edges > path { fill: none; stroke: var(--border); stroke-width: 1.6; transition: stroke .12s, opacity .12s; }
+.rq-edges > path.hl { stroke: var(--blue); stroke-width: 2.4; }
+.rq-edges > path.dim { opacity: .22; }
+.rq-ahead { fill: var(--border); }
+.rq-ahead-hl { fill: var(--blue); }
+.rq-elabel { fill: var(--faint); font-size: 10.5px; font-family: var(--mono, monospace); transition: fill .12s, opacity .12s; }
+.rq-elabel.hl { fill: var(--blue); }
+.rq-elabel.dim { opacity: .22; }
 
 .rq-tools {
   position: absolute; left: 14px; top: 14px; z-index: 20;
@@ -136,6 +143,7 @@
 .rq-nname { font-size: 13.5px; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rq-nflag { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: rgba(155, 127, 224, 0.16); color: var(--purple); white-space: nowrap; }
 .rq-nflag.rq-figma { background: rgba(91, 141, 239, 0.16); color: var(--blue); }
+.rq-nflag.rq-entry { background: rgba(108, 195, 138, 0.16); color: var(--green); }
 .rq-nfile { font-family: var(--mono, monospace); font-size: 10.5px; color: var(--faint); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rq-ncount { display: flex; gap: 7px; margin-top: 7px; font-size: 11px; font-family: var(--mono, monospace); }
 .rq-ncount i { font-style: normal; }
@@ -222,6 +230,8 @@
 }
 .rq-jump-item:hover { background: var(--border-soft); }
 .rq-jump-item i { font-style: normal; font-family: var(--mono, monospace); font-weight: 700; }
+/* 跳转动作要盖掉上一条给逻辑点符号（＋/~/－）设的等宽粗体 */
+.rq-jump-item i.rq-elink { font-family: inherit; font-weight: 400; font-size: 11.5px; color: var(--faint); }
 
 /* ── 设计稿挂载 / 还原 ────────────────────────────────────────────────── */
 .rq-figrow { display: flex; gap: 8px; }
@@ -319,4 +329,69 @@
   .rq-report-map { min-height: 460px; }
   /* 窄屏抽屉铺满，汇总条无处可让，直接收起（关掉抽屉即回来） */
   .rq-map.rq-drawer-open .rq-foot { display: none; }
+}
+
+/* ---- 需求地图 Minimap ---- */
+.rq-minimap {
+  position: absolute;
+  /* 与左上角工具条上沿齐平：工具条在 left:14px，一左一右不打架 */
+  top: 14px;
+  right: 14px;
+  width: 200px;
+  height: 150px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  z-index: 10;
+}
+
+.rq-minimap-content {
+  width: 100%;
+  height: 100%;
+  transform-origin: 0 0;
+  position: relative;
+  pointer-events: none;
+}
+
+.rq-minimap-content .rq-canvas {
+  transform-origin: 0 0;
+}
+
+.rq-minimap-content .rq-node {
+  cursor: default;
+}
+
+.rq-minimap-viewport {
+  position: absolute;
+  border: 2px solid var(--blue);
+  background: rgba(91, 141, 239, 0.1);
+  cursor: grab;
+  box-sizing: border-box;
+  pointer-events: auto;
+}
+
+.rq-minimap-viewport:active {
+  cursor: grabbing;
+  background: rgba(91, 141, 239, 0.2);
+}
+
+.rq-minimap-viewport.dragging {
+  background: rgba(91, 141, 239, 0.3);
+}
+
+/* ---- 工具条提示图标 ---- */
+.rq-tip-icon {
+  display: inline-block;
+  margin-right: 8px;
+  font-size: 14px;
+  color: var(--muted);
+  cursor: help;
+  vertical-align: middle;
+  user-select: none;
+}
+
+.rq-tip-icon:hover {
+  color: var(--text);
 }

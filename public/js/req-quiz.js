@@ -1,9 +1,11 @@
 /**
- * 评审期不确定点问卷 —— 生成开发文档的模态前置。
+ * 评审期不确定点问卷 —— 生成开发文档的前置闸，就地渲染在主栏。
  *
- * 为什么是模态而不是整页接管：问卷是「点生成之后」才发生的事，不是用户需要规划的
- * 阶段。整页接管会让它看起来像一个独立环节，而它其实是生成动作里的一道闸——底层
- * 配置页仍在，用户才清楚自己处在哪一步。
+ * 本模块只做三件事：发起出题、渲染问卷面板、提交答案。**轮询与状态归 req-view 管**——
+ * 早先这里自己拿一套 2s 轮询等出题，与 req-view 的 3s busy 轮询并存，且带 2 分钟超时：
+ * 一超时就把「还在后台跑的 quizgen」误判成「没找出歧义」，静默丢掉问卷、转头去发 docgen，
+ * 而那一刻后端 busy 还没清，docgen 又被 409 挡回来——用户看到的就是转两分钟后一切照旧。
+ * 现在没有超时，出题结束由 busy 的下降沿判定，只此一条判据。
  *
  * 必答规则：每题都要选，未选时「下一题」禁用。逃生口不是整体跳过（那会让必答形同
  * 虚设），而是每题末尾的「不确定」—— 用户至少被迫看过一遍这些点，而看一遍本身就
@@ -18,16 +20,12 @@
  */
 const UNSURE_VALUE = '__unsure__';
 
-/** 问卷生成轮询：间隔与上限。quizgen 要通读需求文档，十几秒到一分钟不等。 */
-const POLL_MS = 2000;
-const POLL_MAX = 60; // 2 分钟兜底，超时按「分析失败」走降级
 
-// ---- 模块态：模态是单例，答案要跨翻页保留 ----
+// ---- 模块态：面板是单例，答案要跨翻页保留 ----
 let answers = {}; // { [qid]: { v, note } }
 let noteOpen = {}; // { [qid]: boolean }；展开态单独记，翻页回来不丢
 let idx = 0;
-let modalEl = null;
-let pollAbort = false;
+let panelHost = null; // 当前挂载的面板根节点，翻页/选答后就地重绘用
 // 只在「刚展开补充框」那一次抢焦点。paint 每次都重建 textarea，若无条件 focus，
 // 用户点选项触发的重绘会把焦点从选项区抢到输入框里。
 let focusNote = false;
@@ -56,20 +54,24 @@ function answeredCount(questions) {
 // ══════════════════════════════════════════════════════════════════════════
 
 /**
- * 「生成开发文档」的完整流程：确保有问卷 → 逐题必答 → 提交并转入 docgen。
+ * 「生成开发文档」的入口：决定走哪条岔路并发起，**不等结果**。
  *
  * 三条岔路（省额度是刻意的：quizgen 每次都要通读需求文档）：
  * - quiz.status==='answered' 且非强制重答 → 结论还在，直接 docgen，不重问
- * - quiz.status==='ready'                → 上次开了模态但取消了，复用已出的题
+ * - quiz.status==='ready'                → 上次出了题没答完，复用已出的题
  * - 无 quiz / 强制重答                    → 真正发起一次 quizgen
+ *
+ * 第三条发起后就交给 req-view：busy 一落，它的 3s 轮询接管；出题结束时由 busy 的下降沿
+ * 决定「开面板」还是「无歧义降级」。本函数不再自己等，也就不存在超时误判。
  *
  * @param {object} opts
  * @param {object} opts.req 当前需求记录
- * @param {Function} opts.fetchReq (id) => {ok,data}，由 req-view 注入，避免本模块关心接口细节
- * @param {Function} opts.onRefresh 提交/降级成功后刷新需求页
+ * @param {Function} opts.onRefresh 刷新需求页
+ * @param {Function} opts.onOpenPanel 占住主栏的问卷面板（题目就绪后才真正渲染出来）
  * @param {boolean} [opts.forceNewQuiz] 「重答」入口传 true，强制重新出题
+ * @returns {Promise<{failed?: boolean}|void>} failed=true 表示出题没起来，调用方需收回面板
  */
-export async function startGenerateFlow({ req, fetchReq, onRefresh, forceNewQuiz = false }) {
+export async function startGenerateFlow({ req, onRefresh, onOpenPanel, forceNewQuiz = false }) {
   const status = req.quiz?.status;
   const hasQuestions = !!req.quiz?.questions?.length;
 
@@ -78,33 +80,23 @@ export async function startGenerateFlow({ req, fetchReq, onRefresh, forceNewQuiz
   }
 
   resetQuizState();
-  if (!forceNewQuiz && status === 'ready' && hasQuestions) {
-    return mountModal(req, req.quiz.questions, { fetchReq, onRefresh });
-  }
+  if (!forceNewQuiz && status === 'ready' && hasQuestions) return void onOpenPanel?.();
 
-  // 真正出题：先开模态显示等待态，再发请求 —— 反过来会有一段"点了没反应"的空窗
-  mountModal(req, null, { fetchReq, onRefresh });
+  // 先占面板再发请求：此刻还没有题，主栏仍是配置卡 + 顶部 busy 条（生成中的观感不变），
+  // 占位是为了让出题结束那一刻的下降沿知道「这一轮是用户主动发起的」。
+  onOpenPanel?.();
   const started = await postJson('/api/req/quiz', { id: req.id });
   if (started.status !== 202) {
-    // 出题都没起来（配置不全 / 已有任务在跑），如实说明并把模态收掉，
-    // 不静默降级：这类失败用户改配置就能解决，替他跳过反而藏了问题
-    closeModal();
+    // 出题都没起来（配置不全 / 已有任务在跑），如实说明，不静默降级：
+    // 这类失败用户改配置就能解决，替他跳过反而藏了问题
     window.toast.error(started.data?.error || '问卷生成失败');
-    return;
+    return { failed: true };
   }
-  const questions = await pollQuestions(req.id, fetchReq);
-  if (pollAbort) return; // 用户已取消
-  if (!questions) {
-    // 分析没找出歧义 / 解析失败：这不该挡住生成，直接跳到读代码
-    // （runQuizGen 失败时会把 quiz 置 null，故这里拿不到题）
-    closeModal();
-    return runDocgenDirect(req.id, onRefresh, '未发现明显歧义，直接生成开发文档');
-  }
-  if (modalEl) paint(req, questions, { fetchReq, onRefresh });
+  onRefresh?.(); // 立刻刷新，让 busy 态与轮询就位，而不是停在点击前的旧画面上
 }
 
 /** 跳过问卷直接 docgen（仅用于降级与"结论已在"两条路径，界面上没有这个按钮）。 */
-async function runDocgenDirect(id, onRefresh, okMsg) {
+export async function runDocgenDirect(id, onRefresh, okMsg) {
   const r = await postJson('/api/req/docgen', { id });
   if (r.status === 202) {
     window.toast.success(okMsg);
@@ -127,71 +119,34 @@ async function postJson(url, body) {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 面板（主栏内联）
+// ══════════════════════════════════════════════════════════════════════════
+
 /**
- * 轮询到问卷就绪。返回题目数组，或 null 表示「这次没有问卷」（失败/无歧义/超时）。
- * 判据取自 runQuizGen 的两个终态：成功写 quiz.status='ready'，失败写 quiz=null，
- * 两者都会清 busy —— 所以「busy 已落但仍无题」就是失败。
+ * 建问卷面板并返回根节点，由 req-view 挂进主栏、取代配置卡的位置。
+ *
+ * @param {object} req 当前需求记录（题目取自 req.quiz.questions）
+ * @param {{onClose: Function, onRefresh: Function}} ctx onClose 收回面板，onRefresh 刷新需求页
  */
-async function pollQuestions(id, fetchReq) {
-  for (let i = 0; i < POLL_MAX; i++) {
-    await new Promise((r) => setTimeout(r, POLL_MS));
-    if (pollAbort) return null;
-    const { ok, data } = await fetchReq(id);
-    if (!ok || !data) continue; // 单次网络抖动不算失败，继续等
-    if (data.quiz?.status === 'ready' && data.quiz.questions?.length) return data.quiz.questions;
-    if (!data.busy && !data.queued) return null; // 跑完了却没题 → 失败
-  }
-  return null;
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// 模态
-// ══════════════════════════════════════════════════════════════════════════
-
-/** questions 为 null 时渲染等待态（题目还在生成）。 */
-function mountModal(req, questions, ctx) {
-  closeModal();
-  pollAbort = false;
-  if (idx >= (questions?.length || 1)) idx = 0;
-
-  const mask = el('div', 'rqw-mask');
-  mask.appendChild(el('div', 'rqw-modal'));
-  document.body.appendChild(mask);
-  modalEl = mask;
-
-  // 遮罩点击不关闭：答到第 4 题误点一下就全丢了。只留右上角 ✕ 与 Esc 两个显式出口
-  document.addEventListener('keydown', onEsc);
-
+export function renderQuizPanel(req, ctx) {
+  const questions = req.quiz?.questions || [];
+  if (idx >= questions.length) idx = 0; // 换了一份题目时游标可能越界
+  panelHost = el('div', 'rqw-quiz');
   paint(req, questions, ctx);
-  return mask;
-}
-
-function onEsc(e) {
-  if (e.key === 'Escape' && modalEl) {
-    e.stopPropagation();
-    modalEl._cancel?.();
-  }
-}
-
-function closeModal() {
-  document.removeEventListener('keydown', onEsc);
-  modalEl?.remove();
-  modalEl = null;
+  return panelHost;
 }
 
 /** 取消 = 放弃本次生成。不提供「跳过问卷继续生成」，否则必答形同虚设。 */
 function cancel(ctx) {
-  pollAbort = true;
-  closeModal();
   // 题目已经出好了（存在 store 里），下次点生成会复用，不会白花一次额度
-  ctx?.onRefresh?.();
+  panelHost = null;
+  ctx?.onClose?.();
 }
 
 function paint(req, questions, ctx) {
-  if (!modalEl) return;
-  modalEl._cancel = () => cancel(ctx);
-  const modal = modalEl.querySelector('.rqw-modal');
-  modal.innerHTML = '';
+  if (!panelHost) return;
+  panelHost.innerHTML = '';
 
   const total = questions?.length || 0;
   const done = questions ? answeredCount(questions) : 0;
@@ -199,33 +154,19 @@ function paint(req, questions, ctx) {
   // ---- 头 ----
   const head = el('div', 'rqw-mhead');
   head.appendChild(el('span', 't', '生成前确认'));
-  head.appendChild(el('span', 's', questions ? `不确定点 · 共 ${total} 题` : '分析中…'));
+  head.appendChild(el('span', 's', `不确定点 · 共 ${total} 题`));
   head.appendChild(el('span', 'gap'));
-  const closeBtn = el('button', 'rqw-mclose', '✕');
+  const closeBtn = el('button', 'rqw-mclose', '取消');
   closeBtn.type = 'button';
-  closeBtn.title = '取消本次生成';
+  closeBtn.title = '放弃本次生成，题目会保留，下次点生成可继续作答';
   closeBtn.onclick = () => cancel(ctx);
   head.appendChild(closeBtn);
-  modal.appendChild(head);
+  panelHost.appendChild(head);
 
   const body = el('div', 'rqw-mbody');
-  modal.appendChild(body);
+  panelHost.appendChild(body);
 
-  // ---- 等待态 ----
-  if (!questions) {
-    const load = el('div', 'rqw-qload');
-    load.appendChild(el('div', 'sp'));
-    load.appendChild(el('div', 't', '正在分析需求文档中的不确定点…'));
-    const sub = el('div', 's');
-    sub.textContent = req.prime?.text
-      ? '模型在通读需求文档并结合你补充的背景，找出没写清、但会影响实现的地方。你已说明的部分不会再问。通常十几秒。'
-      : '模型在通读需求文档，找出没写清、但会影响实现的地方。通常十几秒。';
-    load.appendChild(sub);
-    load.appendChild(el('div', 's', '分析失败也不影响生成，会直接跳到读代码。'));
-    body.appendChild(load);
-    return;
-  }
-
+  // 没有等待态分支：出题期间主栏仍是配置卡 + 顶部 busy 条，本面板只在题目就绪后才被挂上
   const q = questions[idx];
   const a = answers[q.id] || {};
   const unsure = a.v === UNSURE_VALUE;
@@ -384,7 +325,7 @@ function paint(req, questions, ctx) {
     submit(req, questions, ctx, next);
   };
   foot.appendChild(next);
-  modal.appendChild(foot);
+  panelHost.appendChild(foot);
 }
 
 async function submit(req, questions, ctx, btn) {
@@ -406,9 +347,10 @@ async function submit(req, questions, ctx, btn) {
     const d = await r.json().catch(() => ({}));
     if (r.status !== 202) throw new Error(d.error || '提交失败');
     resetQuizState();
-    closeModal();
+    panelHost = null;
     window.toast.success('已提交 · 正在生成开发文档');
-    ctx?.onRefresh?.();
+    // onClose 收回面板，主栏回到配置卡 + busy 条；docgen 的进度由 req-view 的轮询接管
+    ctx?.onClose?.();
   } catch (e) {
     window.toast.error('问卷提交失败：' + (e?.message || e));
     btn.disabled = false;

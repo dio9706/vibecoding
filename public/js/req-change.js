@@ -1,5 +1,5 @@
 /**
- * 需求变动弹框 —— 开发期右栏「⚡ 需求变动」入口。
+ * 需求变动弹框 —— 开发期右栏「需求变动」入口。
  *
  * 解决的问题：开发中途需求变了，现在只能跟 Claude 反复对话描述，token 贵且没留痕。
  * 这里把它变成一次结构化提交：写清变了什么 → AI 先比对需求地图算出**命中哪些逻辑点** →
@@ -8,6 +8,7 @@
  * 依赖方向：req-change → chat.js（发消息）；不反向依赖 req-chat，由后者调用 openChangeDialog。
  */
 import { sendMessageProgrammatically } from './chat.js';
+import { iconHtml, CHANGE_ICON_SVG } from './icons.js';
 
 const IMPACT_MIN_CHARS = 10; // 太短的描述预估不出东西，白跑一次 LLM
 const IMPACT_DEBOUNCE_MS = 900;
@@ -24,7 +25,7 @@ export function openChangeDialog({ reqId, hasMap, hasConv, onDone }) {
   mask.className = 'mask';
   mask.innerHTML =
     '<div class="modal rq-change-modal">' +
-    '<div class="head"><h3>⚡ 需求变动</h3></div>' +
+    '<div class="head"><h3>' + iconHtml(CHANGE_ICON_SVG) + ' 需求变动</h3></div>' +
     '<div class="body">' +
     '<p class="rq-change-sub"></p>' +
     '<textarea class="rq-change-text" rows="6" placeholder="例：产品刚说导出范围要支持「全部筛选结果」，不能只导选中行；另外导出格式砍掉 CSV，只留 xlsx。"></textarea>' +

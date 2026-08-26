@@ -9,27 +9,162 @@
     <link rel="stylesheet" href="/css/req-v2.css" />
     <!-- 评审期工作台布局：放在最后，用于接管 app.css 里 #reqPage 的限宽 -->
     <link rel="stylesheet" href="/css/req-workbench.css" />
+    <!-- 新用户引导态：只在首次打开（无任何模型）时生效，放最后便于覆盖启动罩的居中布局 -->
+    <link rel="stylesheet" href="/css/onboarding.css" />
   </head>
   <body>
     <!-- 启动罩：后端冷启动期间盖住整个 UI（boot-gate.js 探到 /api/ping 通即撤）。
-         写在静态 HTML 里而非 JS 生成，保证页面第一帧就是罩子，不会闪出一个点不动的界面。 -->
+         写在静态 HTML 里而非 JS 生成，保证页面第一帧就是罩子，不会闪出一个点不动的界面。
+         新用户（无任何模型）时不撤罩，由 onboarding.js 原地转成配置引导。 -->
     <div class="boot-overlay" id="bootOverlay">
-      <svg class="boot-star" id="bootStar" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <g id="btri1">
-          <polygon points="100,25 165,140 35,140" stroke="#d97757" stroke-width="1.5"/>
-        </g>
-        <g id="btri2">
-          <polygon points="100,175 165,60 35,60" stroke="#e88f6f" stroke-width="1.5" fill="rgba(217,119,87,0.14)"/>
-        </g>
-      </svg>
-      <div class="vibe-title">VIBE CODING</div>
-      <div class="boot-text" id="bootText">正在启动服务…</div>
-      <button class="boot-skip" id="bootSkip" hidden>仍然进入</button>
+      <!-- 罩内标题栏：窗口是无边框的（src-tauri/src/main.rs 的 decorations(false)），拖拽区与
+           窗口按钮全在 header.topbar 里，被这个 inset:0 的罩子盖住之后，整个等待/引导期间
+           窗口拖不动也关不掉（只剩托盘和 Alt+F4）。所以罩子自己配一条。
+           按钮不给 id、只挂 .wc-* 类：tauri-init.js 按类批量绑定，两处共用同一段窗口控制逻辑。 -->
+      <div class="ob-titlebar" data-tauri-drag-region>
+        <div class="ob-titlebar-drag" data-tauri-drag-region></div>
+        <div class="win-controls" hidden>
+          <button class="wc-btn wc-min" title="最小化">
+            <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+          </button>
+          <button class="wc-btn wc-max" title="最大化/还原">
+            <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><rect x="0.5" y="0.5" width="8" height="8" stroke="currentColor"/></svg>
+          </button>
+          <button class="wc-btn wc-close" title="关闭到托盘">
+            <svg width="10" height="10" viewBox="0 0 10 10"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.2"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.2"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- .ob-brand：LOGO / 标题 / 启动文案的共同父节点。
+           引导态要把 LOGO 作为整体左移，必须有个承载 transform 的节点；
+           启动文案放在内部而非做兄弟节点，是为了让它隐藏后 brand 高度自然收缩仍保持居中，
+           省掉一个脆弱的硬编码垂直偏移。 -->
+      <div class="ob-brand" id="obBrand">
+        <svg class="boot-star" id="bootStar" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <g id="btri1">
+            <polygon points="100,25 165,140 35,140" stroke="#d97757" stroke-width="1.5"/>
+          </g>
+          <g id="btri2">
+            <polygon points="100,175 165,60 35,60" stroke="#e88f6f" stroke-width="1.5" fill="rgba(217,119,87,0.14)"/>
+          </g>
+        </svg>
+        <div class="vibe-title" id="bootTitle">VIBE CODING</div>
+        <!-- 引导态整块隐藏：此时「正在启动服务…」与「仍然进入」都已无意义 -->
+        <div class="ob-status" id="bootStatus">
+          <div class="boot-text" id="bootText">正在启动服务…</div>
+          <button class="boot-skip" id="bootSkip" hidden>仍然进入</button>
+        </div>
+      </div>
+
+      <!-- 引导面板：写静态 HTML 而非 JS 拼装 —— 与启动罩同源、第一帧就在 DOM 里，
+           无二次挂载抖动，也便于直接改样式调试。
+           厂商下拉的 option 由 onboarding.js 从 VENDOR_PRESETS 生成，不像设置页
+           那样硬编码一份（那已经是第二份了，不再添第三份）。 -->
+      <div class="ob-panel" id="obPanel" hidden>
+        <div class="ob-head">
+          <h2 class="ob-title">开始之前，先完成基础配置</h2>
+          <p class="ob-sub">只有「添加模型」是必填。已有配置文件可以直接导入。</p>
+        </div>
+
+        <button class="ob-import" id="obImportBtn" type="button">⇪ 一键导入已有配置文件</button>
+        <input type="file" id="obImportFile" accept="application/json,.json" hidden />
+
+        <section class="ob-sec">
+          <div class="ob-sec-head">
+            <span class="ob-sec-no">①</span>
+            <span class="ob-sec-label">添加模型</span>
+            <span class="ob-req">* 必填</span>
+          </div>
+          <div class="ob-tabs" id="obModelTabs" role="tablist">
+            <button class="ob-tab active" type="button" role="tab" aria-selected="true" data-tab="claude">Claude 账号</button>
+            <button class="ob-tab" type="button" role="tab" aria-selected="false" data-tab="custom">自定义模型</button>
+          </div>
+          <div class="ob-pane" data-pane="claude">
+            <label class="ob-field">
+              <span class="ob-label">名称</span>
+              <input id="obTokenLabel" placeholder="如 主力号（选填）" autocomplete="off" />
+            </label>
+            <label class="ob-field">
+              <span class="ob-label">Token</span>
+              <input id="obTokenValue" placeholder="sk-ant-oat01-…" autocomplete="off" />
+            </label>
+          </div>
+          <div class="ob-pane" data-pane="custom" hidden>
+            <label class="ob-field">
+              <span class="ob-label">厂商</span>
+              <select id="obCredVendor" class="ob-select"></select>
+            </label>
+            <label class="ob-field">
+              <span class="ob-label">API Key</span>
+              <input id="obCredApiKey" type="password" placeholder="sk-…" autocomplete="new-password" />
+            </label>
+            <label class="ob-field">
+              <span class="ob-label">Base URL</span>
+              <input id="obCredBaseURL" placeholder="https://api.xxx.com/v1" autocomplete="off" />
+            </label>
+            <label class="ob-field">
+              <span class="ob-label">模型</span>
+              <input id="obCredModel" list="obCredModelList" placeholder="先选厂商" autocomplete="off" />
+              <datalist id="obCredModelList"></datalist>
+            </label>
+          </div>
+        </section>
+
+        <section class="ob-sec collapsed" id="obOpenIdSec">
+          <button class="ob-sec-head ob-toggle" type="button">
+            <span class="ob-sec-no">②</span>
+            <span class="ob-sec-label">我的飞书 open_id</span>
+            <span class="ob-opt">选填</span>
+            <span class="ob-caret">▾</span>
+          </button>
+          <div class="ob-sec-body">
+            <label class="ob-field">
+              <span class="ob-label">open_id</span>
+              <input id="obOpenId" placeholder="ou_…" autocomplete="off" maxlength="128" />
+            </label>
+            <p class="ob-hint">用于按「属于我的」筛选测试期 BUG。可稍后到设置页补。</p>
+          </div>
+        </section>
+
+        <section class="ob-sec collapsed" id="obBotSec">
+          <button class="ob-sec-head ob-toggle" type="button">
+            <span class="ob-sec-no">③</span>
+            <span class="ob-sec-label">飞书机器人</span>
+            <span class="ob-opt">选填</span>
+            <span class="ob-caret">▾</span>
+          </button>
+          <div class="ob-sec-body">
+            <label class="ob-field">
+              <span class="ob-label">名称</span>
+              <input id="obBotName" placeholder="如 研发助手" autocomplete="off" />
+            </label>
+            <label class="ob-field">
+              <span class="ob-label">App ID</span>
+              <input id="obBotAppId" placeholder="cli_ 加 16 位十六进制" autocomplete="off" />
+            </label>
+            <label class="ob-field">
+              <span class="ob-label">App Secret</span>
+              <input id="obBotSecret" type="password" autocomplete="new-password" />
+            </label>
+            <p class="ob-hint">填了才会创建并启用机器人。可稍后到设置页补。</p>
+          </div>
+        </section>
+
+        <div class="ob-foot">
+          <span class="ob-err" id="obErr"></span>
+          <button class="ob-submit" id="obSubmitBtn" type="button" disabled>完成，开始使用</button>
+        </div>
+      </div>
     </div>
     <div class="shell">
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-head">
           <span id="sidebarTitle">对话</span>
+          <div class="sidebar-switch" id="sidebarSwitch" role="tablist">
+            <button class="switch-btn active" role="tab" aria-selected="true" data-target="conv">对话</button>
+            <button class="switch-btn" role="tab" aria-selected="false" data-target="req">需求</button>
+          </div>
           <div class="sidebar-head-actions">
             <button class="icon-btn" id="toolsToggle" title="工具">
               <svg viewBox="0 0 1024 1024" width="16" height="16" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -37,8 +172,6 @@
                 <path d="M64 256v512l448 256 448-256V256L512 0z m832 480L512 960l-384-224v-448L512 64l384 224z"/>
               </svg>
             </button>
-            <button class="btn" id="sidebarNew">＋ 新对话</button>
-            <button class="btn" id="sidebarNewReq">＋ 新需求</button>
           </div>
         </div>
         <!-- 需求列表（评审/开发/测试中的需求；已归档折叠）-->
@@ -80,6 +213,10 @@
         <div class="tools-footer" id="toolsFooter" hidden>
           <button class="btn" id="mdOpenFileBtn2">📄 打开…</button>
         </div>
+        <!-- 侧边栏底部固定栏：新建对话/需求按钮 -->
+        <div class="sidebar-footer" id="sidebarFooter">
+          <button class="btn primary" id="sidebarCreateBtn" title="新建对话">＋ 新建对话</button>
+        </div>
       </aside>
       <div class="app">
       <!-- topbar 自身背景（按钮间空隙）+ 纯展示元素（额度/待续跑徽标）都是拖拽区：
@@ -97,7 +234,8 @@
         <span class="ask-chip" id="askChip" role="button" aria-label="待确认审批" data-tauri-drag-region hidden></span>
         <button class="btn" id="taskBtn">需求/故障<span class="badge-dot" id="taskBadge" hidden></span></button>
         <button class="btn" id="logBtn">访问日志</button>
-        <button class="btn" id="settingsBtn" title="设置">⚙<span class="badge-dot" id="settingsBadge" hidden></span></button>
+        <!-- 图标由 js/icons.js 的 hydrateIcons 按 data-icon 注水，素材不在 HTML 里留副本 -->
+        <button class="btn" id="settingsBtn" title="设置"><span class="inline-ic" data-icon="settings"></span><span class="badge-dot" id="settingsBadge" hidden></span></button>
         <!-- 自定义窗口控制按钮（仅 Tauri 桌面环境显示） -->
         <div class="win-controls" id="winControls" hidden>
           <button class="wc-btn wc-min" id="winMin" title="最小化">
@@ -640,6 +778,11 @@
         </div>
       </div>
     </div>
+
+    <!-- 代理按钮：chat.js/req-view.js 的 addEventListener 绑定依赖这两个 ID，
+         实际点击由 sidebarCreateBtn 委托触发，UI 上不可见 -->
+    <button id="sidebarNew" hidden>新对话代理</button>
+    <button id="sidebarNewReq" hidden>新需求代理</button>
 
     <!-- Markdown 渲染组件（本地 vendor，无需构建/联网）-->
     <!-- DOMPurify 必须先于任何渲染：renderMarkdown 缺它会退化成纯文本（见 js/util.js） -->

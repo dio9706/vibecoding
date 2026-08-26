@@ -125,3 +125,86 @@ test('注释类问题不可自动修复', () => {
   const r = evaluateComments({ sampledFiles: 10, findings: [{ type: 'stale', file: 'a.js', line: 3, message: 'm' }] });
   assert.equal(r.issues[0].fixable, false);
 });
+
+// —— verdictLog：判定层可审计 ——
+// 只有 restates-code / stale / dead-code 会变成 issue，判为 ok 的连同模型给的 reason 一起被丢弃。
+// 后果是出现「0 个问题」这种结果时，无法区分「模型认真判了且都合格」和「模型摆烂 / 漏判了大半」。
+// verdictLog 把全部判定原样留档，不产 issue、不扣分，纯供事后审计与回归对比。
+
+test('verdictLog 记录全部判定，含判为 ok 的那些', () => {
+  const r = evaluateComments({
+    sampledFiles: 10,
+    findings: [{ type: 'restates-code', file: 'a.js', line: 1, message: 'm' }],
+    blocks: [
+      { file: 'a.js', line: 1, comment: '// 把 b 设为 2' },
+      { file: 'a.js', line: 5, comment: '// 这里必须先等 uid，否则校验会串号' },
+      { file: 'b.js', line: 9, comment: '// const old = 1;' },
+    ],
+    verdicts: [
+      { file: 'a.js', line: 1, verdict: 'restates-code', reason: 'r1' },
+      { file: 'a.js', line: 5, verdict: 'ok', reason: 'r2' },
+      { file: 'b.js', line: 9, verdict: 'dead-code', reason: 'r3' },
+    ],
+  });
+  assert.equal(r.verdictLog.length, 3);
+  assert.deepEqual(r.verdictLog.map((v) => v.verdict), ['restates-code', 'ok', 'dead-code']);
+  // ok 不产 issue：issues 只来自 findings
+  assert.equal(r.issues.length, 1);
+});
+
+test('verdictLog 每条带注释原文与理由，按 file#line 精确回锚', () => {
+  const r = evaluateComments({
+    sampledFiles: 10,
+    findings: [],
+    blocks: [
+      { file: 'a.js', line: 47, comment: '来自 a 的注释' },
+      { file: 'b.js', line: 47, comment: '来自 b 的注释' },
+    ],
+    verdicts: [
+      { file: 'a.js', line: 47, verdict: 'ok', reason: 'ra' },
+      { file: 'b.js', line: 47, verdict: 'ok', reason: 'rb' },
+    ],
+  });
+  const a = r.verdictLog.find((v) => v.file === 'a.js');
+  const b = r.verdictLog.find((v) => v.file === 'b.js');
+  assert.equal(a.text, '来自 a 的注释');
+  assert.equal(a.reason, 'ra');
+  assert.equal(b.text, '来自 b 的注释');
+  assert.equal(b.reason, 'rb');
+});
+
+test('verdictLog 截断超长文本，避免 optimize.json 膨胀', () => {
+  const r = evaluateComments({
+    sampledFiles: 10,
+    findings: [],
+    blocks: [{ file: 'a.js', line: 1, comment: 'x'.repeat(500) }],
+    verdicts: [{ file: 'a.js', line: 1, verdict: 'ok', reason: 'y'.repeat(800) }],
+  });
+  assert.ok(r.verdictLog[0].text.length <= 200);
+  assert.ok(r.verdictLog[0].reason.length <= 300);
+});
+
+test('没有判定时 verdictLog 为空数组', () => {
+  const r = evaluateComments({ sampledFiles: 10, findings: [] });
+  assert.deepEqual(r.verdictLog, []);
+});
+
+test('verdictLog 不影响 score', () => {
+  const r = evaluateComments({
+    sampledFiles: 10,
+    findings: [],
+    blocks: [{ file: 'a.js', line: 1, comment: 'c1' }, { file: 'a.js', line: 2, comment: 'c2' }],
+    verdicts: [
+      { file: 'a.js', line: 1, verdict: 'ok', reason: 'r' },
+      { file: 'a.js', line: 2, verdict: 'ok', reason: 'r' },
+    ],
+  });
+  assert.equal(r.score, 100); // 两条都判 ok，一分不扣
+  assert.equal(r.verdictLog.length, 2);
+});
+
+test('partial 与 na 也带 verdictLog 字段（恒为空数组）', () => {
+  // 调用方不必对不同 status 分支写两套取值逻辑
+  assert.deepEqual(evaluateComments({ sampledFiles: 10, findings: null }).verdictLog, []);
+  assert.deepEqual(evaluateComments({ sampledFiles: 0, findings: [] }).verdictLog, []);
+});

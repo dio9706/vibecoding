@@ -3,51 +3,11 @@
  *  入口 loadSettings + bindConfigTransfer 由 showView('settings') 调用；设置按钮绑定留在 app.js。 */
 import { $ } from './util.js';
 import { toast, confirmDialog, promptDialog } from './ui.js';
-
-// ---- 模型配置预设 ----
-
-const VENDOR_PRESETS = {
-  openai: {
-    label: 'OpenAI',
-    baseURL: 'https://api.openai.com/v1',
-    models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1', 'o3-mini'],
-  },
-  deepseek: {
-    label: 'DeepSeek',
-    baseURL: 'https://api.deepseek.com/v1',
-    models: ['deepseek-chat', 'deepseek-reasoner'],
-  },
-  aliyun: {
-    label: '阿里云百炼',
-    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    models: ['qwen-max', 'qwen-plus', 'qwen-turbo'],
-  },
-  moonshot: {
-    label: '月之暗面',
-    baseURL: 'https://api.moonshot.cn/v1',
-    models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
-  },
-  zhipu: {
-    label: '智谱',
-    baseURL: 'https://open.bigmodel.cn/api/paas/v4',
-    models: ['glm-4', 'glm-4-flash'],
-  },
-  custom: {
-    label: '其他（自定义）',
-    baseURL: '',
-    models: [],
-  },
-};
-
-// baseURL → vendor key 反查表：vendor 字段是后加的，存量凭证没有它，
-// 靠 baseURL 推回厂商，省掉一次数据迁移。
-// 必须过滤空 baseURL —— custom 预设的 baseURL 是空串，不排除的话
-// 会在表里占据 '' 这个键，把所有缺 baseURL 的凭证误判成「其他（自定义）」。
-const BASEURL_TO_VENDOR = Object.fromEntries(
-  Object.entries(VENDOR_PRESETS)
-    .filter(([, p]) => p.baseURL)
-    .map(([k, p]) => [p.baseURL, k]),
-);
+// 厂商预设抽成独立模块：新用户引导也要用，留在本文件里第二个使用方只能复制一份
+import { VENDOR_PRESETS, BASEURL_TO_VENDOR } from './vendor-presets.js';
+// 导入流程同样抽出：新用户引导也要一键导入，只是不需要那句覆盖确认
+import { importConfigFile } from './config-import.js';
+import { iconHtml, DELETE_ICON_SVG, EDIT_ICON_SVG } from './icons.js';
 
 // 订阅类型配置：扩展时同步更新 index.html #tokenSubscription 的 options
 const SUBSCRIPTION_TYPES = [
@@ -128,37 +88,27 @@ const SUBSCRIPTION_TYPES = [
           const file = fileInput.files && fileInput.files[0];
           fileInput.value = ''; // 允许再次选同一文件
           if (!file) return;
-          let raw;
-          try {
-            raw = JSON.parse(await file.text());
-          } catch {
-            toast('配置文件格式不正确');
-            return;
-          }
-          if (!raw || raw.__type !== 'claude-agent-config') {
-            toast('配置文件类型不匹配');
-            return;
-          }
-          const ok = await confirmDialog({
-            title: '导入配置',
-            message: '导入将覆盖当前全部配置（机器人 / 账号池 / 偏好），确认继续？覆盖后不可恢复。',
-            confirmText: '确认导入',
-            danger: true,
+          const r = await importConfigFile(file, {
+            confirm: () =>
+              confirmDialog({
+                title: '导入配置',
+                message: '导入将覆盖当前全部配置（机器人 / 账号池 / 托管配置 / 偏好），确认继续？覆盖后不可恢复。',
+                confirmText: '确认导入',
+                danger: true,
+              }),
           });
-          if (!ok) return;
-          try {
-            const r = await fetch('/api/settings/import', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(raw),
-            });
-            const d = await r.json();
-            if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
-            toast('导入成功，正在重新加载…');
-            setTimeout(() => location.reload(), 800);
-          } catch (e) {
-            toast('导入失败：' + (e && e.message || e));
+          if (r.cancelled) return;
+          if (!r.ok) {
+            toast('导入失败：' + r.error);
+            return;
           }
+          // 旧版包不含托管配置，得明说；否则用户以为配齐了，回头发现动作全没了
+          toast(
+            r.actionConfigsImported
+              ? '导入成功（含托管配置），正在重新加载…'
+              : '导入成功。该文件为旧版，不含托管配置，需到设置页重新配置动作',
+          );
+          setTimeout(() => location.reload(), r.actionConfigsImported ? 800 : 2400);
         });
       }
 
@@ -182,8 +132,8 @@ const SUBSCRIPTION_TYPES = [
             (i === 0
               ? '<span class="t-primary" title="列表首位 = 偏好最高">★ 首选</span>'
               : '<button class="t-act make-primary" title="置顶为首选账号">设为当前</button>') +
-            '<button class="t-act rename" title="改名">✎</button>' +
-            '<button class="t-act del" title="删除">🗑</button>';
+            '<button class="t-act rename" title="改名">' + iconHtml(EDIT_ICON_SVG) + '</button>' +
+            '<button class="t-act del" title="删除">' + iconHtml(DELETE_ICON_SVG) + '</button>';
           row.querySelector('.t-label').textContent = t.label;
           row.querySelector('.t-mask').textContent = t.masked;
           row.querySelector('.rename').onclick = () => renameToken(t.id, t.label);
@@ -365,7 +315,7 @@ const SUBSCRIPTION_TYPES = [
             '<span class="t-base"></span>' +
             '<span class="t-mask"></span>' +
             '<span class="spacer"></span>' +
-            '<button class="t-act del" title="删除">🗑</button>';
+            '<button class="t-act del" title="删除">' + iconHtml(DELETE_ICON_SVG) + '</button>';
           row.querySelector('.t-label').textContent = displayName;
           row.querySelector('.t-vendor').textContent = vendorLabel;
           row.querySelector('.t-model').textContent = c.model || '';
@@ -508,8 +458,8 @@ const SUBSCRIPTION_TYPES = [
               : '') +
             (m.hasEnv ? '<span class="t-base" title="含 env 配置（仅可手改 settings.json）">env</span>' : '') +
             '<span class="spacer"></span>' +
-            '<button class="t-act edit" title="编辑">✎</button>' +
-            '<button class="t-act del" title="删除">🗑</button>';
+            '<button class="t-act edit" title="编辑">' + iconHtml(EDIT_ICON_SVG) + '</button>' +
+            '<button class="t-act del" title="删除">' + iconHtml(DELETE_ICON_SVG) + '</button>';
           row.querySelector('.t-label').textContent = m.label || '(未命名)';
           row.querySelector('.mcp-cmd').textContent = [m.command, ...(m.args || [])].join(' ');
           const chk = row.querySelector('.pretty-check');

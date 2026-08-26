@@ -30,7 +30,7 @@ import {
 } from '../../store/settings.js';
 import { PLUGIN_MANIFEST } from '../../plugins/index.js';
 import { listBotMessages, sanitizeMessages, MAX_LEN } from '../../shared/messages.js';
-import { deleteConfigsByBot } from '../../store/action-configs.js';
+import { deleteConfigsByBot, getConfigs, saveConfigs } from '../../store/action-configs.js';
 import { migrateToBots } from '../../store/bots-migration.js';
 import { buildExport, parseImport } from '../../store/config-transfer.js';
 import { readJson } from '../../store/index.js';
@@ -312,10 +312,12 @@ export function handleBotsDelete(req, res, url) {
   }
 }
 
-/** 导出全部配置（原始明文，含 token 值与 App Secret）。 */
+/** 导出全部配置（原始明文，含 token 值与 App Secret）。
+ *  含托管配置（action-configs.json）：它与 bots 有 botId 引用关系，
+ *  只导 bots 不导动作，换机导入后关联会断、托管配置整块丢失。 */
 export function handleSettingsExport(req, res) {
   if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
-  const payload = buildExport(getSettings(), new Date().toISOString());
+  const payload = buildExport(getSettings(), getConfigs(), new Date().toISOString());
   const date = new Date().toISOString().slice(0, 10);
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="claude-agent-config-${date}.json"`);
@@ -331,14 +333,24 @@ export function handleSettingsImport(req, res) {
     if (!parsed.ok) return sendJson(res, 400, { error: parsed.error });
     try {
       replaceSettings(parsed.settings);
+      // 托管配置必须在 migrateToBots 之前落盘：后者内部的 adoptOrphanConfigs 会读
+      // action-configs.json 做「孤儿动作收养」，顺序反了就是拿导入前的旧动作去收养，
+      // 新导入的动作永远认不到 bot。
+      // null 表示本次不涉及托管配置（v1 旧包）——跳过而不是写空数组，否则清空用户现有动作。
+      if (parsed.actionConfigs !== null) saveConfigs(parsed.actionConfigs);
       migrateToBots(); // 旧版配置文件（无 bots）→ 自动升级为机器人实体 + 动作收养
       // 导入的 token 可能带 rateLimited 的 resetsAt → 重排到点恢复定时器
       scheduleAllSwitchBacks();
     } catch (e) {
       return sendJson(res, 500, { error: '导入失败：' + (e?.message || e) });
     }
-    logger.info('web', '配置已导入', { tokens: (parsed.settings.tokens || []).length });
-    return sendJson(res, 200, { ok: true });
+    logger.info('web', '配置已导入', {
+      tokens: (parsed.settings.tokens || []).length,
+      actionConfigs: parsed.actionConfigs === null ? '(旧版包，未包含)' : parsed.actionConfigs.length,
+    });
+    // actionConfigsImported 供前端区分提示文案：旧版包要告诉用户托管配置没带过来，
+    // 否则他会以为配齐了，直到某天发现动作全没了
+    return sendJson(res, 200, { ok: true, actionConfigsImported: parsed.actionConfigs !== null });
   });
 }
 

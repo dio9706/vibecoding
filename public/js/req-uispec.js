@@ -5,6 +5,7 @@
  * 所以这里编辑的是「以后每次还原都要守的规矩」，不是某个页面的一次性说明。
  */
 import { sendMessageProgrammatically } from './chat.js';
+import { iconHtml, DESIGN_ICON_SVG } from './icons.js';
 
 const PLACEHOLDER = `## 字体
 - 正文：14px / 22px，400
@@ -35,7 +36,7 @@ export function openUiSpecDialog({ dir, hasConv }) {
   mask.className = 'mask';
   mask.innerHTML =
     '<div class="modal rq-spec-modal">' +
-    '<div class="head"><h3>🎨 UI 规范</h3></div>' +
+    '<div class="head"><h3>' + iconHtml(DESIGN_ICON_SVG) + ' UI 规范</h3></div>' +
     '<div class="body">' +
     '<div class="rq-spec-meta"></div>' +
     '<textarea class="rq-spec-text" rows="18" spellcheck="false"></textarea>' +
