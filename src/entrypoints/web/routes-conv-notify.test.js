@@ -8,7 +8,8 @@ import { createServer } from 'node:http';
 process.env.APP_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'convnotify-routes-'));
 
 const { handleConvNotifyRoutes } = await import('./routes-conv-notify.js');
-const { getEntry } = await import('../../store/conv-notify.js');
+const { getEntry, pushInjection } = await import('../../store/conv-notify.js');
+const { createRun, finishRun } = await import('../../store/runs.js');
 
 let server, base;
 test.before(async () => {
@@ -22,7 +23,13 @@ test.before(async () => {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
 });
-test.after(() => server.close());
+// createRun 会起一个看门狗 interval；断言中途失败时收尾语句轮不到执行，留下的定时器足以
+// 让 node --test 永不退出（表现为「测试跑不完」而不是「测试失败」）。故统一在此兜底终结。
+const spawnedRuns = [];
+test.after(() => {
+  for (const r of spawnedRuns) finishRun(r);
+  server.close();
+});
 
 async function post(pathname, body) {
   const res = await fetch(base + pathname, {
@@ -106,6 +113,32 @@ test('POST /api/conv-notify/new 会话初始 inbox 为空', async () => {
   const r = await post('/api/conv-notify/new', {});
   const entry = getEntry(r.json.convId);
   assert.deepEqual(entry.inbox, []);
+});
+
+/**
+ * 注入项带的 runId 是「注入那一刻」的 run，而 runs 注册表是纯内存的。
+ * 用户在飞书回一句、网页当时没开，隔天再进会话时那个 run 早已随进程消失 ——
+ * 前端若照旧接流，会撞上 SSE 的「run 不存在」分支（设计上是静默等待续跑），
+ * 而这条路径压根没有续跑条目，助手气泡就永久停在「运行中…」（2026-08-28 事故的后半段）。
+ * 故 /inbox 必须如实告诉前端这个 run 还在不在，让它自己决定要不要接。
+ */
+test('GET /api/conv-notify/inbox 标注 runId 是否仍在跑', async () => {
+  const r = await post('/api/conv-notify/new', { title: '收件箱存活标注' });
+  const convId = r.json.convId;
+  const run = createRun();
+  spawnedRuns.push(run);
+  pushInjection(convId, { id: 'inj_live', text: '继续', runId: run.id, at: Date.now() });
+  pushInjection(convId, { id: 'inj_dead', text: '继续', runId: 'run_gone', at: Date.now() });
+
+  const byId = (items) => Object.fromEntries(items.map((i) => [i.id, i]));
+  let items = byId((await get(`/api/conv-notify/inbox?convId=${convId}`)).json.items);
+  assert.equal(items.inj_live.alive, true, '还在跑的 run 要接流，否则实时进度全看不到');
+  assert.equal(items.inj_dead.alive, false, '注册表里没有的 run 不能接，接了就是永久转圈');
+  assert.equal(items.inj_live.text, '继续', '原有字段不得被覆写');
+
+  finishRun(run);
+  items = byId((await get(`/api/conv-notify/inbox?convId=${convId}`)).json.items);
+  assert.equal(items.inj_live.alive, false, 'run 已终结 → 同样不该再接流');
 });
 
 test('POST /api/conv-notify/new 会话记录 enabledAt 时间戳', async () => {

@@ -141,6 +141,9 @@ export function evaluateMap({ hasRootMap, modules, deadLinks, rootMapLines }) {
       file: `${m.name}/CLAUDE.md`,
       line: 1,
       message: `代码比地图新 ${m.staleDays} 天，地图可能已和实现脱节`,
+      // 自动修复要按天数写进核对块。只留在 message 里的话，
+      // 改一次文案就得同步改修复端的正则，而漏改不会报错、只会静默失效
+      staleDays: m.staleDays,
       fixable: true,
       fixHint: '重新核对该模块地图的文件清单与关键流程',
     });
@@ -155,6 +158,8 @@ export function evaluateMap({ hasRootMap, modules, deadLinks, rootMapLines }) {
       file: d.file,
       line: d.line,
       message: `引用的 ${d.ref} 不存在`,
+      // 同上：修复端要拿原始 ref 去查索引、去比对行内容，不能从文案里反解
+      ref: d.ref,
       fixable: true,
       fixHint: '修正为正确路径，或删除该引用',
     });

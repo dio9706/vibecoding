@@ -96,50 +96,10 @@ export function bindTauriNav({ showView, openConv }) {
             if (basicAutostartSec) basicAutostartSec.style.display = '';
 
             // ── 自定义窗口控制按钮（invoke Rust 命令，最可靠方式）────
-            // 按类而非 id 收集：标题栏有两处 —— 主界面顶栏 (#winControls) 与启动罩内
-            // (.ob-titlebar，罩子盖住顶栏期间的替身)。同一段逻辑绑到两处，不写第二份实现。
-            const winControls = document.querySelectorAll('.win-controls');
-            if (winControls.length) {
-              winControls.forEach((c) => { c.hidden = false; });
-              console.log('[WinCtrl] initialized, invoke ready ×' + winControls.length);
-
-              // 全部走 invoke → Rust 自定义命令，无需 window.__TAURI__
-              document.querySelectorAll('.wc-min').forEach((btn) => btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                console.log('[WinCtrl] minimize');
-                invoke('win_minimize');
-              }));
-
-              const winMaxBtns = document.querySelectorAll('.wc-max');
-              const updateMaxIcon = async () => {
-                try {
-                  const isMax = await invoke('win_is_maximized');
-                  const svg = isMax
-                    ? '<rect x="2.5" y="0.5" width="6" height="6" fill="none" stroke="currentColor"/><rect x="0.5" y="2.5" width="6" height="6" fill="none" stroke="currentColor"/>'
-                    : '<rect x="0.5" y="0.5" width="8" height="8" fill="none" stroke="currentColor"/>';
-                  winMaxBtns.forEach((b) => { const s = b.querySelector('svg'); if (s) s.innerHTML = svg; });
-                } catch(err) { console.warn('[WinCtrl] isMax err', err); }
-              };
-              winMaxBtns.forEach((btn) => btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                console.log('[WinCtrl] toggleMaximize');
-                invoke('win_toggle_maximize').then(updateMaxIcon);
-              }));
-              updateMaxIcon();
-
-              document.querySelectorAll('.wc-close').forEach((btn) => btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                console.log('[WinCtrl] hide');
-                invoke('win_hide');
-              }));
-
-              // 拖拽 & 双击最大化：全部由 data-tauri-drag-region 原生处理（webview 层直接响应）。
-              // 最大化态下拖标题栏还原并跟随鼠标是 Windows 原生行为，无需 JS 接管——
-              // 曾加过 mousedown 接管，但按下即触发导致「单击也还原」，故移除。
-              // 双击原生最大化后同步一次图标状态（两处拖拽区都要）。
-              document.querySelectorAll('#topbarDragArea, .ob-titlebar-drag').forEach((el) =>
-                el.addEventListener('dblclick', () => { setTimeout(updateMaxIcon, 50); }));
-            }
+            // 实现下沉到本文件末尾的 bindWindowControls()：标题栏有三处（主界面顶栏、
+            // 启动罩、掉线罩），后者是运行时懒创建的，需要能单独补绑。
+            bindWindowControls(document);
+            console.log('[WinCtrl] initialized via bindWindowControls');
 
             // ── 开机自启动 toggle ─────────────────────────────────
             const autostartToggle = document.getElementById('autostartToggle');
@@ -288,7 +248,8 @@ export function bindTauriNav({ showView, openConv }) {
               _clearStartupBar(false); // 撤下任何残留错误条
               // 后端刚就绪时重新探一次 ping，确认连通
               const base = API_BASE || '';
-              fetch((base || '') + '/api/ping').then(r => r.json()).then(d => {
+              // __skipGuard：启动期探测，失败该由启动罩/错误条表达，不该升掉线罩
+              fetch((base || '') + '/api/ping', { __skipGuard: true }).then(r => r.json()).then(d => {
                 console.log('[Diag] backend-ready 后 /api/ping 成功:', d);
               }).catch(e => {
                 console.error('[Diag] ⚠️ backend-ready 后 /api/ping 仍失败:', e.message);
@@ -309,7 +270,9 @@ export function bindTauriNav({ showView, openConv }) {
               if (!_startupPoll) {
                 _startupPoll = setInterval(() => {
                   const base = API_BASE || '';
-                  fetch((base || '') + '/api/ping')
+                  // __skipGuard 在这里尤其必要：本轮询的设计意图就是「反复失败直到后端起来」，
+                  // 不旁路等于每 2s 升一次掉线罩，还会盖住上面那条更准确的「启动较慢」提示条。
+                  fetch((base || '') + '/api/ping', { __skipGuard: true })
                     .then(r => { if (r.ok) _clearStartupBar(true); })
                     .catch(() => {});
                 }, 2000);
@@ -352,4 +315,57 @@ export function bindTauriNav({ showView, openConv }) {
           };
         }
       })();
+
+/**
+ * 绑定一组窗口控制按钮（最小化/最大化/关闭 + 双击标题栏最大化）。
+ *
+ * 可重入：标题栏在本项目有三处——主界面顶栏、启动罩内 .ob-titlebar、掉线罩内 .ob-titlebar。
+ * 前两处在启动时一次性绑定，掉线罩是运行时懒创建的，必须能单独补绑，否则无边框窗口
+ * （main.rs 的 decorations(false)）被罩住之后拖不动也关不掉，只剩托盘和 Alt+F4。
+ *
+ * 自己解析 invoke 而不由调用方传入：换来调用方零心智负担，代价只是两行重复的解析。
+ *
+ * @param {ParentNode} root 只在此子树内查找按钮
+ */
+export function bindWindowControls(root = document) {
+  if (typeof window.__TAURI_INTERNALS__ === 'undefined') return; // 非 Tauri：按钮保持 hidden
+  const invoke = window.__TAURI__?.core?.invoke
+    ?? ((cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args));
+
+  const winControls = root.querySelectorAll('.win-controls');
+  if (!winControls.length) return;
+  winControls.forEach((c) => { c.hidden = false; });
+
+  root.querySelectorAll('.wc-min').forEach((btn) => btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    invoke('win_minimize');
+  }));
+
+  const winMaxBtns = root.querySelectorAll('.wc-max');
+  const updateMaxIcon = async () => {
+    try {
+      const isMax = await invoke('win_is_maximized');
+      const svg = isMax
+        ? '<rect x="2.5" y="0.5" width="6" height="6" fill="none" stroke="currentColor"/><rect x="0.5" y="2.5" width="6" height="6" fill="none" stroke="currentColor"/>'
+        : '<rect x="0.5" y="0.5" width="8" height="8" fill="none" stroke="currentColor"/>';
+      winMaxBtns.forEach((b) => { const s = b.querySelector('svg'); if (s) s.innerHTML = svg; });
+    } catch (err) { console.warn('[WinCtrl] isMax err', err); }
+  };
+  winMaxBtns.forEach((btn) => btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    invoke('win_toggle_maximize').then(updateMaxIcon);
+  }));
+  updateMaxIcon();
+
+  root.querySelectorAll('.wc-close').forEach((btn) => btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    invoke('win_hide');
+  }));
+
+  // 拖拽与双击最大化由 data-tauri-drag-region 原生处理（webview 层直接响应）；
+  // 双击原生最大化后同步一次图标状态。曾加过 mousedown 接管，按下即触发导致
+  // 「单击也还原」，故移除，勿再加回。
+  root.querySelectorAll('#topbarDragArea, .ob-titlebar-drag').forEach((el) =>
+    el.addEventListener('dblclick', () => { setTimeout(updateMaxIcon, 50); }));
+}
 

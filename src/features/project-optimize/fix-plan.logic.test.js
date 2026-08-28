@@ -58,10 +58,11 @@ test('只认 .claude/rules/ 下的文件', () => {
 
 test('勾选了尚不支持的维度要如实说明', () => {
   // 静默忽略最糟：用户勾了「注释合理性」，看到「优化完成」，以为注释也处理过了
-  const notes = buildFixNotes({ requested: ['rules', 'comments', 'map'], results: [] });
+  // 注意：map 已进入 SUPPORTED_DIMENSIONS，这里改用 comments/tests 举例
+  const notes = buildFixNotes({ requested: ['rules', 'comments', 'tests'], results: [] });
   assert.equal(notes.length, 1);
   assert.match(notes[0], /comments/);
-  assert.match(notes[0], /map/);
+  assert.match(notes[0], /tests/);
 });
 
 test('只勾选支持的维度时不产生该提示', () => {
@@ -109,4 +110,47 @@ test('读不到根 CLAUDE.md 时不报噪声', () => {
 test('缺参数不抛错', () => {
   assert.deepEqual(buildFixNotes({}), []);
   assert.deepEqual(buildFixNotes(), []);
+});
+
+// ---------- 维度① 地图接入后的补充 ----------
+
+test('map 已进入支持的维度', () => {
+  assert.ok(SUPPORTED_DIMENSIONS.includes('map'));
+  assert.ok(SUPPORTED_DIMENSIONS.includes('rules'));
+});
+
+test('只勾 map 时不再提示「暂无自动修复能力」', () => {
+  assert.deepEqual(buildFixNotes({ requested: ['map'], results: [] }), []);
+});
+
+test('写过地图文件时提示 mtime 已被刷新', () => {
+  // 这是 M3 过期告警会被本次写入清零的唯一提醒。删掉它，用户会把分数上涨
+  // 误读成「地图已经更新了」——而地图正文其实一个字都没改
+  const notes = buildFixNotes({
+    requested: ['map'],
+    results: [{ status: 'done', kind: 'stale-audit', file: 'src/a/CLAUDE.md' }],
+  });
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /时间戳|新鲜度|过期/);
+  assert.match(notes[0], /自动核对/);
+});
+
+test('没有地图写入成功时不产生该提示', () => {
+  const notes = buildFixNotes({
+    requested: ['map'],
+    results: [{ status: 'failed', kind: 'stale-audit', file: 'src/a/CLAUDE.md' }],
+  });
+  assert.deepEqual(notes, []);
+});
+
+test('地图结果不会污染 rules 的残留检查', () => {
+  // 地图结果的 file 不以 .claude/rules/ 开头，拿去 slice 会产生垃圾字符串，
+  // 再用它去 includes 根 CLAUDE.md 可能误报
+  const notes = buildFixNotes({
+    requested: ['map', 'rules'],
+    results: [{ status: 'done', kind: 'gen-map', file: 'src/a/CLAUDE.md' }],
+    rootClaudeMd: '# 根地图\n\n见 `src/a/CLAUDE.md`',
+  });
+  assert.equal(notes.length, 1, '只该有 mtime 那一条');
+  assert.match(notes[0], /时间戳|新鲜度|过期/);
 });

@@ -15,7 +15,7 @@
  *   D. retro 会话没有任何回看入口。
  *
  * 零 Claude 调用：/api/run/start 与 /api/history 都被 stub，SSE 用 MockEventSource 由测试驱动。
- * 自起独立 web 服务器（临时 APP_DATA_DIR + 随机端口），不碰 pm2 的 claude-web。
+ * 自起独立 web 服务器（临时 APP_DATA_DIR + 随机端口），不碰 pm2 的 principal-web。
  *
  * 运行：node tests/e2e-retro-summary.mjs
  */

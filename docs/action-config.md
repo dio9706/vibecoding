@@ -32,7 +32,7 @@ npm start
 或使用 PM2 重启：
 
 ```bash
-pm2 restart claude-web
+pm2 restart principal-web
 ```
 
 首次启动时，系统自动在项目根目录创建以下文件：

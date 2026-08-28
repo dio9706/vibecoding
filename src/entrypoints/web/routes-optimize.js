@@ -13,7 +13,7 @@ import { logger } from '../../shared/logger.js';
 import { getProjectRecord } from '../../store/optimize.js';
 import {
   startCheckup, getCheckupJob, attachCheckupJob,
-  startFix, getFixJob, attachFixJob, runRollback,
+  startFix, getFixJob, attachFixJob, cancelFixJob, runRollback,
 } from './optimize-ops.js';
 import { listBackups } from '../../features/project-optimize/backup.js';
 
@@ -102,6 +102,19 @@ function handleFixStream(res, url) {
   attachFixJob(job, res);
 }
 
+// ==== POST /api/optimize/fix/cancel {jobId} ====
+// 只发停止信号，不回滚。已落盘的改动保留，用户可另行走 rollback
+function handleFixCancel(req, res) {
+  return withJsonBody(req, res, async (data) => {
+    const jobId = str(data.jobId);
+    if (!jobId) return sendJson(res, 400, { error: '缺少 jobId 参数' });
+    // 找不到 job 一律回 404 而不是静默 200：前端据此提示「任务已结束」，
+    // 回 200 会让用户以为点停止生效了、然后继续等一个不会来的停止事件
+    if (!cancelFixJob(jobId)) return sendJson(res, 404, { error: '优化任务不存在或已结束' });
+    sendJson(res, 200, { ok: true });
+  });
+}
+
 // ==== GET /api/optimize/backups?dir=xxx ====
 function handleBackups(res, url) {
   const dir = str(url.searchParams.get('dir'));
@@ -143,6 +156,9 @@ export function handleOptimizeRoutes(req, res, url) {
   }
   if (url.pathname === '/api/optimize/fix-stream' && req.method === 'GET') {
     return handleFixStream(res, url);
+  }
+  if (url.pathname === '/api/optimize/fix/cancel' && req.method === 'POST') {
+    return handleFixCancel(req, res);
   }
   if (url.pathname === '/api/optimize/backups' && req.method === 'GET') {
     return handleBackups(res, url);

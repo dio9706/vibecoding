@@ -1,6 +1,9 @@
-# claude-agent-web-demo · 浏览器里的 Claude Code 执行台
+# Principal · 让任何终端成为你的员工
 
-在**浏览器**（以及**飞书 bot**）里调用本地 Claude，实时流式看到它读文件、跑命令、写代码的全过程。
+> 名字取自委托代理理论（principal–agent）：**你是委托人（Principal），每个终端里跑的是代理人（Agent）。**
+> 你的角色从「敲键盘的人」变成「签字的人」——派活、看结果、审计过程。
+
+在**浏览器**（以及**飞书 bot**、**桌面客户端**）里调用本地 Claude，实时流式看到它读文件、跑命令、写代码的全过程。
 后端基于 **Claude Agent SDK**（`@anthropic-ai/claude-agent-sdk`，= headless 版 Claude Code），
 走本机订阅登录，具备完整 Claude Code 能力（读写文件、执行命令、指定工作目录），
 额度与交互式 Claude Code 共用同一订阅池。
@@ -54,11 +57,11 @@ node --env-file=.env feishu.js
 pm2 start ecosystem.config.cjs   # 启动（或双击 start.bat）
 pm2 save && pm2 startup          # 开机自启
 pm2 logs                         # 看日志
-pm2 restart claude-web           # 改后端后重启 web
+pm2 restart principal-web           # 改后端后重启 web
 pm2 stop ecosystem.config.cjs    # 停止（或 stop.bat）
 ```
 
-> 进程名：`claude-web`（端口 3000）、`claude-feishu`（飞书长连接）。用 PM2 前先停掉手动起的实例，避免端口/长连接冲突。
+> 进程名：`principal-web`（端口 3000）、`principal-feishu`（飞书长连接）。用 PM2 前先停掉手动起的实例，避免端口/长连接冲突。
 
 ---
 
@@ -122,7 +125,7 @@ git push origin v1.0.0
    - **`.env`**：填 `LARK_APP_ID` / `LARK_APP_SECRET`；
    - **Web 设置页 ⚙ → 飞书凭证 tab**：填入后写入 `settings.json`，飞书进程 `fs.watch` **热重载**，无需重启。
 3. 首次留空 `OWNER_OPEN_IDS` 启动，给 bot 发条消息，终端会打印 `sender_open_id`，回填后重启即获得 owner 完整能力。
-4. 启动飞书入口：`node --env-file=.env feishu.js`（或 PM2 的 `claude-feishu`）。
+4. 启动飞书入口：`node --env-file=.env feishu.js`（或 PM2 的 `principal-feishu`）。
 - **权限**：应用需开通消息、`im:resource`（收图）等 scope。分级授权：owner 完整能力 / 其他人受限只读。
 - **相关 env**：`OWNER_OPEN_IDS`、`TRIAGE_OWNER_OPEN_ID`（待办 triage 专属白名单）、`TRIAGE_TRIGGER`、`REACTION_EMOJIS`。
 
@@ -221,7 +224,7 @@ git push origin v1.0.0
 > 2. 执行 `npm install`；
 > 3. 若我要接飞书：`cp .env.example .env`，提示我填 `LARK_APP_ID`/`LARK_APP_SECRET`，其余用默认值；只用 Web 则跳过 `.env`；
 > 4. 用 PM2 守护：`pm2 start ecosystem.config.cjs && pm2 save`，并告诉我 `pm2 startup` 的开机自启命令；
-> 5. 打开 http://127.0.0.1:3000 验证 web 已启动，飞书入口检查 `pm2 logs claude-feishu` 无报错；
+> 5. 打开 http://127.0.0.1:3000 验证 web 已启动，飞书入口检查 `pm2 logs principal-feishu` 无报错；
 > 6. 提醒我到设置页 ⚙ 配置：飞书凭证（如未走 .env）、多个 Claude 订阅 token（特性 4/7 需 ≥2 个）；
 > 7. 部署完成后输出：访问地址、进程名、下一步待我手动填的凭证清单。
 > 注意：服务只能绑 `127.0.0.1`，绝不暴露公网；不要把 `.env`/`settings.json` 等敏感文件提交到 git。

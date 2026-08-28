@@ -126,6 +126,12 @@
   border: 1px solid var(--border-soft); background: var(--panel-2, #1b1c26); cursor: pointer;
 }
 .rq-vbtn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.rq-regen {
+  padding: 4px 10px; border-radius: 7px; font-size: 12px; color: var(--muted);
+  background: var(--panel-2, #1b1c26); border: 1px solid var(--border-soft); cursor: pointer; transition: .13s;
+}
+.rq-regen:hover:not(:disabled) { color: var(--text); border-color: currentColor; }
+.rq-regen:disabled { opacity: .45; cursor: not-allowed; }
 
 /* ── 节点 ─────────────────────────────────────────────────────────────── */
 .rq-node {

@@ -11,10 +11,11 @@ export const CONV_CARD_KIND = 'conv-settled';
  * 白名单会把正常完成的任务漏掉。
  * - stopped：用户自己刚点的停止，再推一条纯属噪音
  * - quota_blocked：额度撞墙会自动续跑，任务逻辑上没结束（续跑真终结时才推）
+ * - exception_retry：异常后会自动重试，任务逻辑上没结束（重试真终结或熔断时才推）
  */
 export function shouldNotifySettle(run) {
   if (!run || run.status === 'running') return false;
-  return !['stopped', 'quota_blocked'].includes(run.subtype);
+  return !['stopped', 'quota_blocked', 'exception_retry'].includes(run.subtype);
 }
 
 export function summarize(text, max = 500) {

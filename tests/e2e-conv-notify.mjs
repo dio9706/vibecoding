@@ -12,7 +12,7 @@
  *    这种「假成功」比直接报错更难被发现，所以断言必须同时覆盖「不加 .on」和「不写 meta」。
  *
  * 与 tests/e2e-req-review.mjs 同范式：自起独立 web 服务器（mkdtemp 临时 APP_DATA_DIR +
- * 内核分配的空闲端口），**绝不触碰 pm2 的 claude-web** —— 3000 端口与仓库根数据目录是用户
+ * 内核分配的空闲端口），**绝不触碰 pm2 的 principal-web** —— 3000 端口与仓库根数据目录是用户
  * 正在服务的真实会话，既不可占用也不可污染。server.js 未做任何改动，PORT / APP_DATA_DIR
  * 是它本就支持的入口（见 src/shared/config.js、src/store/index.js）。
  * 端口默认走 listen(0) 由内核分配（拿号即放），比写死一个「不常用端口」更不可能与人撞；

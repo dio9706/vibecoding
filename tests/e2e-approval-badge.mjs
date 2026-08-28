@@ -1,7 +1,7 @@
 /**
  * 审批徽标 e2e 测试：验证顶栏审批徽标（#askChip）存在、初始隐藏、点击显示待审批面板。
  * 需求场景：用户等待权限审批时，顶栏展示审批徽标并可点击查看待审批列表。
- * 须先起 localhost:3000（pm2 claude-web）。
+ * 须先起 localhost:3000（pm2 principal-web）。
  * 运行：node tests/e2e-approval-badge.mjs
  */
 import { chromium } from 'playwright';

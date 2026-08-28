@@ -1,7 +1,7 @@
 /**
  * 可写目录解析 —— 全项目唯一来源。
  *
- * 打包后 __dirname 指向**只读**的安装目录（如 C:\Program Files\vibe-coding-desktop\resources\...），
+ * 打包后 __dirname 指向**只读**的安装目录（如 C:\Program Files\principal-desktop\resources\...），
  * 往那里写东西一律 EPERM/EACCES。Tauri 会注入 APP_DATA_DIR 指向用户可写目录，必须优先使用。
  *
  * 这条规则原本被复制了五份，其中三份漏了 APP_DATA_DIR，且失败都被 try/catch 静默吞掉：

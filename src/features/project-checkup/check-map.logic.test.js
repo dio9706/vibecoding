@@ -199,3 +199,18 @@ test('没有可统计的模块时覆盖率算满分', () => {
   const r = evaluateMap({ hasRootMap: true, modules: [], deadLinks: [], rootMapLines: 10 });
   assert.equal(r.score, 80);
 });
+
+test('M3 issue 带结构化 staleDays，M4 issue 带结构化 ref', () => {
+  // 修复逻辑要用这两个值。只留在 message 文本里的话，改一次文案就让自动修复静默失效
+  const out = evaluateMap({
+    hasRootMap: true,
+    modules: [{ name: 'src/a', hasMap: true, staleDays: 23 }],
+    deadLinks: [{ file: 'CLAUDE.md', line: 7, ref: 'src/gone.js' }],
+    rootMapLines: 100,
+  });
+  const m3 = out.issues.find((i) => i.code === 'M3_STALE_MAP');
+  const m4 = out.issues.find((i) => i.code === 'M4_DEAD_LINK');
+  assert.equal(m3.staleDays, 23);
+  assert.equal(m4.ref, 'src/gone.js');
+  assert.equal(m4.line, 7);
+});

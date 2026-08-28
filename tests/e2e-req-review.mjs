@@ -1,7 +1,7 @@
 /**
  * 需求视图（Task 8：侧栏「新需求」+ 评审设计期文档模式）e2e 回归。
  * 与其余 e2e-*.mjs 不同：本测试自起独立 web 服务器（临时 APP_DATA_DIR + 随机空闲端口），
- * 不触碰 pm2 的 claude-web —— 那是用户正在服务的真实会话，端口(3000)与数据目录都不可占用/污染。
+ * 不触碰 pm2 的 principal-web —— 那是用户正在服务的真实会话，端口(3000)与数据目录都不可占用/污染。
  * server.js 本身已支持 PORT/APP_DATA_DIR 环境变量（见 src/shared/config.js、src/store/index.js），
  * 未对其做任何改动。
  *

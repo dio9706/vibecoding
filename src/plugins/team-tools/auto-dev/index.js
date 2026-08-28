@@ -2,7 +2,7 @@
  * 自动开发管线 —— 中度/完全托管共用：常驻 auto 工作区里建任务分支改码，完成后待人工确认合并。
  *
  * 队列模型：「任务状态即队列」——入队 = 锁内把任务置 status:'queued'（tasks.json 跨进程安全），
- * 泵（pump）只在 claude-web 进程跑（startAutoDevPump），feishu 进程只标记状态不执行，
+ * 泵（pump）只在 principal-web 进程跑（startAutoDevPump），feishu 进程只标记状态不执行，
  * 从根上避免双进程并发操作同一 git 工作区；状态落盘天然获得崩溃/重启续跑能力。
  *
  * 执行流：确保 auto 工作区（首建运行 setupScript）→ commitResidue 自愈残留
@@ -47,7 +47,7 @@ export function requestAutoDevelop(taskId, event = '加入自动开发队列') {
   return updateTask(taskId, { status: 'queued', auto: true }, event);
 }
 
-/** 仅 claude-web 进程调用：启动恢复 + 轮询泵 */
+/** 仅 principal-web 进程调用：启动恢复 + 轮询泵 */
 export function startAutoDevPump() {
   recoverOnBoot();
   if (pumpTimer) return;

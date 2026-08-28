@@ -112,3 +112,12 @@ test('分数变化容忍 null', () => {
   assert.equal(scoreDelta(60, null), '60');
   assert.equal(scoreDelta(null, null), '--');
 });
+
+test('地图相关阶段有中文文案', () => {
+  // 未知 phase 会被原样回显，所以「文案 === phase 名」就等于没配
+  for (const phase of ['dead-link', 'gen-map', 'cancelling']) {
+    const label = stepLabel(phase);
+    assert.notEqual(label, phase, `${phase} 应有中文文案，实际回显了原始 phase`);
+    assert.ok(label.length > 0);
+  }
+});

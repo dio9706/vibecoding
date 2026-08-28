@@ -1,7 +1,7 @@
 [package]
-name = "vibe-coding-desktop"
+name = "principal-desktop"
 version = "0.1.0"
-description = "Vibe Coding Desktop Application"
+description = "Principal Desktop Application"
 authors = ["Your Name"]
 license = "ISC"
 repository = ""

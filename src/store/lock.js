@@ -1,5 +1,5 @@
 /**
- * 跨进程文件锁 —— PM2 的 claude-web 与 claude-feishu（以及 Tauri 桌面版）共享同一批 JSON，
+ * 跨进程文件锁 —— PM2 的 principal-web 与 principal-feishu（以及 Tauri 桌面版）共享同一批 JSON，
  * 所有「读出来改一改再写回」都必须在这把锁内完成。
  *
  * 旧实现的三个缺陷：

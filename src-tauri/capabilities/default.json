@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for all Vibe Coding windows (single-instance multi-window). 安全说明：shell:allow-execute 的 args 原为 true（完全不限制），意味着 webview 里任意 JS 都能 invoke('plugin:shell|execute', {args:['-e','<任意代码>']}) 取得本机任意代码执行，把任何一个 XSS 直接放大成 RCE。现收窄为只放行 Rust 侧启动 sidecar 时传的那一个参数（见 src-tauri/src/main.rs 的 .args([server_js_arg])，解析结果形如 $RESOURCE/sidecar/server.js）。改这条 validator 前先确认 main.rs 传参未变。opener:default = allow-open-url + allow-reveal-item-in-dir + allow-default-urls(限 http/https/mailto/tel)，刻意不含 allow-open-path——后者会放开「用默认程序打开任意路径」，.exe/.bat/.lnk 将被直接执行，等于把 XSS 放大成 RCE。原 shell:allow-open 的 scope 正则只认 URL，本地路径必被拒（这正是「打开失败：未知错误」的成因），迁 opener 后由 reveal_item_in_dir 承担定位职责，不执行目标文件。",
+  "description": "Default capabilities for all Principal windows (single-instance multi-window). 安全说明：shell:allow-execute 的 args 原为 true（完全不限制），意味着 webview 里任意 JS 都能 invoke('plugin:shell|execute', {args:['-e','<任意代码>']}) 取得本机任意代码执行，把任何一个 XSS 直接放大成 RCE。现收窄为只放行 Rust 侧启动 sidecar 时传的那一个参数（见 src-tauri/src/main.rs 的 .args([server_js_arg])，解析结果形如 $RESOURCE/sidecar/server.js）。改这条 validator 前先确认 main.rs 传参未变。opener:default = allow-open-url + allow-reveal-item-in-dir + allow-default-urls(限 http/https/mailto/tel)，刻意不含 allow-open-path——后者会放开「用默认程序打开任意路径」，.exe/.bat/.lnk 将被直接执行，等于把 XSS 放大成 RCE。原 shell:allow-open 的 scope 正则只认 URL，本地路径必被拒（这正是「打开失败：未知错误」的成因），迁 opener 后由 reveal_item_in_dir 承担定位职责，不执行目标文件。",
   "windows": ["main", "win-*"],
   "permissions": [
     "core:default",

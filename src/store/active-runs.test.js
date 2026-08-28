@@ -5,7 +5,7 @@ import { partitionActiveRuns } from './active-runs.js';
 /**
  * 背景：recoverPendingAndOrphans 启动时**无条件** clearActiveRuns()，
  * 并把读到的每一条都当孤儿转「待续跑」自动发「继续」。
- * 而 ecosystem.config.cjs 明确让 PM2 的 claude-web 与 Tauri 桌面版**共用同一个 APP_DATA_DIR**
+ * 而 ecosystem.config.cjs 明确让 PM2 的 principal-web 与 Tauri 桌面版**共用同一个 APP_DATA_DIR**
  * （前者 3000、后者 9701，设计上可同时运行），根 server.js 又是 sidecar 入口、加载同一个 web server 模块。
  * 于是：PM2 有 run 在跑时双击启动桌面版 → 桌面进程把这些条目当孤儿清空并对同一 session_id
  * 自动续跑 → **同一会话被两个进程并发跑**：重复烧额度、并发写同一工作目录、resumeAttempt 被污染。

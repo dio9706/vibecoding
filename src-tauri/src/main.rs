@@ -26,7 +26,7 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 // ── 默认端口 ─────────────────────────────────────────────────────────────────
 
 /// 桌面版后端默认端口；生产版若被占会自动往后探测（9701–9800）。
-/// PM2 claude-web / 独立 node server.js 仍使用 3000，两者天然错开。
+/// PM2 principal-web / 独立 node server.js 仍使用 3000，两者天然错开。
 const DEFAULT_BACKEND_PORT: u16 = 9701;
 /// 后端就绪探测预算：80 × 500ms = 40s。重启开机时系统繁忙 + sidecar 冷启动
 ///（Node 冷启 + ESM 顶层 await 加载插件 + 飞书 WS 连接）常超 10s，故给足 40s，
@@ -255,7 +255,7 @@ fn start_backend_prod(app: &AppHandle) {
         }
     }
 
-    // 1. 可写数据目录：%APPDATA%\com.vibecoding.desktop
+    // 1. 可写数据目录：%APPDATA%\com.principal.desktop
     let data_dir = match app.path().app_data_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -410,7 +410,7 @@ fn create_app_window_ctx(app: &AppHandle, cwd: Option<&str>, conv: Option<&str>)
     let n = WINDOW_SEQ.fetch_add(1, Ordering::SeqCst);
     let label = if n == 0 { "main".to_string() } else { format!("win-{}", n + 1) };
     wlog(&format!("[create] label={} inject={}", label, cwd.is_some() || conv.is_some()));
-    // 初始标题就用项目名（cwd 末段），省掉任务栏先闪一下 "Vibe Coding" 再被前端改掉；
+    // 初始标题就用项目名（cwd 末段），省掉任务栏先闪一下 "Principal" 再被前端改掉；
     // 前端切目录时再经 win_set_title 更新（见 chat.js refreshDirLabel）。
     let title = cwd
         .and_then(|p| {
@@ -419,7 +419,7 @@ fn create_app_window_ctx(app: &AppHandle, cwd: Option<&str>, conv: Option<&str>)
                 .map(|s| s.to_string_lossy().to_string())
         })
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "Vibe Coding".to_string());
+        .unwrap_or_else(|| "Principal".to_string());
     let mut builder = tauri::WebviewWindowBuilder::new(
         app,
         &label,
@@ -640,7 +640,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     // id 必须为 "main"：rebuild_tray_menu() 通过 app.tray_by_id("main") 查找本托盘再 set_menu，
     // 若用 ::new()（自动数字 id）则查找失败 → 菜单永不挂载 → 右键无菜单。
     let mut builder = TrayIconBuilder::with_id("main")
-        .tooltip("Vibe Coding")
+        .tooltip("Principal")
         .show_menu_on_left_click(false)
         .on_menu_event({
             let app_clone = app.clone();

@@ -1,7 +1,7 @@
 /**
  * 面板级冒烟回归：遍历全部视图/设置 tab/模型弹层/侧栏开关，全程零 pageerror。
  * 作为 app.js 拆分重构的安全网：module 化 + 严格模式的运行时破坏（隐式全局赋值等）
- * 在任何一步交互中抛错都会被捕获。须先起 localhost:3000（pm2 claude-web）。
+ * 在任何一步交互中抛错都会被捕获。须先起 localhost:3000（pm2 principal-web）。
  * 运行：node tests/e2e-panels-smoke.mjs
  */
 import { chromium } from 'playwright';

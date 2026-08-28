@@ -11,6 +11,7 @@ import {
   iconEl, setIconText, PIN_ICON_SVG, FRONTEND_ICON_SVG, BACKEND_ICON_SVG, DOC_ICON_SVG,
   ATTACH_ICON_SVG, REFRESH_ICON_SVG, WAITING_ICON_SVG, SETTINGS_ICON_SVG, EDIT_ICON_SVG,
 } from './icons.js';
+import { isNetworkError } from './net-error.js';
 
 let _showView = () => {};
 
@@ -1459,7 +1460,9 @@ function pickDocFile(req) {
       window.toast.success('需求文档已上传');
       await loadAndRenderReq(req.id);
     } catch (err) {
-      window.toast.error('上传失败：' + (err?.message || err));
+      // 同 req-chat：系统故障不叠业务前缀
+      if (isNetworkError(err)) window.toast.error(err.message);
+      else window.toast.error('上传失败：' + (err?.message || err));
     }
   };
   input.click();
@@ -2808,6 +2811,18 @@ function renderErrorBanner(req) {
   return bar;
 }
 
+/**
+ * 地图系 busy 的文案。这四类任务都不是「开发文档生成」，套用那套文案是假话；且下面那个
+ * 「停止」按钮只对 docgen 有效（走 docgenAborts 注册表），对它们点了不会有任何反应。
+ * 故 renderBusyBar 里单独早返回，不落到默认分支。
+ */
+const MAP_BUSY_TEXT = {
+  mapgen: '正在生成需求地图…',
+  mapfix: '正在按你的标注修订需求地图…',
+  mapchange: '正在按需求变动更新地图…',
+  mapregen: '正在重新通读代码并生成需求地图…',
+};
+
 function renderBusyBar(req) {
   if (!req.busy) return null;
   const bar = e('div', 'rqw-bar busy');
@@ -2825,6 +2840,17 @@ function renderBusyBar(req) {
       req.prime?.text
         ? '模型在通读需求文档并结合你补充的背景，找出没写清、但会影响实现的地方。你已说明的部分不会再问。通常十几秒。'
         : '模型在通读需求文档，找出没写清、但会影响实现的地方。通常十几秒。分析不出结果也不影响生成，会直接跳到读代码。',
+    );
+    bar.appendChild(body);
+    return bar;
+  }
+  if (MAP_BUSY_TEXT[req.busy.kind]) {
+    body.appendChild(e('span', null, MAP_BUSY_TEXT[req.busy.kind]));
+    body.appendChild(document.createElement('br'));
+    body.append(
+      (req.busy.kind === 'mapregen' ? '模型在按当前代码的实际实现重新查证一遍，耗时与生成开发文档同量级。' : '') +
+        '完成后会自动切到新版本。' +
+        (mins > 0 ? '已用时 ' + mins + ' 分钟。' : ''),
     );
     bar.appendChild(body);
     return bar;
@@ -2954,6 +2980,9 @@ function renderReportArea(req) {
       phase: req.phase,
       map: req.mapLatest,
       versions: (req.reqMap?.versions || []).map((x) => ({ v: x.v, at: x.at })),
+      busy: req.busy,
+      // 刷新后 req.busy 非空，现有 3s 轮询自动接管；busy 下降沿的「回到最新版」逻辑会带出重扫结果
+      onRegen: () => loadAndRenderReq(req.id),
       onReload: () => loadAndRenderReq(req.id),
       onRestore: (prompt) => {
         // 评审期还没有需求会话，还原只能等定稿进开发期再点

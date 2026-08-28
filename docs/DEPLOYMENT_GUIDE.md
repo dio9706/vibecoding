@@ -7,7 +7,7 @@
 
 ## 概览
 
-**claude-agent-web-demo** 是一个**后端常驻、支持关窗续跑、多账号轮换、飞书接入、自定义脚本**的 Claude Code 执行台。
+**Principal** 是一个**后端常驻、支持关窗续跑、多账号轮换、飞书接入、自定义脚本**的 Claude Code 执行台。
 部署分为两部分：
 
 1. **环境准备** ← 需要你手动检查的东西
@@ -74,7 +74,7 @@
 将以下 **7 步部署指令**复制粘贴给 Claude（Claude Code 或本执行台都可）：
 
 ```
-我需要在当前机器部署 claude-agent-web-demo 项目。
+我需要在当前机器部署 Principal 项目。
 请按照 README.md 与 docs/ 目录的文档完成以下步骤：
 
 【第 1 步】环境验证
@@ -102,8 +102,8 @@
 【第 4 步】PM2 守护启动
 □ 执行 pm2 start ecosystem.config.cjs
 □ 等待输出稳定，应显示：
-  ├─ claude-web  (online|starting) 
-  ├─ claude-feishu (online|starting)，或仅 claude-web（若只用 Web）
+  ├─ principal-web  (online|starting) 
+  ├─ principal-feishu (online|starting)，或仅 principal-web（若只用 Web）
 □ 执行 pm2 list 验证两个（或一个）进程在线
 □ 执行 pm2 save（保存进程列表）
 □ 执行 pm2 startup（生成系统开机自启脚本，按提示复制命令到终端）
@@ -113,7 +113,7 @@
 □ 等待 3 秒
 □ 执行 curl http://127.0.0.1:3000/ 或用浏览器打开 http://127.0.0.1:3000
 □ 若看到 HTML 页面（或无 "Connection refused"），说明 Web 正常
-□ 若 claude-feishu 进程在线，检查 pm2 logs claude-feishu，应无报错（初次可能等待几秒）
+□ 若 principal-feishu 进程在线，检查 pm2 logs principal-feishu，应无报错（初次可能等待几秒）
 □ 输出给我："Web 服务正常运行，地址 http://127.0.0.1:3000"
 
 【第 6 步】Web 设置页配置
@@ -137,7 +137,7 @@
     └─ 填入 App ID / App Secret
     └─ 点「保存」
     └─ 飞书进程会自动热重载（watch fs 变化），无需重启
-    └─ 检查 pm2 logs claude-feishu，应无新错误
+    └─ 检查 pm2 logs principal-feishu，应无新错误
 
 □ 所有配置完成后，输出给我清单和接下来的验证步骤
 
@@ -153,7 +153,7 @@
 【汇总输出】
 最后，给我一份汇总清单：
 - ✓ 环境检查结果（Node.js 版本、CLI 登录状态、PM2 状态）
-- ✓ 启动的进程（claude-web / claude-feishu）和端口
+- ✓ 启动的进程（principal-web / principal-feishu）和端口
 - ✓ Web 服务地址：http://127.0.0.1:3000
 - ✓ 已配置的特性（多账号数量、飞书接入是否启用、脚本目录位置等）
 - ✓ 下一步待你手动做的（如无新 token 导入 / 测试第一个任务等）
@@ -183,10 +183,10 @@ pm2 list
 pm2 logs              # 实时日志
 
 # 重启 web（改了源码后）
-pm2 restart claude-web
+pm2 restart principal-web
 
 # 重启飞书（改了凭证后）
-pm2 restart claude-feishu
+pm2 restart principal-feishu
 
 # 停止所有进程
 pm2 stop ecosystem.config.cjs
@@ -199,8 +199,8 @@ pm2 stop ecosystem.config.cjs
 pm2 logs
 
 # 某个进程的日志
-pm2 logs claude-web
-pm2 logs claude-feishu
+pm2 logs principal-web
+pm2 logs principal-feishu
 
 # 应用日志（调试用）
 tail -f logs/app-$(date +%Y-%m-%d).log
@@ -242,9 +242,9 @@ tail -f event-log.jsonl
 部署后遇到问题？按顺序检查：
 
 1. **Web 打不开**（http://127.0.0.1:3000 无响应）
-   - 检查 `pm2 list`，`claude-web` 是否 online
+   - 检查 `pm2 list`，`principal-web` 是否 online
    - 检查端口占用：`lsof -i :3000` 或 Windows `netstat -ano | findstr :3000`
-   - 看日志：`pm2 logs claude-web`
+   - 看日志：`pm2 logs principal-web`
 
 2. **任务起不了 / 报错**
    - 看应用日志：`tail -f logs/app-$(date +%Y-%m-%d).log`
@@ -252,9 +252,9 @@ tail -f event-log.jsonl
    - 检查额度：访问 claude.ai 看余额
 
 3. **飞书 bot 无响应**
-   - 检查 `pm2 list`，`claude-feishu` 是否 online
+   - 检查 `pm2 list`，`principal-feishu` 是否 online
    - 检查飞书凭证：`cat settings.json | grep lark`（敏感信息，仅本机看）
-   - 看日志：`pm2 logs claude-feishu`
+   - 看日志：`pm2 logs principal-feishu`
    - 确认应用权限已开通（见"凭证准备"一节）
 
 4. **多账号轮换不工作**
@@ -263,7 +263,7 @@ tail -f event-log.jsonl
    - 如需手动测试，改 `settings.json` 的第一个 token 的 `status` 为 `"rejected"`，然后触发新任务
 
 5. **关窗后任务消失**
-   - 检查 PM2：`pm2 list`，`claude-web` 是否还在线
+   - 检查 PM2：`pm2 list`，`principal-web` 是否还在线
    - 检查 `active-runs.json` 是否存在且非空
    - 重开页面后 GET `/api/run/pending` 是否返回任务列表
 

@@ -1,4 +1,4 @@
-# 📁 claude-p-web-demo 项目目录结构完整指南
+# 📁 Principal 项目目录结构完整指南
 
 **项目路径**: `C:\Users\DELL\Desktop\claude-p-web-demo`
 

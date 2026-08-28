@@ -32,7 +32,11 @@ async function ping() {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), PING_TIMEOUT_MS);
   try {
-    const r = await fetch('/api/ping', { signal: ac.signal, cache: 'no-store' });
+    // __skipGuard：本次失败不上报给 net-guard。启动期后端本来就还没起来，
+    // 不排除会让掉线罩和启动罩同时升起打架。
+    // 注意仍然走包装后的 fetch —— 打包态下这个相对路径必须被改写成
+    // API_BASE + '/api/ping' 才打得到实际端口（bootstrap.js 的 URL 改写分支）。
+    const r = await fetch('/api/ping', { signal: ac.signal, cache: 'no-store', __skipGuard: true });
     return r.ok;
   } catch {
     return false; // 后端未起 / 超时 / 端口未就绪

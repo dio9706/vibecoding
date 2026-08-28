@@ -30,6 +30,8 @@ let checkupBusy = '';
 /** 正在接收优化进度的 SSE 连接 */
 let fixStream = null;
 let fixRunning = false;
+/** 当前优化任务 id —— 「停止」要拿它去调 cancel 接口 */
+let fixJobId = null;
 /**
  * 被用户**主动取消**勾选的维度。
  *
@@ -173,6 +175,16 @@ function refreshFixButton() {
     running: fixRunning || !!checkupBusy,
   });
   btn.textContent = fixButtonLabel(fixRunning);
+
+  // 「停止」只在跑的时候露出来：没在跑时摆一个禁用的停止按钮纯属噪声。
+  // 地图维度是全量生成，十几个模块可能跑十几分钟，必须给用户一个退出口。
+  const cancel = $('#optFixCancel');
+  if (!cancel) return;
+  cancel.hidden = !fixRunning;
+  if (!fixRunning) {
+    cancel.disabled = false;
+    cancel.textContent = '停止';
+  }
 }
 
 /**
@@ -345,9 +357,29 @@ async function runCheckup() {
 // ==================== 一键优化 ====================
 
 function closeFixStream() {
+  fixJobId = null;
   if (!fixStream) return;
   fixStream.close();
   fixStream = null;
+}
+
+/**
+ * 停止正在跑的优化。
+ *
+ * 只发停止信号，**不动已落盘的改动**——想撤销要走「还原本次优化」。
+ * 把两者绑在一起会让「我不想再等了」变成「我要放弃已经生成好的那几份地图」，
+ * 而后者几乎从来不是用户点停止时的本意。
+ */
+async function cancelFix() {
+  if (!fixJobId) return;
+  const btn = $('#optFixCancel');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '停止中…';
+  }
+  const { ok } = await postJson('/api/optimize/fix/cancel', { jobId: fixJobId });
+  // 404 = 任务已经自己跑完了，这不是错误，照常收尾即可
+  if (!ok && btn) btn.textContent = '停止';
 }
 
 /** 追加一行进度。同一行内「阶段 + 文件」，文件名可能为空（plan/backup 是全局步骤） */
@@ -454,6 +486,8 @@ function openFixStream(jobId) {
   closeFixStream();
   const es = new EventSource(`/api/optimize/fix-stream?jobId=${encodeURIComponent(jobId)}`);
   fixStream = es;
+  // closeFixStream 会把它清空，所以必须在它之后赋值
+  fixJobId = jobId;
 
   const finish = (done) => {
     fixRunning = false;
@@ -591,6 +625,7 @@ export function initOptimizePanel() {
     inited = true;
     $('#optRunCheckup')?.addEventListener('click', runCheckup);
     $('#optFix')?.addEventListener('click', () => runFix(false));
+    $('#optFixCancel')?.addEventListener('click', cancelFix);
     $('#optDirBtn')?.addEventListener('click', pickDir);
 
     currentDir = lsGet('optimize.lastDir') || '';

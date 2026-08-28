@@ -3,10 +3,17 @@
  * 纯函数，不碰文件系统。
  */
 
-/** v1 只支持 rules 降级。维度④（无用代码）明确不做，②⑤ 是分析类维度、没有自动修法。 */
-export const SUPPORTED_DIMENSIONS = ['rules'];
+/**
+ * 已具备自动修复能力的维度。
+ * 维度④（无用代码）明确不做；②⑤ 是分析类维度，检测器把全部 issue 标成 fixable:false
+ * （高危：改提示词/注释要动源码，改错了比不改更误导人），没有自动修法。
+ */
+export const SUPPORTED_DIMENSIONS = ['rules', 'map'];
 
 const RULES_PREFIX = '.claude/rules/';
+
+/** 会写地图文件的任务类型 —— 用来判断要不要发 mtime 提醒 */
+const MAP_KINDS = new Set(['gen-map', 'stale-audit', 'dead-link']);
 
 /**
  * 从体检报告里挑出可自动降级的 rules 文件。
@@ -50,7 +57,7 @@ export function selectFixableRules(report) {
 /**
  * 生成「机器做不了、需要你自己动手」的提示。
  *
- * 两条，都对应一种「不说就会被误以为已经处理好了」的情况：
+ * 三条，每条都对应一种「不说就会被误以为已经处理好了」的情况：
  *
  * 1. **勾了不支持的维度**。静默忽略最糟——用户勾了注释维度，看到「优化完成」，
  *    合理地以为注释也处理过了。
@@ -59,26 +66,35 @@ export function selectFixableRules(report) {
  *    replaceRuleRefs 只认反引号包裹的完整路径，匹配不到它 —— 于是表里留下一行
  *    指向已删除文件的条目。这个改不了自动化：表格的列结构因项目而异，
  *    机器分不清该改成技能名还是整行删掉，只能请用户看一眼。
+ * 3. **地图文件被写过，M3 的过期告警会消失**。check-map.js 判过期靠
+ *    「代码 mtime - 地图 mtime」，而本次写入把地图 mtime 推到了当下 → staleDays 归零 →
+ *    下次体检不报 M3、map 分数还涨，**但地图正文并没有变新鲜**。
+ *    这正是 describe-skill.js 开头警告的「分数变好、实际变差」形状。
+ *    追加块自带日期是第一道提醒，这条 note 是第二道——两道都别删。
  *
  * @param {object} [args]
  * @param {string[]} [args.requested] 用户勾选的维度
- * @param {Array<{status:string,file:string,skillName:string}>} [args.results] demoteOne 的结果
+ * @param {Array<{status:string,file:string,skillName?:string,kind?:string}>} [args.results]
+ *   demoteOne（带 skillName）与地图修复（带 kind）的结果混在一起
  * @param {string|null} [args.rootClaudeMd] 降级完成后根 CLAUDE.md 的内容；读不到传 null
  * @returns {string[]}
  */
 export function buildFixNotes({ requested, results, rootClaudeMd } = {}) {
   const notes = [];
+  const list = Array.isArray(results) ? results : [];
 
   const unsupported = (Array.isArray(requested) ? requested : [])
     .filter((d) => !SUPPORTED_DIMENSIONS.includes(d));
   if (unsupported.length) {
-    notes.push(`本次只处理了 rules 降级；勾选的 ${unsupported.join('、')} 维度暂无自动修复能力，未做任何改动。`);
+    notes.push(`勾选的 ${unsupported.join('、')} 维度暂无自动修复能力，未做任何改动。`);
   }
 
   const md = typeof rootClaudeMd === 'string' ? rootClaudeMd : '';
   if (md) {
-    const residual = (Array.isArray(results) ? results : [])
-      .filter((r) => r?.status === 'done')
+    const residual = list
+      // 只看 rules 降级的结果：地图结果的 file 不以 .claude/rules/ 开头，
+      // 拿它去 slice 会切出一段垃圾字符串，再用它做 includes 匹配就是误报源
+      .filter((r) => r?.status === 'done' && r.skillName)
       // 比对原文件名而不是技能名：技能名会出现在刚替换好的 `/xxx` 里，拿它去搜必然误报
       .map((r) => String(r.file || '').slice(RULES_PREFIX.length))
       .filter((name) => name && md.includes(name));
@@ -89,6 +105,15 @@ export function buildFixNotes({ requested, results, rootClaudeMd } = {}) {
         '自动替换只认带反引号的完整路径），请手工改成对应技能或删掉该行。',
       );
     }
+  }
+
+  const mapWrites = list.filter((r) => r?.status === 'done' && MAP_KINDS.has(r.kind));
+  if (mapWrites.length) {
+    notes.push(
+      `本次改写了 ${mapWrites.length} 份地图文件，它们的时间戳已刷新——` +
+      '「地图过期」告警在下次体检时会消失，但这不代表地图正文已经跟上代码。' +
+      '请以地图末尾的「⚠️ 自动核对」块为准，那里列出的差异仍需人工处理。',
+    );
   }
 
   return notes;

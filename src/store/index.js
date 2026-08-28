@@ -3,7 +3,7 @@
  * 现以 JSON 文件落在项目根（与既有 *.json 兼容，不丢数据），
  * 之后可无痛替换为 sqlite：只需改这里的 readJson/writeJson/updateJson。
  *
- * 并发模型：PM2 同时跑 claude-web 与 claude-feishu 两个进程，共享同一批 JSON
+ * 并发模型：PM2 同时跑 principal-web 与 principal-feishu 两个进程，共享同一批 JSON
  * （settings.json 的 token 池、tasks.json 等双进程都写）。进程内同步 I/O 天然串行；
  * 跨进程的读-改-写必须走 updateJson（<file>.lock 文件锁保护），
  * 落盘一律 tmp+rename 原子替换，防进程中途崩溃留下半截 JSON（settings.json 含全部凭证）。

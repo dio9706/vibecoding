@@ -499,6 +499,23 @@ export function blockRun(run, note) {
   emitSettled(run);
 }
 
+/** 异常待重试：中性终结并附提示（不标红），任务将于 retryInMs 后由 run-claude 自动续跑。
+ *  为什么 status 用 'done' 而不是 'error'：左栏、/api/run/:id、通知侧都按 'error' 渲染「已失败」，
+ *  但此刻任务只是换个 run 继续跑，没结束。run.is_error 保留真值——状态查询要如实反映本轮确实异常了，
+ *  通知侧靠 subtype 过滤挡住，不会拿它渲染失败卡片。 */
+export function retryRun(run, note, retryInMs) {
+  if (run.status !== 'running') return;
+  run.status = 'done';
+  run.subtype = 'exception_retry';
+  run.text = run.text ? run.text + '\n\n' + note : note;
+  run.updatedAt = Date.now();
+  stopWatchdog(run);
+  drainAsks(run);
+  fanout(run, 'done', { result: run.text, is_error: false, subtype: 'exception_retry', retryInMs, ...unsentField(run) });
+  closeAll(run);
+  emitSettled(run);
+}
+
 /** 手动停止：中断 SDK 并按「已停止」中性终结（不标红，区别于异常） */
 export function stopRun(run, reason = '已手动停止') {
   if (run.status !== 'running') return;

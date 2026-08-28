@@ -14,6 +14,7 @@ import { sendJson } from './http-util.js';
 import { withJsonBody } from './body.js';
 import { str, normalizeMode } from './input.js';
 import { getEntry, enableConv, disableConv, patchConv, claimInjections } from '../../store/conv-notify.js';
+import { getRun } from '../../store/runs.js';
 import { getMyFeishuOpenId, getActiveBot } from '../../store/settings.js';
 import { injectToConv } from './conv-notify.js';
 
@@ -97,10 +98,22 @@ function handleSync(req, res) {
 }
 
 // ==== GET /api/conv-notify/inbox?convId= ====
+/**
+ * 每条注入项补一个 alive：它的 runId 现在还在跑吗。
+ *
+ * 为什么不能让前端自己去猜：runId 是**注入那一刻**的 run，而 runs 注册表是纯内存的。
+ * 用户在飞书回一句、网页当时没开着，隔天再进这个会话时该 run 早已随进程消失 ——
+ * 前端若照旧接流，会撞上 SSE 的「run 不存在」分支（那条路径设计上是静默等待续跑），
+ * 可这里压根不会有续跑条目，助手气泡于是永久停在「运行中…」，用户看到的就是「没有响应」。
+ */
 function handleInbox(res, url) {
   const convId = str(url.searchParams.get('convId'));
   const entry = convId ? getEntry(convId) : null;
-  return sendJson(res, 200, { active: !!entry, items: entry?.inbox || [] });
+  const items = (entry?.inbox || []).map((it) => ({
+    ...it,
+    alive: !!it.runId && getRun(it.runId)?.status === 'running',
+  }));
+  return sendJson(res, 200, { active: !!entry, items });
 }
 
 // ==== POST /api/conv-notify/claim {convId, ids:[]} ====

@@ -53,6 +53,33 @@ export const READONLY_TOOLS = new Set([
 /** 尽力从 dialog payload 解析出可渲染的问题/选项；结构不认识返回 null（→ cancelled） */
 export function parseDialog(request) {
   const p = request.payload || {};
+  // ---- AskUserQuestion（Claude 主动向用户拍板）----
+  // 这个结构比下面的旧猜测更具体，必须先匹配：它的选项藏在 questions[].options 里，
+  // 旧的 p.options 猜测认不出这层嵌套，于是每次 Claude 提问都被静默 cancelled ——
+  // CLI 随后 fail closed 退化成 no-dialog 行为，表现为 Claude 在正文里列「1. 2. 3.」等人手打。
+  // schema 见 sdk-tools.d.ts:800 AskUserQuestionInput。
+  const q = Array.isArray(p.questions) ? p.questions[0] : null;
+  if (q && Array.isArray(q.options) && q.options.length) {
+    const options = q.options.map((o, i) => ({
+      id: String(i),
+      label: o?.label || String(i),
+      desc: o?.description || '',
+    }));
+    return {
+      // header 是 ≤12 字符的 chip 标签（如「状态方案」），当正文读是噪音；问句已在 title
+      title: '❓ ' + String(q.question || '请选择'),
+      body: '',
+      options,
+      // 按 AskUserQuestionOutput（sdk-tools.d.ts:3175）形状回传：输入结构原样 + answers。
+      // multiSelect 本轮降级单选，answers 恒为单元素数组 —— 语义上是「多选题只答了一项」，
+      // Claude 能继续；比压根不呈现好。
+      toResult: (choice) => {
+        const opt = options.find((x) => x.id === choice);
+        return { questions: [{ ...q, answers: [opt ? opt.label : choice] }] };
+      },
+    };
+  }
+  // ---- 旧的通用猜测（保留：其它 dialogKind 可能是扁平结构）----
   const question = p.question || p.message || p.prompt || p.title || request.dialogKind || '请选择';
   const rawOpts = p.options || p.choices || p.answers || null;
   if (Array.isArray(rawOpts) && rawOpts.length) {

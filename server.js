@@ -1,6 +1,6 @@
 /**
  * 桌面版 / 独立启动的一体化入口：同时启动 web 服务器（HTTP + SSE）与飞书长连接。
- * PM2 仍可分开用 claude-web / claude-feishu 各自启动，此文件供 Tauri sidecar 使用。
+ * PM2 仍可分开用 principal-web / principal-feishu 各自启动，此文件供 Tauri sidecar 使用。
  *
  * 冷启动顺序（重要）：先 await web 的 ready（listen 完成、/api/ping 可响应），
  * 再加载飞书渠道。飞书 WS 连接常走本地代理（如 127.0.0.1:7897），重启开机时

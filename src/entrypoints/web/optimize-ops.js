@@ -23,6 +23,10 @@ import { planDemote, demoteOne } from '../../features/project-optimize/fix-rules
 import { createBackup, recordPostState, listBackups, restoreBackup } from '../../features/project-optimize/backup.js';
 import { checkWorkspace } from '../../features/project-optimize/git-guard.js';
 import { selectFixableRules, buildFixNotes } from '../../features/project-optimize/fix-plan.logic.js';
+import { checkMap } from '../../features/project-checkup/check-map.js';
+import { fixDeadLinks, writeGeneratedMap, writeStaleAudit } from '../../features/project-optimize/fix-map.js';
+import { selectFixableMap, planMapFix } from '../../features/project-optimize/fix-map.logic.js';
+import { generateRootMap, generateModuleMap } from '../../features/project-optimize/gen-map.js';
 import {
   getLlmCache, saveLlmCache, saveCheckup,
   acquireBusy, releaseBusy, saveFixResult, getProjectRecord,
@@ -259,8 +263,62 @@ function closeSubs(job) {
 
 // ==================== 一键优化 ====================
 
+/**
+ * 地图生成的并发度。
+ *
+ * 不能更高：describe-skill.js 的 DESCRIBE_TIMEOUT_MS 注释记录了实测数据——同一次跑里
+ * 四个调用耗时 34.9s / 35.3s / 91.6s / 127.1s，波动近 4 倍，原因是连续调用赶上限流排队。
+ * 并发拉高只会加剧排队，把长尾推得更长，甚至触发更严格的限流。
+ * 3 是「明显快于串行」和「不额外招惹限流」之间的折中。
+ */
+const MAP_CONCURRENCY = 3;
+
+/**
+ * 受限并发池：thunks 逐个取、最多 n 个同时在跑，每完成一个立刻回调（用于推 SSE）。
+ *
+ * 不用 Promise.all 分批：分批的话每批要等最慢的那个（长尾 127s vs 35s），
+ * 白白浪费快的那几个的时间。这里是「谁空了谁取下一个」。
+ *
+ * 单个任务抛错不会掀翻整池——执行层承诺不抛（fix-map.js 开头纪律 2），
+ * 这里的 catch 是防御性的，真抛了就当一条失败记下来继续。
+ */
+async function runPool(thunks, n, onDone, job) {
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < thunks.length) {
+      if (job?.signal?.aborted) return;
+      const mine = thunks[cursor++];
+      let r;
+      try {
+        r = await mine();
+      } catch (e) {
+        r = { file: '(未知)', kind: 'gen-map', status: 'failed', reason: e?.message || String(e) };
+      }
+      onDone(r);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(n, thunks.length) }, worker));
+}
+
 export function getFixJob(id) {
   return getJob(id, 'fix');
+}
+
+/**
+ * 请求停止一次优化。
+ *
+ * 只发信号、不等它停：正在跑的 LLM 调用会被 abortController 打断，
+ * 已经落盘的改动一律保留（备份还在，用户可以还原）。
+ * 「停止」不等于「回滚」——把两者绑在一起会让用户在想中止时被迫接受回滚。
+ *
+ * @returns {boolean} 是否受理（job 不存在或已结束时为 false）
+ */
+export function cancelFixJob(id) {
+  const job = getJob(id, 'fix');
+  if (!job || job.status !== 'running') return false;
+  job.abort();
+  pushEvent(job, 'step', { phase: 'cancelling', text: '正在停止……已完成的改动会保留' });
+  return true;
 }
 
 /**
@@ -300,8 +358,18 @@ export async function startFix(dir, { dimensions = [], force = false } = {}) {
   const report = getProjectRecord(dir)?.lastCheckup;
   if (!report) throw new Error('请先跑一次体检，再执行优化');
 
-  const { files, blocked } = selectFixableRules(report);
-  if (!files.length) return { nothing: true, blocked };
+  // 维度勾选是**筛子**而不是摆设：用户只勾了 map 却把 rules 也改了，
+  // 等于在没得到同意的情况下删文件。空数组视为「全都要」——那是老前端的行为，
+  // 改成静默不做会让旧页面点了优化后毫无反应
+  const want = (d) => !dimensions.length || dimensions.includes(d);
+  const rules = want('rules') ? selectFixableRules(report) : { files: [], blocked: [] };
+  const map = want('map')
+    ? selectFixableMap(report)
+    : { rootMap: false, modules: [], stale: [], deadLinks: [], blocked: [] };
+
+  const mapTaskCount = (map.rootMap ? 1 : 0) + map.modules.length + map.stale.length + map.deadLinks.length;
+  const blocked = [...rules.blocked, ...map.blocked];
+  if (!rules.files.length && !mapTaskCount) return { nothing: true, blocked };
 
   // job id 先生成再抢闸：生成本身没有副作用，但把它写进占用记录后，
   // 被挡下的那个请求就能拿着 jobId 去接同一条 SSE，而不是只被告知「有人在跑」。
@@ -321,6 +389,7 @@ export async function startFix(dir, { dimensions = [], force = false } = {}) {
     }
 
     gc();
+    const ac = new AbortController();
     const job = {
       id: jobId,
       kind: 'fix',
@@ -329,16 +398,26 @@ export async function startFix(dir, { dimensions = [], force = false } = {}) {
       events: [],
       done: null,
       subs: new Set(),
+      // 中断句柄：地图维度是全量生成，10+ 个模块可能跑十几分钟，
+      // 没有取消点等于把人锁在进度条前面
+      abort: () => ac.abort(),
+      signal: ac.signal,
       updatedAt: Date.now(),
     };
     jobs.set(job.id, job);
 
     // 不 await：立刻把 jobId 还给前端去接 SSE
-    runFix(job, { files, blocked, dimensions, rulesBefore: report.dims?.rules?.score ?? null })
-      .catch((e) => {
-        logger.warn('optimize', '优化编排异常', { dir, err: e?.message || String(e) });
-        finishFixJob(job, { error: e?.message || String(e) });
-      });
+    runFix(job, {
+      rules,
+      map,
+      blocked,
+      dimensions,
+      rulesBefore: report.dims?.rules?.score ?? null,
+      mapBefore: report.dims?.map?.score ?? null,
+    }).catch((e) => {
+      logger.warn('optimize', '优化编排异常', { dir, err: e?.message || String(e) });
+      finishFixJob(job, { error: e?.message || String(e) });
+    });
 
     return { jobId: job.id };
   } catch (e) {
@@ -354,20 +433,94 @@ export async function startFix(dir, { dimensions = [], force = false } = {}) {
  * recordPostState 必须在全部写完之后（它记的是「优化后的内容哈希」，
  * 还原时靠它区分「用户事后又手工改过」和「优化本身造成的差异」）。
  */
-async function runFix(job, { files, blocked, dimensions, rulesBefore }) {
+async function runFix(job, { rules, map, blocked, dimensions, rulesBefore, mapBefore }) {
   const dir = job.dir;
   const results = [];
   let backupDir = null;
 
   try {
-    pushEvent(job, 'step', { phase: 'plan', text: `规划 ${files.length} 个规则文件的降级` });
-    const plan = planDemote(dir, files);
+    // ---- M1 前置：没有根地图时，报告里 M2/M3/M4 根本不存在 ----
+    // check-map.logic.js 的 evaluateMap 在 !hasRootMap 时 early-return，只产出 M1 一条 issue。
+    // 所以根地图必须先生成、再重扫，否则一个 map=0 的项目优化完只会多出一份根地图，
+    // 用户还得再点一次才能补上模块地图。
+    let mapPlan = map;
+    if (map.rootMap) {
+      pushEvent(job, 'step', { phase: 'gen-map', text: '生成根项目地图（之后会重新扫描以发现模块级问题）' });
+      const rootRes = await writeGeneratedMap(dir, 'CLAUDE.md', () => generateRootMap(dir, { signal: job.signal }));
+      results.push(rootRes);
+      pushEvent(job, 'file', rootRes);
 
-    const backup = createBackup(dir, plan, { dimensions });
+      if (rootRes.status === 'done') {
+        // 重扫拿真实的 M2/M3/M4。只有根地图写成功才有意义——失败时重扫结果仍是 M1
+        const rescanned = selectFixableMap({ dims: { map: checkMap(dir) } });
+        mapPlan = { ...rescanned, rootMap: false };
+        pushEvent(job, 'step', {
+          phase: 'plan',
+          text: `重新扫描：发现 ${rescanned.modules.length} 个缺地图的模块、`
+            + `${rescanned.stale.length} 份过期地图、${rescanned.deadLinks.length} 条死链`,
+        });
+      } else {
+        mapPlan = { ...map, rootMap: false };
+      }
+    }
+
+    const mapEntries = planMapFix(mapPlan);
+    const rulePlan = rules.files.length ? planDemote(dir, rules.files) : [];
+    pushEvent(job, 'step', {
+      phase: 'plan',
+      text: `规划 ${rulePlan.length} 个规则文件、${mapEntries.length} 个地图文件的改动`,
+    });
+
+    // 根地图那份 created 条目要一并登记：它已经写下去了，还原时必须能把它删掉。
+    //
+    // 这里有一个已知且可接受的时序窗口：根地图先于 createBackup 落盘。
+    // 之所以能接受——created 类条目在 backup.logic.js 里被标 backed:false（不备份内容），
+    // 还原动作就是「删掉它」，所以备份时机不影响还原的正确性，只要最终 manifest 里有这条记录。
+    // 真正的风险窗口只有「根地图已写、createBackup 还没跑」这两行代码之间的崩溃，
+    // 后果也仅仅是盘上多一个 CLAUDE.md 需要手删。
+    // 为消除它而把备份拆成两次代价大得多：会产生两个备份目录、还原要按序还两次，
+    // 而 backup.js 没有「向已有快照追加条目」的 API。
+    const allEntries = [...rulePlan, ...mapEntries];
+    if (map.rootMap) allEntries.unshift({ path: 'CLAUDE.md', action: 'created' });
+
+    const backup = createBackup(dir, allEntries, { dimensions });
     backupDir = backup.dirName;
-    pushEvent(job, 'step', { phase: 'backup', text: `已快照 ${plan.length} 个文件`, backupDir });
+    pushEvent(job, 'step', { phase: 'backup', text: `已快照 ${allEntries.length} 个文件`, backupDir });
 
-    for (const f of files) {
+    // ---- 死链修复：确定性、最快，先做完 ----
+    if (mapPlan.deadLinks.length) {
+      pushEvent(job, 'step', { phase: 'dead-link', text: `修复 ${mapPlan.deadLinks.length} 条死链` });
+      const dl = fixDeadLinks(dir, mapPlan.deadLinks);
+      for (const u of dl.updated) {
+        const r = { file: u.file, kind: 'dead-link', status: 'done', reason: `${u.from} → ${u.to}` };
+        results.push(r);
+        pushEvent(job, 'file', r);
+      }
+      for (const s of dl.skipped) {
+        const r = { file: s.file, kind: 'dead-link', status: 'skipped', reason: `${s.ref}：${s.reason}` };
+        results.push(r);
+        pushEvent(job, 'file', r);
+      }
+    }
+
+    // ---- 模块地图与过期核对：独立的单文件 LLM 任务 → 受限并发 ----
+    const mapJobs = [
+      ...mapPlan.modules.map((mod) => () =>
+        writeGeneratedMap(dir, `${mod}/CLAUDE.md`, () => generateModuleMap(dir, mod, { signal: job.signal }))),
+      ...mapPlan.stale.map((st) => () =>
+        writeStaleAudit(dir, st.file, st.staleDays, { signal: job.signal })),
+    ];
+    if (mapJobs.length) {
+      pushEvent(job, 'step', { phase: 'gen-map', text: `生成/核对 ${mapJobs.length} 份地图（并发 ${MAP_CONCURRENCY}）` });
+      await runPool(mapJobs, MAP_CONCURRENCY, (r) => {
+        results.push(r);
+        pushEvent(job, 'file', r);
+      }, job);
+    }
+
+    // ---- rules 降级（原有流程，语义一字未动）----
+    for (const f of rules.files) {
+      if (job.signal?.aborted) break;
       const r = await demoteOne(dir, f, {
         onStep: (s) => pushEvent(job, 'step', { phase: s.step, file: s.file, skillName: s.skillName }),
       });
@@ -377,10 +530,14 @@ async function runFix(job, { files, blocked, dimensions, rulesBefore }) {
         // 核心失败：文件系统处于半完成状态，继续处理只会越错越多
         pushEvent(job, 'step', {
           phase: 'abort',
-          text: `${r.file} 失败且改动已写到一半，已停止处理剩余 ${files.length - results.length} 个文件`,
+          text: `${r.file} 失败且改动已写到一半，已停止处理剩余规则文件`,
         });
         break;
       }
+    }
+
+    if (job.signal?.aborted) {
+      pushEvent(job, 'step', { phase: 'abort', text: '已按你的要求停止；已完成的改动保留，可用「还原」撤销' });
     }
 
     // 中途 abort 也要记：记的是**实际落盘的状态**，部分完成的状态一样能当还原基准。
@@ -399,7 +556,9 @@ async function runFix(job, { files, blocked, dimensions, rulesBefore }) {
       blocked,
       notes,
       backupDir,
+      cancelled: !!job.signal?.aborted,
       rules: { before: rulesBefore, after: report.dims?.rules?.score ?? null },
+      map: { before: mapBefore, after: report.dims?.map?.score ?? null },
       report,
     };
     saveFixResult(dir, {
@@ -409,6 +568,7 @@ async function runFix(job, { files, blocked, dimensions, rulesBefore }) {
       results,
       notes,
       rules: summary.rules,
+      map: summary.map,
     });
     finishFixJob(job, summary);
   } catch (e) {

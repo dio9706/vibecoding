@@ -2870,6 +2870,37 @@
   color: var(--muted);
 }
 
+/* ---- 后端掉线罩（net-guard.js 升起）----
+   复用 .boot-overlay 的布局/背景/淡入，只覆盖层级：必须压住引导面板（.ob-panel）
+   与一切弹窗，因为后端不通时它们全都是死的。 */
+.offline-overlay {
+  z-index: 100001; /* 启动罩 100000 高一档 */
+}
+/* 掉线罩靠 hidden 属性收起（它会反复升降，留着节点复用比反复建 DOM 划算）。
+   .boot-overlay 是 display:flex，会压过 UA 对 [hidden] 的 display:none —— 同款坑本文件
+   已踩过两次（.ob-titlebar .win-controls[hidden]、.token-banner）。
+   作用域刻意只给 .offline-overlay：启动罩走 remove() 撤场，不依赖任何 CSS，
+   两边互不牵连。 */
+.offline-overlay[hidden] {
+  display: none;
+}
+/* 副文案压暗一档，与主文案「服务器后台异常」区分主次 */
+.offline-overlay .off-sub {
+  color: var(--faint);
+}
+/* LOGO 与启动罩各存各的（见 offline-overlay.js 的 STAR_HTML 注释）。启动罩的动画挂在
+   ID 选择器上，且 onboarding.css 另有 6 处 .ob-arm #bootStar 引导态变体——改成 class
+   要动那 6 处调优过的规则，回归面不值。故掉线罩这份用独立一组 id，这里补一份同款动画。 */
+#offlineStar #obtri1,
+#offlineStar #obtri2 {
+  transform-box: view-box;
+  transform-origin: 100px 100px;
+  animation: vibeSpinPause 2.6s cubic-bezier(0.7, 0, 0.25, 1) infinite;
+}
+#offlineStar #obtri2 {
+  animation-name: vibeSpinPauseRev;
+}
+
 /* ============ 需求视图（侧栏列表 + 评审设计期文档模式） ============ */
 
 /* ---- 侧栏需求列表：置于 #convList 之上，结构/间距对齐 .conv-list ---- */
@@ -3549,6 +3580,17 @@
   font-size: 12px;
 }
 .req-apidoc-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* .md 文档名可点开查看器：外观全部继承行内文本，只在 hover 时露出可点感，避免它抢走同行两个图标钮的视觉重量 */
+.req-apidoc-item button.name {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.req-apidoc-item button.name:hover { color: var(--accent, #d97757); text-decoration: underline; }
 .req-apidoc-item.uploading { opacity: 0.6; }
 .req-guidelines-confirm { margin-top: 6px; }
 .req-rail-empty { color: var(--faint, #777); font-size: 12px; }

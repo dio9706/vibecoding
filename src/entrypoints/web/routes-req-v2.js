@@ -233,6 +233,28 @@ function handleMapAnnotate(req, res) {
   });
 }
 
+// ==== POST /api/req/map/regen {id} —— 以当前代码为准重新生成地图 ====
+// 与 mapfix/mapchange 的区别：那两条是「拿上一版改」，这条是全量重扫（开发途中改了逻辑，
+// 旧地图已经对不上代码了）。刻意**不要求已有地图**——地图从没生成成功过时（如 docgen 后的
+// mapgen 挂了），这里是唯一的重试入口。
+function handleMapRegen(req, res) {
+  return withJsonBody(req, res, (data) => {
+    const id = str(data.id);
+    const r = mustGet(res, id);
+    if (!r) return;
+    if (r.phase !== 'review' && r.phase !== 'dev' && r.phase !== 'test') {
+      return sendJson(res, 409, { error: '仅评审/开发/测试期可重新生成需求地图' });
+    }
+    if (!r.devDoc?.versions?.length) return sendJson(res, 409, { error: '请先生成开发文档' });
+    const { cwd } = pickCwdAndDirs(r.projects);
+    if (!cwd) return sendJson(res, 400, { error: DOCGEN_GUIDE });
+    if (r.busy || hasQueuedTasks(id)) return sendJson(res, 409, { error: '已有任务在进行或排队' });
+    logger.info('req-v2', '收到重新生成地图请求', { reqId: id, phase: r.phase });
+    enqueueSystemTask(id, 'mapregen', {});
+    sendJson(res, 202, { ok: true });
+  });
+}
+
 // ==== POST /api/req/change/impact {id, text} —— 影响预估（同步，用户在弹框里等）====
 async function handleChangeImpact(req, res) {
   return withJsonBody(req, res, async (data) => {
@@ -336,6 +358,30 @@ function handleUiSpecDraft(req, res) {
   });
 }
 
+// ==== POST /api/req/dev-prompt-claim {id} —— develop 首轮提示词领票 ====
+/**
+ * granted:true 表示「本次由你负责发」，同时落 devPromptSentAt。
+ *
+ * 为什么是「先领票再发」而不是「发完再标记」：前端原判据（localStorage 里会话有没有内容）
+ * 在多窗口下会同时为 false，两边各发一遍。领票把并发挡在 updateJson 的文件锁里；
+ * 反过来「发完再标记」挡不住——两个窗口都会先通过判断。
+ */
+function handleDevPromptClaim(req, res) {
+  return withJsonBody(req, res, (data) => {
+    const id = str(data.id);
+    if (!id) return sendJson(res, 400, { error: '缺少 id' });
+    const r = getRequirement(id);
+    if (!r) return sendJson(res, 400, { error: '需求不存在' });
+    if (r.devPromptSentAt) return sendJson(res, 200, { ok: true, granted: false });
+    // 存量兜底：上线前进入过开发期的需求没有本字段，但 devSession 非空即说明系统任务跑过。
+    // 不兜的话所有历史需求在首次打开时都会被补发一次提示词 —— 那正是本次要修的 bug。
+    // 回填用当前时间：它只是「已发过」的标记位，不谎称是历史时间。
+    const already = !!r.devSession;
+    updateRequirement(id, { devPromptSentAt: new Date().toISOString() });
+    return sendJson(res, 200, { ok: true, granted: !already });
+  });
+}
+
 /** 分发入口：命中返回 true（已处理），未命中返回 false 交回原分发表。 */
 export function handleReqV2Routes(req, res, url, pathname, method) {
   if (pathname === '/api/req/quiz' && method === 'POST') return handleQuizGen(req, res), true;
@@ -346,10 +392,12 @@ export function handleReqV2Routes(req, res, url, pathname, method) {
   if (pathname === '/api/req/map/restore' && method === 'POST') return handleMapRestore(req, res), true;
   if (pathname === '/api/req/map/annots' && method === 'PUT') return handleMapAnnots(req, res), true;
   if (pathname === '/api/req/map/annotate' && method === 'POST') return handleMapAnnotate(req, res), true;
+  if (pathname === '/api/req/map/regen' && method === 'POST') return handleMapRegen(req, res), true;
   if (pathname === '/api/req/change/impact' && method === 'POST') return handleChangeImpact(req, res), true;
   if (pathname === '/api/req/change' && method === 'POST') return handleChange(req, res), true;
   if (pathname === '/api/req/uispec' && method === 'GET') return handleUiSpecGet(url, res), true;
   if (pathname === '/api/req/uispec' && method === 'PUT') return handleUiSpecPut(req, res), true;
   if (pathname === '/api/req/uispec/draft' && method === 'POST') return handleUiSpecDraft(req, res), true;
+  if (pathname === '/api/req/dev-prompt-claim' && method === 'POST') return handleDevPromptClaim(req, res), true;
   return false;
 }

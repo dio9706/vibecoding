@@ -6,7 +6,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRun, askUser, resolveDecision, finishRun, setRunMode, nextReqId, stopRun, shouldResolveWaiting, UNATTENDED_WAIT_MAX_MS, hasActiveRunForConv, findRunningRunByConv, registerRunSettleListener, blockRun } from './runs.js';
+import { createRun, askUser, resolveDecision, finishRun, setRunMode, nextReqId, stopRun, shouldResolveWaiting, UNATTENDED_WAIT_MAX_MS, hasActiveRunForConv, findRunningRunByConv, registerRunSettleListener, blockRun, retryRun } from './runs.js';
 
 function makeAsk(reqId) {
   return {
@@ -300,6 +300,37 @@ test('终结监听器：blockRun 带 subtype=quota_blocked（供通知侧过滤�
   const mine = seen.filter((s) => s.id === run.id);
   assert.equal(mine.length, 1);
   assert.equal(mine[0].subtype, 'quota_blocked');
+});
+
+test('终结监听器：retryRun 带 subtype=exception_retry（供通知侧过滤）', () => {
+  const seen = [];
+  registerRunSettleListener((r) => seen.push({ id: r.id, subtype: r.subtype, status: r.status }));
+  const run = createRun();
+  retryRun(run, '⚠️ 模拟异常', 2000);
+  const mine = seen.filter((s) => s.id === run.id);
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].subtype, 'exception_retry');
+  assert.equal(mine[0].status, 'done'); // 不是 'error'：任务还在跑，左栏/通知不该按失败渲染
+});
+
+test('retryRun：文本追加提示，且不覆盖 is_error 真值（状态查询要诚实）', () => {
+  const run = createRun();
+  run.text = '已产出的内容';
+  run.is_error = true; // runResult 落的真值
+  retryRun(run, '⚠️ 模拟异常', 2000);
+  assert.match(run.text, /已产出的内容/);
+  assert.match(run.text, /模拟异常/);
+  assert.equal(run.is_error, true);
+});
+
+test('retryRun：非 running 的 run 不再广播（手动停止已抢先终结）', () => {
+  const seen = [];
+  registerRunSettleListener((r) => seen.push(r.id));
+  const run = createRun();
+  stopRun(run, '已手动停止');
+  retryRun(run, '⚠️ 模拟异常', 2000);
+  assert.equal(seen.filter((id) => id === run.id).length, 1); // 只有 stopRun 那一次
+  assert.equal(run.subtype, 'stopped');
 });
 
 test('终结监听器：async 监听器抛错不得溢出成 unhandled rejection（会打挂 web 服务）', async () => {

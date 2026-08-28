@@ -15,6 +15,7 @@ import {
   finishRun,
   failRun,
   blockRun,
+  retryRun,
   askUser,
   nextReqId,
   setRunMode,
@@ -40,6 +41,7 @@ import {
 import os from 'node:os';
 import { getActiveToken, noteRateLimit } from '../../features/token-rotation.js';
 import { summarizeTool, READONLY_TOOLS, parseDialog } from './tool-summary.js';
+import { isRetryEligible } from './run-claude.logic.js';
 import { getUiPrefs } from '../../store/settings.js';
 
 /** 别名映射：SDK 内部工具名 → 用户配置的逻辑工具名（前端 BUILTIN_TOOLS 的 id） */
@@ -106,13 +108,13 @@ export function startClaudeRun(run, { prompt, cwd, addDirs, session, model, effo
       run._input = h; // 插话入口：/api/run/msg/* 经此注入/打断运行中的 query
     },
     settings: { autoCompactEnabled: true }, // 长会话自动压缩，抑制上下文膨胀 → 省额度
-    supportedDialogKinds: [
-      'refusal_fallback_prompt',
-      'ask_user_question',
-      'user_question',
-      'question',
-      'multiple_choice',
-    ],
+    // 只声明查得到实据的 kind。CLI 把「未声明」当作「宿主渲染不了」并 fail closed
+    //（sdk.d.ts:3369），所以多声明不会让 dialog 多发出来，只会让人误以为已经适配过。
+    // 核查结论（SDK 0.3.210 bundle + claude.exe 字符串）：
+    //   refusal_fallback_prompt —— SDK 3 处 / CLI 14 处，类型注释里明确举例
+    //   ask_user_question       —— CLI 侧有完整提问闭环遥测（tengu_ask_user_question_*）
+    //   user_question / question / multiple_choice —— 两侧均查无此物，已删
+    supportedDialogKinds: ['refusal_fallback_prompt', 'ask_user_question'],
     toolConfig: { askUserQuestion: { previewFormat: 'html' } }, // 我们是 web 消费者
     // 「询问」模式必须强制走 canUseTool：用户全局 settings.json 把 Bash/Edit/Write 等整体 allow，
     // 而 allow 规则优先于 canUseTool（回调被架空、工具直接执行）。PreToolUse 钩子返回 ask
@@ -159,6 +161,14 @@ export function startClaudeRun(run, { prompt, cwd, addDirs, session, model, effo
     },
     onUserDialog: async (request) => {
       appendEvent({ type: 'dialog', dialogKind: request.dialogKind }); // 记录真实 kind，便于后续精确适配
+      // payload 是 per-dialogKind 的不透明结构（UserDialogRequest.payload: Record<string, unknown>），
+      // 静态拿不到形状，这条日志是唯一途径。走 logger 而不是 event-log：后者只留 3 天、封顶 1000 条，
+      // 而每个 API 请求都记一条 access —— dialog 记录会被洪流挤干净（实测 1497 行日志全是 access，
+      // type=dialog 一条不剩，这正是「dialogKind 待观测项」一直观测不到的原因）。
+      logger.info('claude', 'onUserDialog', {
+        dialogKind: request.dialogKind,
+        payload: request.payload,
+      });
       const parsed = parseDialog(request);
       if (!parsed) return { behavior: 'cancelled' };
       const choice = await askUser(run, {
@@ -217,6 +227,9 @@ const resumeTimers = new Map(); // pending 条目 id -> setTimeout 句柄
 // 计次跨进程重启持久化：active-runs.resumeAttempt → pending.attempts 每轮 +1。
 const MAX_RESUME_ATTEMPTS = 3;
 
+// 异常结束后的重试延迟：给瞬态故障（进程崩溃/传输错误）一点恢复余地，又不让用户干等。
+const RETRY_DELAY_MS = 2000;
+
 /**
  * 续跑熔断：停止自动续跑并落 abandoned 标记（供前端消费一次终结提示后 dismiss）。
  * 有 entryId 走 updatePending（doResume 防御路径）；否则 addPending 新建标记（孤儿恢复路径）。
@@ -271,10 +284,69 @@ function settleRun(run, err, lastRate, params) {
     }
     return;
   }
-  if (params.resumePendingId) removePending(params.resumePendingId); // 续跑正常收尾 → 清除登记
-  // 需求系统任务收尾钩子：requirement-ops 在 run 上挂 onSettle，此处是唯一真正终结（非额度阻塞续跑）的汇聚点——
-  // 上面 rejected 分支命中时已 return，那里的 run 还会经 doResume 生成新 run 续跑，任务逻辑上并未结束，
-  // 因此故意不在那条路径触发本钩子（避免 busy 被提前清掉、串行闸被击穿）。
+  // ---- 异常自动重试：登记待续跑 + 2 秒后续接 session，取代「异常即标红终结」 ----
+  // 与上面额度分支同构，且同样在 return 前**不触发 run.onSettle**：重试路径上任务逻辑没结束，
+  // 提前回调会把需求系统任务的 busy 闸清掉、串行闸被击穿（见下方 onSettle 注释）。
+  const hasError = !!err || !!run.is_error;
+  const nextAttempt = (params.resumeAttempt || 0) + 1; // 代次 +1 递增，见下方 attempts 注释
+  const eligible = isRetryEligible({
+    hasError,
+    status: run.status,
+    subtype: run.subtype,
+    sid,
+    convId: params.convId,
+  });
+  if (eligible && !shouldAbandonResume(nextAttempt, MAX_RESUME_ATTEMPTS)) {
+    const reason = err ? `Agent SDK 执行失败：${err?.message || String(err)}` : run.result || 'Claude 异常结束';
+    const heldTexts = consumeHeldMsgs(run).map((m) => m.text); // 排队消息随重试带入，否则会被标「未发送」而丢掉
+    const entry = addPending({
+      convId: params.convId,
+      session_id: sid,
+      cwd: params.cwd,
+      model: params.model,
+      effort: params.effort,
+      mode: params.mode,
+      // 代次 +1 递增（额度分支是继承不递增）：额度撞墙是外部资源限制、等重置必然有效；
+      // 异常有病态循环风险必须计次。与孤儿恢复共享同一计数器 → 交替失败也绕不过上限。
+      attempts: nextAttempt,
+      reason: 'exception_retry',
+      prompt: heldTexts.length ? heldTexts.join('\n\n') : undefined,
+      resetsAt: Math.floor(Date.now() / 1000),
+    });
+    logger.warn('web', '异常结束，已排程自动重试', {
+      runId: run.id,
+      convId: params.convId,
+      attempt: nextAttempt,
+      watchdog: run.status === 'error', // true 说明看门狗已 failRun 广播过红字，下面的 retryRun 会 no-op
+      reason,
+    });
+    // 看门狗/超时路径此刻 status 已是 'error'（failRun 广播完红字、SSE 也关了），retryRun 内部
+    // 的 status 闸门会让它自动 no-op —— 那条路径的前端靠 done(is_error) 分支里的提前轮询接新 run。
+    retryRun(
+      run,
+      `⚠️ ${reason}\n\n🔄 ${RETRY_DELAY_MS / 1000} 秒后自动重试（第 ${nextAttempt}/${MAX_RESUME_ATTEMPTS} 次）…`,
+      RETRY_DELAY_MS,
+    );
+    scheduleRetry(entry, RETRY_DELAY_MS);
+    return;
+  }
+  // 够格但超上限 → 落 abandoned 标记，让前端消费一次熔断提示后 dismiss；随后照旧走标红终结。
+  // 有 resumePendingId 时走 updatePending 改状态（条目已存在），否则 addPending 新建。
+  if (eligible) {
+    abandonResume({
+      convId: params.convId,
+      attempts: nextAttempt,
+      entryId: params.resumePendingId,
+      reason: `连续 ${nextAttempt - 1} 次自动重试仍异常，超过上限 ${MAX_RESUME_ATTEMPTS}`,
+    });
+  }
+  // 续跑正常收尾 → 清除登记。异常且够格的情况已由上面 abandonResume 落了 abandoned 标记，
+  // 这里再 remove 会把它删掉，前端就永远看不到熔断提示了 —— 故加 !eligible 条件。
+  if (params.resumePendingId && !eligible) removePending(params.resumePendingId);
+  // 需求系统任务收尾钩子：requirement-ops 在 run 上挂 onSettle，此处是唯一真正终结（非续跑/重试）的汇聚点——
+  // 上面 rejected（额度）与异常重试两个分支命中时都已 return，那里的 run 还会经 doResume 生成新 run
+  // 接着跑，任务逻辑上并未结束，因此故意不在那两条路径触发本钩子（避免 busy 被提前清掉、串行闸被击穿）。
+  // 代价是失败反馈最多延后 MAX_RESUME_ATTEMPTS 轮，期间该需求一直显示 busy —— 换来瞬态故障能自愈。
   // ok 用 is_error 而非仅凭 err 判断：SDK 未抛错但 result.is_error 为真时，对调用方而言仍是失败。
   if (typeof run.onSettle === 'function') {
     const ok = !err && !run.is_error;
@@ -297,6 +369,16 @@ export function scheduleResume(entry) {
   resumeTimers.set(
     entry.id,
     setTimeout(() => doResume(entry.id), delay),
+  );
+}
+
+/** 异常结束后延迟重试（与 scheduleResume 的区别：固定短延迟，不看 token 重置时刻） */
+function scheduleRetry(entry, delayMs) {
+  const prev = resumeTimers.get(entry.id);
+  if (prev) clearTimeout(prev);
+  resumeTimers.set(
+    entry.id,
+    setTimeout(() => doResume(entry.id), delayMs),
   );
 }
 

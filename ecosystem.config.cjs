@@ -15,16 +15,16 @@
 // 值 = 桌面版 app_data_dir()（Windows：%APPDATA%\<identifier>）。
 // 改了本文件后必须让 PM2 重新读取 env：`pm2 restart ecosystem.config.cjs --update-env`
 // （或 `pm2 delete all && pm2 start ecosystem.config.cjs`）。
-const APP_DATA_DIR = 'C:\\Users\\DELL\\AppData\\Roaming\\com.vibecoding.desktop';
+const APP_DATA_DIR = 'C:\\Users\\DELL\\AppData\\Roaming\\com.principal.desktop';
 
 module.exports = {
   apps: [
     {
-      name: 'claude-web',
-      // 纯 web 入口（不连飞书）；用根 server.js 会与 claude-feishu 双起飞书长连接。
+      name: 'principal-web',
+      // 纯 web 入口（不连飞书）；用根 server.js 会与 principal-feishu 双起飞书长连接。
       script: './web.js',
       // web 进程同样需要 .env：OWNER_OPEN_IDS / TRIAGE_OWNER_OPEN_ID / FRONTEND_DIR 等
-      // 都被 web 侧读取（auto-dev 泵、任务分析、角色判定）。此前只有 claude-feishu 加了
+      // 都被 web 侧读取（auto-dev 泵、任务分析、角色判定）。此前只有 principal-feishu 加了
       // --env-file，web 进程里 config.lark.ownerOpenIds 恒为空数组，依赖白名单的判定静默失效。
       node_args: '--env-file=.env',
       cwd: __dirname,
@@ -35,7 +35,7 @@ module.exports = {
       restart_delay: 2000,
     },
     {
-      name: 'claude-feishu',
+      name: 'principal-feishu',
       script: './feishu.js',
       // 飞书入口需要 .env 里的凭证；Node 20+ 用 --env-file 加载
       node_args: '--env-file=.env',

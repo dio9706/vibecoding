@@ -1,5 +1,7 @@
 import './js/bootstrap.js'; // 必须最先：打包模式 fetch/EventSource 补丁
 import { whenBackendReady, setOverlayHandoff } from './js/boot-gate.js'; // 须在 bootstrap 之后：依赖其 fetch 补丁
+import { armNetworkGuard } from './js/net-guard.js';
+import { showOfflineOverlay, hideOfflineOverlay } from './js/offline-overlay.js';
 import { maybeStartOnboarding } from './js/onboarding.js';
 import { bindTauriNav } from './js/tauri-init.js';
 import { $ } from './js/util.js';
@@ -26,6 +28,11 @@ toast._init();
 // index.html 里的 data-icon 占位注水。放在最前面：顶栏图标在启动闸门撤罩前就已可见，
 // 晚一步会先闪一个空按钮。
 hydrateIcons();
+
+// 掉线守卫接线：判定逻辑在 net-guard，展示在 offline-overlay，此处把两者接起来。
+// 必须在 hydrateIcons 之后、任何业务请求之前——arm 之前的上报会被 net-guard 直接丢弃
+//（那个阶段还归 boot-gate 的启动罩管）。
+armNetworkGuard({ onDown: showOfflineOverlay, onUp: hideOfflineOverlay });
 
 bindTasksNav(() => showView('tasks'), () => activeView === 'tasks'); // 视图桥：跳转 + 活跃态查询（showView 已提升；activeView 惰性读取无 TDZ）
 bindChatNav(() => showView('chat'), () => activeView === 'chat'); // 视图桥：回聊天视图跳转 + 聊天视图是否激活（供顶栏审批徽标判定）

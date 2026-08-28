@@ -2,6 +2,8 @@
  *  避免反向依赖；selectDir 留在 app.js（要联动 saveUiPrefs / 历史缓存 / 目录标签）。 */
 import { $ } from './util.js';
 import { toast } from './ui.js';
+// ui.js 的 toast 只有 info 级，系统对话框失败要出红色提示，另取 toast.js 的分级 API
+import toastApi from './toast.js';
 
 let _defaults = { getCwd: () => '', selectDir: () => {} };
 let _getCwd = () => '';
@@ -110,7 +112,7 @@ export function openDirPickerFor({ getCwd, selectDir }) {
             row.querySelector('span:last-child').textContent = name;
             const fullPath = joinPath(data.current, name);
             row.onclick = () => browse(fullPath);
-            // 右键菜单：通过 Vibe Coding 打开
+            // 右键菜单：用 AI 编辑器打开
             row.addEventListener('contextmenu', (e) => {
               e.preventDefault();
               showDirContextMenu(e.clientX, e.clientY, fullPath);
@@ -159,8 +161,11 @@ export function openDirPickerFor({ getCwd, selectDir }) {
           menu.appendChild(item);
         }
 
-        // 菜单项：通过 Vibe Coding 打开
-        addItem('⚡', '通过 Vibe Coding 打开', async () => {
+        // 菜单项：用 AI 编辑器打开。
+        // 措辞刻意不用产品名 Principal —— 这里打开的是**外部**编辑器（Windsurf/Cursor/VS Code），
+        // 叫「用 Principal 打开」会让人以为是本应用在开目录。后端路由仍叫 open-in-vibe，
+        // 是历史标识符，改它要同时动路由表与前端，收益不抵风险。
+        addItem('⚡', '用 AI 编辑器打开', async () => {
           try {
             const r = await fetch('/api/open-in-vibe', {
               method: 'POST',
@@ -220,6 +225,34 @@ export function openDirPickerFor({ getCwd, selectDir }) {
         if (e.key === 'Enter') browse($('#pathInput').value.trim());
       });
       $('#pickBtn').addEventListener('click', () => _selectDir(browsePath));
+      /**
+       * 系统文件夹选择框（调 /api/dirs/pick，弹在本机桌面）。
+       *
+       * 这个绑定原先写在 chat.js 里，直接调 chat 自己的 selectDir。但按钮是弹层的控件，
+       * 绑定权归弹层——写在外面就绕过了 _selectDir 这个「当前宿主」指针：
+       * 其它面板借用弹层（openDirPickerFor）时点它，改的是聊天工作目录、甚至开出新窗口，
+       * 借用方的回调一次都没被调用，表现为「选完目录没回填、没生效」。
+       * 而旁边的「选择此目录」走 _selectDir，所以只有这一个按钮坏，更难联想到病因。
+       */
+      $('#sysPickBtn').addEventListener('click', async () => {
+        const btn = $('#sysPickBtn');
+        const label = btn.textContent;
+        btn.textContent = '选择中…';
+        btn.disabled = true;
+        try {
+          const r = await (await fetch('/api/dirs/pick')).json();
+          if (r.path) _selectDir(r.path); // 选中即应用并关闭
+          else if (r.error) toastApi.error(r.error);
+          // r.path=null：用户点了取消，忽略
+        } catch {
+          toastApi.error('调用系统对话框失败');
+        } finally {
+          // 放在 finally 而不是 _selectDir 之后：借用宿主的回调可能抛错，
+          // 抛了也不能把按钮永久留在禁用态
+          btn.textContent = label;
+          btn.disabled = false;
+        }
+      });
       $('#starBtn').addEventListener('click', async () => {
         if (!browsePath) return;
         await fetch('/api/dirs/saved', {

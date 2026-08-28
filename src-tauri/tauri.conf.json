@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "vibe-coding-desktop",
+  "productName": "Principal",
   "version": "0.1.0",
-  "identifier": "com.vibecoding.desktop",
+  "identifier": "com.principal.desktop",
   "build": {
     "beforeDevCommand": "echo 'Frontend running on http://127.0.0.1:9701'",
     "beforeBuildCommand": "echo 'Building frontend'",

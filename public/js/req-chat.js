@@ -2,10 +2,9 @@
  *  经 chat.js 的 bindReqConvHook 在 openConv/newConversation 时挂/卸载；数据自取（GET /api/req/get）。
  *  依赖方向：req-chat → req-view（openRequirement 供阶段流转后重开）→ chat.js，单向无环；
  *  req-view 不感知本模块，chat.js 只认 hook 回调。竞态/轮询纪律对齐 req-view（世代号 + 自杀式清理）。 */
-import { $, dirTail, renderMarkdown, fmtTime } from './util.js';
+import { $, dirTail, renderMarkdown, fmtTime, isMarkdownPath } from './util.js';
 import { confirmDialog } from './ui.js';
-import { bindReqConvHook, ensureConvRunAttached, loadReqTranscript, sendMessageProgrammatically, getCurrentConvId } from './chat.js';
-import { loadConvs } from './conv-store.js';
+import { bindReqConvHook, ensureConvRunAttached, loadReqTranscript, sendMessageProgrammatically, getCurrentConvId, openMarkdownFile } from './chat.js';
 import { openRequirement, refreshReqList } from './req-view.js';
 import { openChangeDialog } from './req-change.js';
 import { openUiSpecDialog } from './req-uispec.js';
@@ -15,6 +14,7 @@ import {
   MAP_ICON_SVG, DESIGN_ICON_SVG, CHANGE_ICON_SVG,
   REFRESH_ICON_SVG, WAITING_ICON_SVG, SETTINGS_ICON_SVG,
 } from './icons.js';
+import { isNetworkError } from './net-error.js';
 
 /**
  * 开发期首轮 develop 提示词（客户端侧，与 req-logic.js buildDevelopPrompt 保持等值）。
@@ -119,24 +119,37 @@ export async function mountReqChrome(reqId) {
   // 若不拦截会把 archiving/archived 渲染成测试期横幅（按钮点了还报「不允许流转」的无意义错误）。
   if (data.phase !== 'dev' && data.phase !== 'test') return unmountReqChrome();
   renderChrome(data);
-  // 自动发 develop 提示词：phase=dev + 会话无实质内容 + 无正在跑的任务 + 有开发文档
-  // 每次打开会话时检测；已有内容（历史/已跑过）则跳过，不重复发送
+  // 自动发 develop 提示词：phase=dev + 无正在跑的任务 + 有开发文档 + 服务端放票
+  //
+  // 判据不看 localStorage：服务端起的开发 run 若当时没人挂着看，过程压根不落 localStorage
+  //（见 chat.js 的 loadReqTranscript 注释），会话空空如也不等于没开发过 —— 旧判据据此重发
+  // 提示词、开新 session、再烧一份额度。改成向服务端领票，标记落在需求记录上（跨窗口、跨浏览器）。
   if (
     data.phase === 'dev' &&
     !data.busy?.kind &&
     data.devDoc?.versions?.length &&
     data.convId
   ) {
-    const convList = loadConvs();
-    const conv = convList.find((c) => c.id === data.convId);
-    const hasContent = conv?.messages?.some((m) => (m.text || '').trim());
-    // 三重确认，缺一不可：
-    //   epoch / currentReqId —— fetch 期间用户可能切到别的需求；
+    let granted = false;
+    try {
+      const r = await fetch('/api/req/dev-prompt-claim', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: reqId }),
+      });
+      granted = !!(await r.json())?.granted;
+    } catch {
+      granted = false; // 网络失败一律不发：宁可漏发（用户手打一句即可）也不重发烧额度
+    }
+    // 三重确认必须在 await **之后**再校验，缺一不可：
+    //   epoch / currentReqId —— 往返期间用户可能切到别的需求；
     //   getCurrentConvId() === data.convId —— 关键且曾遗漏：sendMessageProgrammatically 以
     //     chat.js 的 currentConvId 为发送目标（它不收 convId 参数），用户在 mount 与本行之间
     //     点了侧栏别的会话，开发提示词就会被发进那个**无关会话**（真 bug，非防御性冗余）。
+    // 领票端点在上面那次 fetch 里已经消耗掉票了，此处放弃 = 该需求这轮不再自动发。
+    // 这是有意取舍：用户已经切走，说明他此刻不在等这个提示词；比发错会话轻得多。
     if (
-      !hasContent &&
+      granted &&
       epoch === chromeEpoch &&
       currentReqId === reqId &&
       getCurrentConvId() === data.convId
@@ -289,7 +302,12 @@ function renderBanner(data) {
   }
 }
 
-const BUSY_KIND_LABELS = { develop: '自动开发', 'api-fix': 'API 对照修正', 'bug-fix': 'BUG 修复', docgen: '文档生成', bitable: '表格巡检' };
+// map 系四条链路原先全缺，芯片上直接漏出英文 kind（mapgen/mapfix/…），一并补齐
+const BUSY_KIND_LABELS = {
+  develop: '自动开发', 'api-fix': 'API 对照修正', 'bug-fix': 'BUG 修复',
+  docgen: '文档生成', bitable: '表格巡检',
+  mapgen: '地图生成', mapfix: '地图修订', mapchange: '地图更新', mapregen: '地图重新生成',
+};
 
 function renderBusyChip(busy) {
   const el = bannerEl?.querySelector('.busy-chip');
@@ -447,10 +465,23 @@ function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
     for (const doc of docs) {
       const row = document.createElement('div');
       row.className = 'req-apidoc-item';
-      const name = document.createElement('span');
+      // 文档名可点 → 跳 Markdown 查看器。判定按 path 而非 name：替换过的文档 name 保留旧名，
+      // 真正要读的是 path，且 /api/fs/read 也只按 path 的扩展名放行；非 md 渲染成按钮
+      // 等于诱导用户点出一个必然失败的请求，所以保持纯文本。
+      const canOpen = isMarkdownPath(doc.path);
+      const name = document.createElement(canOpen ? 'button' : 'span');
       name.className = 'name';
       name.textContent = doc.name;
-      name.title = `${doc.name} · 更新于 ${fmtTime(doc.updatedAt)}`;
+      name.title = canOpen
+        ? `${doc.name} · 更新于 ${fmtTime(doc.updatedAt)} · 点击在 Markdown 查看器中打开`
+        : `${doc.name} · 更新于 ${fmtTime(doc.updatedAt)}`;
+      if (canOpen) {
+        name.type = 'button';
+        name.addEventListener('click', () => {
+          // 返回 false 只可能是视图桥没注入（app.js 初始化断了）——静默失败会让用户以为点了没反应
+          if (!openMarkdownFile(doc.path)) window.toast.error('Markdown 查看器未就绪，请刷新页面重试');
+        });
+      }
       const replace = document.createElement('button');
       replace.className = 'q-btn';
       setIconText(replace, REFRESH_ICON_SVG);
@@ -557,7 +588,10 @@ function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
         window.toast.success('已入队自动修正');
       }
     } catch (e) {
-      window.toast.error('API 文档上传失败：' + (e?.message || e));
+      // 后端整体不可达是系统故障，叠「API 文档上传失败」会把它说成功能故障
+      //（掉线罩已由 net-guard 升起，这条 toast 只是补一句就地说明）
+      if (isNetworkError(e)) window.toast.error(e.message);
+      else window.toast.error('API 文档上传失败：' + (e?.message || e));
     }
     refreshRail(reqId);
     pendingReplaceName = null;
@@ -618,7 +652,15 @@ function renderReqMgmtSection(data) {
     MAP_ICON_SVG,
     '需求地图',
     hasMap ? 'v' + mapVersions[mapVersions.length - 1].v + ' · 点开查看' : '（本需求暂无地图）',
-    () => openMapOverlay({ reqId: data.id, phase: data.phase }),
+    () =>
+      openMapOverlay({
+        reqId: data.id,
+        phase: data.phase,
+        busy: data.busy,
+        // 用 mountReqChrome 而非 refreshRail：后者只重画右栏、不启动 busy 轮询，
+        // 用户点完重新生成会看不到任何进度，以为没反应
+        onRegen: () => mountReqChrome(data.id),
+      }),
     { disabled: !hasMap, tip: hasMap ? '' : '评审期生成开发文档时会一并产出' },
   );
 

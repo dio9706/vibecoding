@@ -13,9 +13,11 @@ test('shouldNotifySettle：正常完成与异常失败要通知', () => {
   assert.equal(shouldNotifySettle({ status: 'error', subtype: 'exception', is_error: true }), true);
 });
 
-test('shouldNotifySettle：手动停止与额度阻塞不通知', () => {
+test('shouldNotifySettle：手动停止、额度阻塞、异常待重试都不通知', () => {
   assert.equal(shouldNotifySettle({ status: 'done', subtype: 'stopped' }), false);
   assert.equal(shouldNotifySettle({ status: 'done', subtype: 'quota_blocked' }), false);
+  // 异常重试中：任务逻辑上没结束。不过滤会推一张「❌ 失败」紧接一张「✅ 完成」，属噪音误报
+  assert.equal(shouldNotifySettle({ status: 'done', subtype: 'exception_retry', is_error: true }), false);
 });
 
 test('shouldNotifySettle：还在跑的 run 不通知（纵深防御）', () => {

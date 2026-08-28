@@ -1,5 +1,7 @@
 /** 富输入 composer：contenteditable 文字 + 内联附件（拖入上传副本，发送时序列化为路径）。
  *  自持 promptEl 引用（与 app.js 指向同一 DOM 节点，无状态分裂）。 */
+import { isNetworkError } from './net-error.js';
+
 const promptEl = document.querySelector('#prompt');
 
 // 粘贴一律降为纯文本：外部复制的富文本（HTML/样式）直接落进 contenteditable 会把样式带进输入框。
@@ -169,7 +171,9 @@ promptEl?.addEventListener('paste', (e) => {
           chip.classList.remove('uploading');
         } catch (err) {
           chip.remove();
-          window.toast.error('文件上传失败：' + (err && err.message ? err.message : err));
+          // 同 req-chat：系统故障不叠业务前缀
+          if (isNetworkError(err)) window.toast.error(err.message);
+          else window.toast.error('文件上传失败：' + (err && err.message ? err.message : err));
         }
       }
       /** Web 模式的 HTML5 拖拽入口：浏览器拿不到本地绝对路径，只能读文件内容上传副本。

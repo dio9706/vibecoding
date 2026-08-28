@@ -18,6 +18,12 @@ const TYPE_CN = { add: '新增', mod: '修改', del: '删除' };
 
 const PAGE_STATES = ['new', 'changed', 'untouched'];
 
+// 重新生成 prompt 的各段上限：改动文件清单在大需求上能到几百条，不设限会把 prompt 撑爆
+const REGEN_MAX_FILES = 200;
+const REGEN_MAX_CHANGES = 20;
+const REGEN_CHANGE_CHARS = 300;
+const REGEN_MAX_PAGES = 100;
+
 /**
  * 宽松 JSON 解析：模型极爱把 JSON 裹进 ```json 围栏，或在前后加「好的，结果如下」这类客套话。
  * 依次尝试：直接 parse → 剥围栏 → 截取首个 {/[ 到末个 }/]。全失败时抛错并带原文前 200 字，
@@ -275,6 +281,86 @@ export function buildMapChangePrompt({ map, text }) {
     `与本次变动无关的部分保持原样。输出**完整的新版地图**（不是差异）。\n\n` +
     mapOutputContract()
   );
+}
+
+/**
+ * 列表截断成「前 N 项 + 剩余提示」。三处上限共用。
+ * 超出时必须明确告诉模型「还有多少没列」——否则它会把截断后的清单当成全集，
+ * 得出「这个需求只动了 200 个文件」这类错误结论。
+ */
+function clipList(items, max, unit) {
+  const all = items.map((x) => String(x ?? '').trim()).filter(Boolean);
+  const list = all.slice(0, max);
+  const rest = all.length - list.length;
+  return rest > 0 ? [...list, `…另有 ${rest} ${unit}未列出`] : list;
+}
+
+/** 列表段落：每项前加「- 」，空列表返回空串（调用方据此决定要不要出这一段）。 */
+function bulletBlock(items) {
+  return items.map((x) => `- ${x}`).join('\n');
+}
+
+/**
+ * 「重新生成」prompt：以**当前代码实现**为准全量重扫。
+ *
+ * 与 mapgen/mapfix/mapchange 的根本区别是它不做增量改写，也不 resume docSession——
+ * 那个 session 装的是评审期的代码理解，正是本次要推翻的对象。带着它续跑，模型只会
+ * 确认自己的旧结论，看不见代码已经变了。
+ *
+ * @param {string} opts.docPath - 最新开发文档路径（必填，让模型现读）
+ * @param {string[]} [opts.prevPageNames] - 上一版页面名清单。**只给名字不给 points**：
+ *   设计稿回迁（normalizeMap）与变更高亮（markFreshPoints）都以页面名为键，名字漂了两者皆失效；
+ *   而一旦给了 points，模型就会照抄旧结论，退化成 mapfix。
+ * @param {string[]} [opts.changes] - 开发期「需求变动」正文（说明意图）
+ * @param {string[]} [opts.changedFiles] - git 实际改动文件清单（说明结果）
+ */
+export function buildMapRegenPrompt({ docPath = '', prevPageNames = [], changes = [], changedFiles = [] } = {}) {
+  const parts = [
+    `开发已经进行了一段时间，代码可能与最初生成的需求地图不一致——开发途中的逻辑调整通常不会回写文档。\n` +
+      `请**以当前代码的实际实现为准**，重新查证一遍，输出一份新的「需求地图」。`,
+  ];
+
+  if (docPath) {
+    parts.push(
+      `请先完整 Read 开发文档 ${docPath}。\n` +
+        `注意：它代表的是**当初的需求意图**，不是事实来源。与代码冲突时一律以代码为准，` +
+        `并在对应逻辑点的 after 里写清「实际实现与当初计划有何不同」。`,
+    );
+  }
+
+  const changeLines = bulletBlock(
+    clipList(changes.map((t) => String(t ?? '').trim().slice(0, REGEN_CHANGE_CHARS)), REGEN_MAX_CHANGES, '条'),
+  );
+  if (changeLines) {
+    parts.push(
+      `开发期间用户提过下列需求变动：\n${changeLines}\n\n` +
+        `这些只说明**意图**——可能已完整实现、可能只实现了一部分、也可能被后续讨论推翻。请逐条到代码里查证实际状态。`,
+    );
+  }
+
+  const fileLines = bulletBlock(clipList(changedFiles, REGEN_MAX_FILES, '个文件'));
+  if (fileLines) {
+    parts.push(
+      `这是本需求分支相对基线**实际改动过的文件**：\n${fileLines}\n\n` +
+        `请逐个查证它们带来的用户可见行为变化——这是判断「代码到底改了什么」最可靠的线索。`,
+    );
+  }
+
+  const pageLines = bulletBlock(clipList(prevPageNames, REGEN_MAX_PAGES, '个页面'));
+  if (pageLines) {
+    parts.push(
+      `上一版地图包含这些页面：\n${pageLines}\n\n` +
+        `同一个页面请**沿用上面的原名**：用户已经按这些名字挂了 UI 设计稿，改名会让设计稿失联。\n` +
+        `页面确已被删除或改名的，照实输出新情况，并在逻辑点里说明原因。`,
+    );
+  }
+
+  parts.push(
+    `需求地图回答的问题是：**哪个页面的哪个逻辑点被新增 / 修改 / 删除了**。\n` +
+      `它给非技术人员看，用来核对「你理解的需求」和「我要的需求」是否一致。`,
+  );
+
+  return parts.join('\n\n') + '\n\n' + mapOutputContract();
 }
 
 /**

@@ -1,6 +1,6 @@
 // chat.js —— 聊天体（2026-07-24 壳/体反转切分自 app.js）：状态区 / UI 偏好 / 对话历史 / 消息模型与渲染 / 打字机 / 额度 / 发送与流 / 待续跑轮询
 import { toast, confirmDialog, promptDialog } from './ui.js';
-import { $, debounce, renderMarkdown, lsSet } from './util.js';
+import { $, debounce, renderMarkdown, lsSet, isMarkdownPath } from './util.js';
 import {
   getPromptText, clearPrompt, handleDrop, insertDroppedPaths,
   stashPrompt, restorePrompt, bindComposerDraft,
@@ -58,6 +58,16 @@ export function bindReqConvHook(fn) { _reqConvHook = fn; }
 let _openMarkdown = null;
 export function bindMarkdownNav(fn) {
   _openMarkdown = fn;
+}
+/**
+ * 跳 Markdown 查看器。聊天里的路径 chip 与需求右栏的 API 文档共用这一条桥，
+ * 免得两处各自拿 window 全局去够 markdownTool，行为再慢慢跑偏。
+ * @returns {boolean} 是否已接管；非 md 或视图桥尚未注入时返回 false，调用方走各自降级
+ */
+export function openMarkdownFile(path) {
+  if (!isMarkdownPath(path) || !_openMarkdown) return false;
+  _openMarkdown(path);
+  return true;
 }
 
       // ============================================================
@@ -994,13 +1004,6 @@ export function renderConvListNow() {
       }
 
       /**
-       * 判断是否为 Markdown 文件扩展名
-       */
-      function isMarkdownPath(path) {
-        return /\.(md|markdown)$/i.test(path);
-      }
-
-      /**
        * 把本地绝对路径转成 WebView 能加载的 URL。
        *
        * convertFileSrc 在 Tauri v2 里属于 core 模块，旧代码写的 __TAURI__.path
@@ -1087,14 +1090,11 @@ export function renderConvListNow() {
        */
       async function handlePathChipClick(path) {
         // Markdown 文件快速打开：直接跳查看器
-        if (isMarkdownPath(path) && _openMarkdown) {
-          try {
-            _openMarkdown(path);
-            return;
-          } catch (err) {
-            console.error('打开 Markdown 失败:', err);
-            toast('打开 Markdown 失败：' + (err?.message || err));
-          }
+        try {
+          if (openMarkdownFile(path)) return;
+        } catch (err) {
+          console.error('打开 Markdown 失败:', err);
+          toast('打开 Markdown 失败：' + (err?.message || err));
         }
 
         // 后续原有逻辑（Tauri 定位 / Web 复制）
@@ -2285,6 +2285,20 @@ export function renderConvListNow() {
         const job = convId && runningJobs[convId];
         if (!job) return;
         job.stopping = true;
+        // 等待重试/续跑期间点停止：run 早已终结，/api/run/abort 会回 {ok:false}（也就没 SSE 收尾），
+        // 而服务端 2 秒后照样 doResume → 任务自己活过来。这里改为撤销待续跑登记 + 本地中性收尾。
+        // dismiss 端点会把「已起跑但前端还没接上」的重试 run 一并中止（见 routes-run 的窄竞态注释）。
+        if (job.pending) {
+          dismissPending(convId);
+          if (!job.text.slice(job.base).includes('⏹')) {
+            job.text += (job.text ? '\n\n' : '') + '⏹ 已手动停止';
+            job.shown = job.text.length;
+            convSetMessage(convId, job.asstIndex, job.text.slice(job.base));
+          }
+          convSetMsgFields(convId, job.asstIndex, { pending: false });
+          endJob(convId, false); // 中性收尾，不标红
+          return;
+        }
         if (job.runId) {
           // 必须看返回值：服务端对不存在/已终结的 run 回 {ok:false} 且不发 SSE，
           // 不本地收尾的话 endJob 永远不会被触发，界面就被遮罩锁死了。
@@ -2302,7 +2316,11 @@ export function renderConvListNow() {
       // 附加到某服务端 run 的 SSE 流（起始发送 & 关网页后重连共用）。
       // job 可复用 send() 预建的占位；openConv 重连时不传，由本函数新建。
       function attachStream(convId, asstIndex, runId, job) {
-        const es = new EventSource('/api/run?runId=' + encodeURIComponent(runId));
+        // 带上 convId：run 已从内存注册表消失时（进程重启/已 GC），服务端无从反查它属于哪个会话
+        //（settleRun 也已把它从 active-runs.json 删掉），拿不到 convId 就查不了有没有续跑计划。
+        const es = new EventSource(
+          '/api/run?runId=' + encodeURIComponent(runId) + '&convId=' + encodeURIComponent(convId || ''),
+        );
         if (!job) {
           const conv = loadConvs().find((x) => x.id === convId);
           const msg = conv && conv.messages[asstIndex];
@@ -2477,6 +2495,21 @@ export function renderConvListNow() {
             if (!job.text.slice(job.base).includes('⏹')) job.text += (job.text ? '\n\n' : '') + '⏹ 已手动停止';
           } else if (d.subtype === 'quota_blocked') {
             if (d.result) job.text = d.result; // 服务端已附「额度用尽，将自动续跑」提示
+          } else if (d.subtype === 'exception_retry') {
+            // 异常但服务端已排程重试：不标红、不 endJob，spinner 继续转，等新 run 接流
+            if (d.result) job.text = d.result; // 服务端已附「原因 + N 秒后自动重试」
+            if (job.base > job.text.length) job.base = 0;
+            job.shown = job.text.length;
+            convSetMessage(convId, job.asstIndex, job.text.slice(job.base));
+            job.pending = true; // 复用「run 不存在静默等待」语义：refreshPending 切到新 runId 时重新接流
+            // 必须显式关流：服务端 closeAll 只是 res.end()，EventSource 会自动重连去拉这个已终结的
+            // run，撞上「已结束 run 补发 done」→ 无限循环（同下方 run 不存在分支的处理）
+            try {
+              job.es.close();
+            } catch {}
+            scheduleRetryPolls(d.retryInMs);
+            if (visible()) ensureTyping();
+            return; // 不走下面的收尾：气泡要保持 pending，刷新页面才能重连
           } else if (d.is_error) {
             job.err = true; // 异常结束：明确标注 subtype，区分“跑完”与“异常退出”
             if (d.result && d.result.includes('⚠️')) job.text = d.result; // 服务端已附具体原因（如看门狗），不要丢
@@ -2486,6 +2519,9 @@ export function renderConvListNow() {
                 '⚠️ Claude 异常结束' +
                 (d.subtype && d.subtype !== 'success' ? `（${d.subtype}）` : '');
             }
+            // 看门狗/超时路径：服务端 abortRun 先 failRun 广播了这条红字（SSE 已关），随后
+            // settleRun 才可能排程重试 —— 此时拿不到 exception_retry 信号，只能靠提前轮询接新 run。
+            scheduleRetryPolls();
           }
           if (job.base > job.text.length) job.base = 0; // 兜底：镜像被短错误文本替换（run 已被 GC）时归零，避免切空
           if (!job.text.slice(job.base)) job.text += '(无输出)'; // 按段判空：插话后本段无新增输出也给占位
@@ -2505,9 +2541,8 @@ export function renderConvListNow() {
             // 「run 不存在」：进程重启后 run 注册表清空，但 pending 机制会续跑。
             // 改为静默等待（不报错），让 refreshPending 的 resuming 分支自动接新 run 流
             if (m.includes('run 不存在') || m.includes('已过期')) {
-              // 静默：保持 pending 状态，等 refreshPending 检测到 resuming 状态的新 runId 时自动接流
-              // （不调 endJob，不显示错误提示，spinner 继续转，job 继续等待）
-              // 进程重启丢失持有区：本 run 的排队消息标「未发送」（续跑只续 session，不带排队消息）
+              // 进程重启丢失持有区：本 run 的排队消息标「未发送」（续跑只续 session，不带排队消息）。
+              // 无论下面走哪一态都要做：持有区已经没了，这是事实。
               // 边界：run 已正常跑完但被 GC 时也走此路径，可能把实际已消费的消息误标未发送（无真相来源，保守处理）
               const conv = loadConvs().find((x) => x.id === convId);
               if (conv) {
@@ -2515,8 +2550,27 @@ export function renderConvListNow() {
                   if (msg.queued && msg.runId === runId) setMsgQueuedState(convId, i, 'unsent');
                 });
               }
-              job.pending = true; // 标记为等待状态，refreshPending 据此切换 runId 时重新接流
               es.close();
+              // 服务端明确说了「这个会话没有续跑计划」→ 再等下去没有任何人会送新 run 上来，
+              // 气泡会永久停在「运行中…」（2026-08-28 事故的后半段）。中性终结，不标红：
+              // 任务不是失败，是早就结束了、只有本地状态过期。
+              // resumePlanned 为 null/缺失（老服务端、或没传 convId）时按未知处理，沿用静默等待。
+              let planned = null;
+              try {
+                planned = JSON.parse(e.data).resumePlanned;
+              } catch {}
+              if (planned === false) {
+                if (!job.text.slice(job.base).includes('⏹')) {
+                  job.text += (job.text ? '\n\n' : '') + '⏹ 任务已结束（进程重启，无自动续跑）';
+                }
+                job.shown = job.text.length;
+                if (job.base > job.text.length) job.base = 0;
+                convSetMessage(convId, job.asstIndex, job.text.slice(job.base));
+                convSetMsgFields(convId, job.asstIndex, { pending: false });
+                endJob(convId, false); // 中性收尾，不标红
+                return;
+              }
+              job.pending = true; // 标记为等待状态，refreshPending 据此切换 runId 时重新接流
               return;
             }
             // 其它错误 → 正常报错并终结
@@ -2557,18 +2611,29 @@ export function renderConvListNow() {
        *  这里补种「用户气泡 + 助手 pending 气泡」并接管该 run 的流，与本地发送后的形态完全一致。
        *  只处理当前会话：addMessage 只会把气泡登记进 currentConvId 的 _bubbleMap，
        *  非当前会话上屏会当场撕裂「存储=DOM=_bubbleMap 三方同序」不变量，故直接放弃（留给下次 openConv 轮询补）。
-       *  幂等：ensureConvRunAttached 自带 runId 去重；用户气泡靠服务端 claim 去重（认领后不再下发）。
+       *  幂等：ensureConvRunAttached 自带 runId 去重；用户气泡自查 msgId（见下）。
        *  返回已上屏的 item id 数组，调用方据此调 /claim。 */
       export async function applyInjectedItems(convId, items) {
         if (!convId || convId !== currentConvId || !Array.isArray(items) || !items.length) return [];
         const applied = [];
         for (const it of items) {
           if (!it || !it.text) continue;
+          // 幂等闸（纵深防御）：/claim 是 fire-and-forget，丢一次包这条就还留在服务端收件箱，
+          // 下一轮轮询又把它上一次屏 —— 同一句补充内容堆出一串重复气泡（2026-08-28 事故形态）。
+          // 跳过的 id 仍要计入 applied：它确实已经上过屏了，不认领条目就永远清不掉。
+          const conv0 = loadConvs().find((x) => x.id === convId);
+          if (conv0?.messages.some((m) => m.msgId === it.id)) {
+            applied.push(it.id);
+            continue;
+          }
           const idx = convPushMessage(convId, 'user', it.text);
           if (idx < 0) continue; // 会话已被删除：落库失败就不能上屏，否则 DOM 比存储多一条
           convSetMsgFields(convId, idx, { msgId: it.id });
           await addMessage('user', it.text);
-          if (it.runId) ensureConvRunAttached(convId, it.runId);
+          // 只接**还在跑**的 run（alive 由服务端 /inbox 判定）：runId 是注入那一刻的，隔天再进
+          // 会话时它早已随进程消失。接死 run 会落进 SSE 的「run 不存在 → 静默等待续跑」分支，
+          // 而这条路径不会有续跑条目，气泡就永久停在「运行中…」——用户看到的「没有响应」。
+          if (it.alive && it.runId) ensureConvRunAttached(convId, it.runId);
           applied.push(it.id);
         }
         return applied;
@@ -3062,24 +3127,8 @@ export function renderConvListNow() {
         _showCtxMenu(e.clientX, e.clientY, convId, isPinned);
       });
 
-      // ---- 系统文件夹选择框（调 /api/dirs/pick，弹在本机桌面） ----
-      $('#sysPickBtn').addEventListener('click', async () => {
-        const btn = $('#sysPickBtn');
-        const label = btn.textContent;
-        btn.textContent = '选择中…';
-        btn.disabled = true;
-        try {
-          const r = await (await fetch('/api/dirs/pick')).json();
-          if (r.path) selectDir(r.path); // 选中即应用并关闭
-          else if (r.error) window.toast.error(r.error);
-          // r.path=null：用户点了取消，忽略
-        } catch {
-          window.toast.error('调用系统对话框失败');
-        } finally {
-          btn.textContent = label;
-          btn.disabled = false;
-        }
-      });
+      // 「📂 系统选择」的绑定已移入 dir-popover.js：它是弹层自己的控件，
+      // 绑在这里会绕过弹层的宿主指针，导致其它面板借用弹层时选完目录不回填。
 
 
 
@@ -3087,6 +3136,14 @@ export function renderConvListNow() {
       const pendingMap = {}; // convId -> { resetsAt, status, runId }
       const handledResumes = new Set(); // 已接流的续跑 runId，避免重复
       const handledAbandoned = new Set(); // 已展示过终结提示的熔断会话，避免重复
+      // 异常重试后的提前轮询：pending 轮询周期是 15s，不提前拉的话「2 秒后自动重试」在用户
+      // 眼里会变成「最多 17 秒才见动静」。拉两次——第二次兜住 doResume 起跑稍慢/落盘稍晚的情况，
+      // 15s 周期仍是最终兜底。
+      function scheduleRetryPolls(retryInMs) {
+        const first = (Number(retryInMs) || 2000) + 800;
+        setTimeout(refreshPending, first);
+        setTimeout(refreshPending, first + 3000);
+      }
       // 失效清除 / 熔断消费：请服务端按 convId 移除待续跑条目（不阻塞 UI）
       function dismissPending(convId) {
         if (!convId) return; // 防御：无 convId 不发请求（对齐 abortRun 模式）
@@ -3110,7 +3167,9 @@ export function renderConvListNow() {
         const banner = $('#pendingBanner');
         const p = currentConvId && pendingMap[currentConvId];
         if (p && p.status === 'waiting') {
-          if (p.reason === 'orphan_recovery') {
+          if (p.reason === 'exception_retry') {
+            setIconText(banner, REFRESH_ICON_SVG, '任务异常中断，正在自动重试…');
+          } else if (p.reason === 'orphan_recovery') {
             setIconText(banner, REFRESH_ICON_SVG, '进程重启，任务自动续接中…');
           } else {
             // quota_exhausted 或默认情况
@@ -3133,15 +3192,16 @@ export function renderConvListNow() {
         for (const e of list || []) {
           pendingMap[e.convId] = { resetsAt: e.resetsAt, status: e.status, runId: e.runId, reason: e.reason };
           if (e.status === 'waiting') waiting++;
-          // 熔断：连续续跑失败达上限 → 展示一次终结提示（仅当前会话）并 dismiss 移除
+          // 熔断：连续续跑/重试失败达上限 → 展示一次终结提示（仅当前会话）并 dismiss 移除
           if (e.status === 'abandoned') {
             if (!handledAbandoned.has(e.convId)) {
               handledAbandoned.add(e.convId);
               if (e.convId === currentConvId && !runningJobs[e.convId]) {
+                // 「重试」是覆盖三条路径的措辞：额度续跑、进程重启孤儿恢复、异常自动重试
                 const note =
                   '⚠️ 连续 ' +
                   (e.attempts || '多') +
-                  ' 次自动续跑均未完成，已停止自动续跑；如需继续请手动发送消息。';
+                  ' 次自动重试均未完成，已停止自动重试；如需继续请手动发送消息。';
                 const idx = convPushMessage(e.convId, 'assistant', note);
                 if (idx >= 0) addMessage('assistant', note);
                 scrollBottom();

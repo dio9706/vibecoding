@@ -9,6 +9,7 @@
  */
 import { layoutMap } from './req-map-layout.logic.js';
 import { viewportBox, panFromViewport } from './req-map-minimap.logic.js';
+import { confirmDialog } from './ui.js';
 
 const SYM = { add: '＋', mod: '~', del: '－' };
 const TYPE_CN = { add: '新增逻辑点', mod: '修改逻辑点', del: '删除逻辑点' };
@@ -39,11 +40,14 @@ function bezierAt(p0, p1, p2, p3, t) {
  * @param {object} opts.map - 地图 JSON（含 annots）
  * @param {Array}  opts.versions - [{v, at}]
  * @param {number} [opts.version] - 当前展示的版本号
+ * @param {object|null} [opts.busy] - 需求当前的 busy（非空则禁用「重新生成」）。不传时靠后端 409 兜底
  * @param {Function} [opts.onReload] - 需要重新拉取需求（提交修订后）时调用
  * @param {Function} [opts.onRestore] - 触发 UI 还原时调用，参数为后端返回的 prompt
+ * @param {Function} [opts.onRegen] - 触发重新生成成功后的收尾。不复用 onReload：
+ *   评审期只需刷新页面，开发期还要关掉浮层并重挂横幅以启动 busy 轮询，两处动作不同
  */
 export function mountMap(container, opts) {
-  const { reqId, phase, map, versions = [], version = null, onReload, onRestore } = opts;
+  const { reqId, phase, map, versions = [], version = null, busy = null, onReload, onRestore, onRegen } = opts;
   const canAnnotate = phase === 'review';
 
   const state = {
@@ -70,6 +74,8 @@ export function mountMap(container, opts) {
     '<span class="rq-sep"></span>' +
     '<span class="rq-zoom"><button class="rq-z-out">−</button><i class="rq-z-val">100%</i>' +
     '<button class="rq-z-in">＋</button><button class="rq-z-fit">适应</button></span>' +
+    '<span class="rq-sep"></span>' +
+    '<button class="rq-regen" title="以当前代码实现为准，重新扫一遍出新版地图">↻ 重新生成</button>' +
     '<span class="rq-ver"></span>' +
     '</div>' +
     '<div class="rq-minimap">' +
@@ -206,6 +212,41 @@ export function mountMap(container, opts) {
       applyTransform();
     });
   }
+
+  // ---------- 重新生成 ----------
+  // 与「提交标注修订」并列的第二条回流路径，但驱动源不是用户挑错，而是开发途中代码本身已经变了。
+  const regenBtn = root.querySelector('.rq-regen');
+  if (busy) {
+    regenBtn.disabled = true;
+    regenBtn.title = '系统任务运行中，请稍候';
+  }
+  regenBtn.addEventListener('click', async () => {
+    const ok = await confirmDialog({
+      title: '重新生成需求地图',
+      message:
+        '将忽略当前地图，重新通读一遍代码，按实际实现产出新版地图。\n' +
+        '耗时通常数分钟到十几分钟。当前版本会保留，可随时切回。',
+      confirmText: '开始重扫',
+    });
+    if (!ok) return;
+    regenBtn.disabled = true;
+    regenBtn.textContent = '已提交…';
+    try {
+      const r = await fetch('/api/req/map/regen', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: reqId }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || '触发失败');
+      window.toast.success('已开始重新生成 · 完成后自动更新到新版本');
+      onRegen?.();
+    } catch (e) {
+      window.toast.error('重新生成失败：' + (e?.message || e));
+      regenBtn.disabled = false;
+      regenBtn.textContent = '↻ 重新生成';
+    }
+  });
 
   // ---------- 版本切换 ----------
   if (versions.length > 1) {

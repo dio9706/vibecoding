@@ -9,7 +9,7 @@ import { sendMessageProgrammatically } from './chat.js';
 
 let openEl = null; // 同时只允许一个浮层，重复点击直接复用
 
-export async function openMapOverlay({ reqId, phase }) {
+export async function openMapOverlay({ reqId, phase, busy = null, onRegen }) {
   if (openEl) return;
   const mask = document.createElement('div');
   mask.className = 'mask rq-map-mask';
@@ -52,6 +52,11 @@ export async function openMapOverlay({ reqId, phase }) {
       phase,
       map: d.map,
       versions,
+      busy,
+      onRegen: () => {
+        close(); // 浮层展示的是旧版数据，留着只会让用户对着一张即将作废的图干等
+        onRegen?.();
+      },
       onRestore: (prompt) => {
         close(); // 还原消息要发进聊天区，浮层挡着就看不到执行过程
         sendMessageProgrammatically(prompt, { mode: 'bypassPermissions' });

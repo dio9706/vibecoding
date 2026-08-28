@@ -1,6 +1,6 @@
 /**
  * 需求工作流编排 —— docgen / 系统任务串行闸 / 崩溃恢复（bitable 巡检在后续任务追加）。
- * 串行闸（spec §5.3）：内存队列单泵（仅 claude-web 进程），出队条件 = busy 空 且 conv 无活跃 run；
+ * 串行闸（spec §5.3）：内存队列单泵（仅 principal-web 进程），出队条件 = busy 空 且 conv 无活跃 run；
  * busy 落盘镜像供崩溃恢复：启动时清残留并记 history，不自动重跑。
  */
 import fs from 'node:fs';
@@ -38,6 +38,7 @@ import {
   buildMapgenPrompt,
   buildMapFixPrompt,
   buildMapChangePrompt,
+  buildMapRegenPrompt,
   buildImpactPrompt,
   parseImpact,
   markFreshPoints,
@@ -191,7 +192,7 @@ export function hasQueuedTasks(reqId) {
 
 let pumpStarted = false; // 双泵防呆：一体化入口可能被误调用两次（如根 server.js + sidecar 各起一次）
 
-/** 仅 claude-web 进程调用：启动恢复 + 轮询泵（定时器 unref，避免拖住测试进程退出）。重复调用是安全的空操作。 */
+/** 仅 principal-web 进程调用：启动恢复 + 轮询泵（定时器 unref，避免拖住测试进程退出）。重复调用是安全的空操作。 */
 export function startRequirementPump() {
   if (pumpStarted) return;
   pumpStarted = true;
@@ -280,6 +281,23 @@ export function dispatch({ reqId, kind, payload }) {
     }
     runMapChange(req, payload).catch((e) =>
       logger.error('req-ops', 'mapchange 任务异常（history 已记录失败原因）', { reqId, err: e?.message || String(e) }),
+    );
+    return;
+  }
+  // 重新生成地图：三个阶段都有意义——评审期用于「地图跑歪了重来」，开发/测试期用于「代码变了重扫」。
+  // phase 白名单与上面任何一组都不同（quizgen/mapgen/mapfix 仅 review，mapchange 仅 dev|test），
+  // 故单列一支；且必须排在下面那道「仅 dev|test」的通用守卫之前，否则评审期的重扫会被静默作废。
+  if (kind === 'mapregen') {
+    if (req.phase !== 'review' && req.phase !== 'dev' && req.phase !== 'test') {
+      try {
+        updateRequirement(reqId, {}, 'mapregen 作废：需求已进入归档阶段');
+      } catch (e) {
+        logger.error('req-ops', 'updateRequirement 失败', { reqId, kind, err: e?.message || String(e) });
+      }
+      return;
+    }
+    runMapRegen(req).catch((e) =>
+      logger.error('req-ops', 'mapregen 任务异常（history 已记录失败原因）', { reqId, err: e?.message || String(e) }),
     );
     return;
   }
@@ -788,6 +806,13 @@ export async function archiveRequirement(id, note, { runGit = defaultRunGit, run
 export const IMPACT_TIMEOUT_MS = 90_000;
 
 /**
+ * 全量重扫比 docgen 更重，15 分钟的 DOCGEN_TIMEOUT_MS 偏紧，取 30 分钟。
+ * 不像 runDocgen 那样干脆无超时：那条路径有配套的 /api/req/docgen/stop 可中止，
+ * runReadonlyClaude 没有——无超时 + 无停止手段 = 卡住了只能重启进程。
+ */
+export const MAPREGEN_TIMEOUT_MS = 30 * 60_000;
+
+/**
  * 评审期只读 Claude 调用的公共外壳（quizgen / mapgen / mapfix / mapchange 共用）。
  *
  * 与 runDocgen 的 race+abort 骨架同源。**没有顺手把 runDocgen 也改成调它**：那条路径承载了
@@ -982,6 +1007,71 @@ export async function runMapChange(req, payload = {}) {
     return persistMap(req, text, { prev, event: '需求地图按变动更新完成' });
   } catch (e) {
     updateRequirement(req.id, { busy: null }, '需求地图更新失败：' + (e?.message || String(e)).slice(0, 160));
+    throw e;
+  }
+}
+
+/**
+ * 本需求分支相对基线的改动文件清单 —— 重扫地图的范围锚点。
+ * 复用归档链路的 defaultRunGitDiff，可注入供单测替真实 git 调用。
+ *
+ * 任何一个工程失败都只跳过它自己：清单是锦上添花，绝不能因为某个目录不是 git 仓库
+ * 就把整次重扫拦下来。评审期 branches 为空，天然返回 []（那时也确实还没开始写代码）。
+ */
+export async function collectChangedFiles(req, { runGitDiff = defaultRunGitDiff } = {}) {
+  const files = [];
+  for (const b of req?.branches || []) {
+    try {
+      const r = await runGitDiff(b.dir, b.baseBranch, b.branch);
+      if (r?.ok && r.out?.trim()) {
+        files.push(...r.out.trim().split('\n').map((x) => x.trim()).filter(Boolean));
+      }
+    } catch (e) {
+      logger.warn('req-ops', '改动文件清单读取失败（跳过该工程）', {
+        reqId: req?.id,
+        dir: b.dir,
+        err: e?.message || String(e),
+      });
+    }
+  }
+  return files;
+}
+
+/**
+ * 重新生成地图：以当前代码为准全量重扫，出 v+1。
+ *
+ * 四条产地图链路里**唯一不 resume docSession** 的。其余三条都续跑评审期那个 session
+ * 省 token，但那份上下文正是「开发前的代码理解」，带着它重扫等于让模型确认自己的旧结论，
+ * 看不见代码已经变了。代价是要重新读一遍代码，这是「重扫」的固有成本，不是可优化项。
+ *
+ * prev 允许为 null：地图从没生成成功过（如 docgen 后的 mapgen 挂了）时，这里是唯一的重试路径。
+ */
+export async function runMapRegen(req) {
+  const docPath = req.devDoc?.versions?.at(-1)?.path || '';
+  if (!docPath) throw new Error('尚无开发文档，无法重新生成需求地图');
+  const prev = readMapVersion(req);
+  const changedFiles = await collectChangedFiles(req);
+  logger.info('req-ops', 'mapregen 起跑', {
+    reqId: req.id,
+    phase: req.phase,
+    changedFiles: changedFiles.length,
+    prevPages: (prev?.pages || []).length,
+  });
+  const { text } = await runReadonlyClaude(req, 'mapregen', {
+    prompt: buildMapRegenPrompt({
+      docPath,
+      prevPageNames: (prev?.pages || []).map((p) => p.name),
+      changes: (req.changes || []).map((c) => c.text),
+      changedFiles,
+    }),
+    resume: null,
+    startEvent: '开始重新生成需求地图（以当前代码为准）',
+    timeoutMs: MAPREGEN_TIMEOUT_MS,
+  });
+  try {
+    return persistMap(req, text, { prev, event: '需求地图重新生成完成' });
+  } catch (e) {
+    updateRequirement(req.id, { busy: null }, '需求地图重新生成失败：' + (e?.message || String(e)).slice(0, 160));
     throw e;
   }
 }

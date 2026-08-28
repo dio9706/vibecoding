@@ -32,6 +32,17 @@ export const $ = (s) => document.querySelector(s);
         return parts[parts.length - 1] || p;
       }
 
+/**
+ * 是否为 Markdown 文件路径 —— 即「点了能进 Markdown 查看器」的判据，
+ * 与 /api/fs/read 的扩展名白名单一一对应，两边必须同进同退。
+ *
+ * 放在 util 而不是 chat.js：聊天气泡的路径 chip 与需求右栏的 API 文档都要判，
+ * 各写一份正则迟早会漂移。
+ */
+      export function isMarkdownPath(p) {
+        return /\.(md|markdown)$/i.test(p);
+      }
+
 /** 时间戳 → 本地中文时间串（logs / tasks 共用） */
       export function fmtTime(iso) {
         try {

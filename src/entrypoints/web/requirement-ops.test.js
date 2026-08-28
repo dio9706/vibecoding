@@ -26,6 +26,7 @@ const {
   finalizeRequirement,
   archiveRequirement,
   runDocgen,
+  collectChangedFiles,
 } = await import('./requirement-ops.js');
 const { createRequirement, updateRequirement, getRequirement } = await import('../../store/requirements.js');
 const { parseFeatureTag } = await import('./req-logic.js');
@@ -342,6 +343,53 @@ test('dispatch：需求已离开开发/测试期（如已归档）时，develop/
   const after = getRequirement(r.id);
   assert.equal(after.busy, null); // 没有真的派发 dispatchSystemTask（否则会同步写 busy）
   assert.equal(after.history.at(-1).event, '系统任务 bug-fix 作废：需求已离开开发/测试期');
+});
+
+test('dispatch：mapregen 在评审/开发/测试期都放行（三个阶段白名单与其他任务都不同）', () => {
+  for (const phase of ['review', 'dev', 'test']) {
+    const r = createRequirement({ title: 'mapregen 放行测试 ' + phase });
+    updateRequirement(r.id, { phase });
+    // 刻意不设 devDoc：runMapRegen 会在第一步抛「尚无开发文档」退出，不会真去调 Claude
+    dispatch({ reqId: r.id, kind: 'mapregen', payload: {} });
+    const after = getRequirement(r.id);
+    assert.ok(!after.history.at(-1).event.includes('作废'), phase + ' 期不该被作废');
+  }
+});
+
+test('dispatch：mapregen 在归档阶段被作废，history 留痕', () => {
+  const r = createRequirement({ title: 'mapregen 作废测试' });
+  updateRequirement(r.id, { phase: 'archived' });
+  dispatch({ reqId: r.id, kind: 'mapregen', payload: {} });
+  const after = getRequirement(r.id);
+  assert.equal(after.busy, null);
+  assert.equal(after.history.at(-1).event, 'mapregen 作废：需求已进入归档阶段');
+});
+
+test('collectChangedFiles：合并多工程结果，单个工程失败只跳过它自己', async () => {
+  const req = {
+    id: 'r1',
+    branches: [
+      { dir: '/fe', baseBranch: 'main', branch: 'req/x' },
+      { dir: '/be', baseBranch: 'main', branch: 'req/x' },
+    ],
+  };
+  const runGitDiff = async (dir) => (dir === '/fe' ? { ok: true, out: 'src/a.js\nsrc/b.js\n' } : { ok: false, out: '' });
+  assert.deepEqual(await collectChangedFiles(req, { runGitDiff }), ['src/a.js', 'src/b.js']);
+});
+
+test('collectChangedFiles：git 抛异常时不上抛（清单只是锚点，不能拦下整次重扫）', async () => {
+  const req = { id: 'r1', branches: [{ dir: '/x', baseBranch: 'main', branch: 'req/x' }] };
+  const files = await collectChangedFiles(req, {
+    runGitDiff: async () => {
+      throw new Error('not a git repository');
+    },
+  });
+  assert.deepEqual(files, []);
+});
+
+test('collectChangedFiles：评审期无 branches 返回空数组', async () => {
+  assert.deepEqual(await collectChangedFiles({ id: 'r1', branches: [] }), []);
+  assert.deepEqual(await collectChangedFiles({ id: 'r1' }), []);
 });
 
 test('finalizeRequirement：队列里已有该需求待派发任务时拒绝定稿（防抢跑窗口）', async () => {

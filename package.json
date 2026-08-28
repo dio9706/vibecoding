@@ -1,7 +1,7 @@
 {
-  "name": "vibe-coding-desktop",
+  "name": "principal-desktop",
   "version": "1.0.0",
-  "description": "在浏览器里调用本地 `claude -p`，实时流式看到 Claude 的执行内容。",
+  "description": "Principal —— 让任何终端成为你的员工，你只做审计。",
   "main": "server.js",
   "scripts": {
     "test": "node --test \"src/**/*.test.js\" \"public/**/*.test.js\"",

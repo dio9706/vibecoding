@@ -7,6 +7,7 @@ import {
   buildMapgenPrompt,
   buildMapFixPrompt,
   buildMapChangePrompt,
+  buildMapRegenPrompt,
   buildImpactPrompt,
   parseImpact,
   collectAnnotLines,
@@ -338,5 +339,53 @@ test('地图输出契约把 edges 列为硬性要求', () => {
   const p = buildMapgenPrompt({});
   for (const kw of ['入口页', '至少要有一条入边', '全部下钻链路']) {
     assert.ok(p.includes(kw), '契约缺少要求：' + kw);
+  }
+});
+
+// ---- buildMapRegenPrompt ----
+
+test('buildMapRegenPrompt 定调以代码为准，并要求现读开发文档', () => {
+  const p = buildMapRegenPrompt({ docPath: '/req/dev-doc-v3.md' });
+  assert.ok(p.includes('以当前代码的实际实现为准'));
+  assert.ok(p.includes('/req/dev-doc-v3.md'));
+  // 输出契约必须带上，否则解析层拿不到约定结构
+  assert.ok(p.includes('不要输出任何坐标字段'));
+});
+
+test('buildMapRegenPrompt 给了页面名则要求沿用原名，没给则不出该段', () => {
+  const withPages = buildMapRegenPrompt({ docPath: '/a.md', prevPageNames: ['订单列表', '订单详情'] });
+  assert.ok(withPages.includes('订单列表'));
+  assert.ok(withPages.includes('沿用上面的原名'));
+
+  const without = buildMapRegenPrompt({ docPath: '/a.md', prevPageNames: [] });
+  assert.ok(!without.includes('沿用上面的原名'), '空清单不该留下空标题');
+});
+
+test('buildMapRegenPrompt 改动文件超上限时截断并注明剩余数量', () => {
+  const files = Array.from({ length: 205 }, (_, i) => `src/f${i}.js`);
+  const p = buildMapRegenPrompt({ docPath: '/a.md', changedFiles: files });
+  assert.ok(p.includes('src/f199.js'));
+  assert.ok(!p.includes('src/f200.js'));
+  // 不注明剩余量，模型会把截断后的清单当成全集
+  assert.ok(p.includes('另有 5 个文件未列出'));
+});
+
+test('buildMapRegenPrompt 需求变动逐条截断，且注明只代表意图', () => {
+  const p = buildMapRegenPrompt({ docPath: '/a.md', changes: ['变'.repeat(400)] });
+  assert.ok(p.includes('变'.repeat(300)));
+  assert.ok(!p.includes('变'.repeat(301)));
+  assert.ok(p.includes('只说明**意图**'));
+});
+
+test('buildMapRegenPrompt 空白项被剔除，不产生空 bullet', () => {
+  const p = buildMapRegenPrompt({ docPath: '/a.md', changedFiles: ['', '  ', 'src/a.js'] });
+  assert.ok(p.includes('- src/a.js'));
+  assert.ok(!p.includes('- \n'));
+});
+
+test('buildMapRegenPrompt 无任何可选输入时只剩定调与契约（不留空标题）', () => {
+  const p = buildMapRegenPrompt({ docPath: '/a.md' });
+  for (const kw of ['需求变动', '实际改动过的文件', '上一版地图包含']) {
+    assert.ok(!p.includes(kw), '空输入不该出现段落：' + kw);
   }
 });

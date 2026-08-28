@@ -41,7 +41,7 @@ node feishu.js                # .env 自动加载，不必再写 --env-file
 
 | 顺序 | 位置 | 适用形态 |
 |:---:|------|---------|
-| 1 | `$APP_DATA_DIR/.env`，Windows 桌面版即 `%APPDATA%\com.vibecoding.desktop\.env` | 打包版（安装目录只读，配置必须放可写目录，改配置无需重装） |
+| 1 | `$APP_DATA_DIR/.env`，Windows 桌面版即 `%APPDATA%\com.principal.desktop\.env` | 打包版（安装目录只读，配置必须放可写目录，改配置无需重装） |
 | 2 | 仓库根 `.env` | 开发态 |
 
 两条重要性质：

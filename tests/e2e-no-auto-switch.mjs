@@ -7,7 +7,7 @@
  * （review→dev）就会把正在别处干活的用户拽进需求会话。
  *
  * 本测试自起独立 web 服务器（临时 APP_DATA_DIR + 随机空闲端口），范式同 e2e-req-review.mjs，
- * 不触碰 pm2 的 claude-web（真实会话数据不可污染）。全程零 Claude 调用（不跑 docgen/finalize，
+ * 不触碰 pm2 的 principal-web（真实会话数据不可污染）。全程零 Claude 调用（不跑 docgen/finalize，
  * phase 与 busy 都靠直改磁盘注入）。
  *
  * 覆盖：

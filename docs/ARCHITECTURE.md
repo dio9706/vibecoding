@@ -1,4 +1,4 @@
-# 架构设计文档 · claude-agent-web-demo
+# 架构设计文档 · Principal
 
 > 实现 7 大特性的**完整技术架构**：模块拆分、数据流、特性落地、设计模式、故障排查。
 > 
@@ -91,8 +91,8 @@
 │              💰 Anthropic 额度池（Claude Code 订阅）                │
 │                                                                       │
 │  【后端进程守护】PM2 ecosystem.config.cjs                           │
-│  ├─ claude-web (端口 3000)                                          │
-│  └─ claude-feishu (飞书长连接)                                      │
+│  ├─ principal-web (端口 3000)                                          │
+│  └─ principal-feishu (飞书长连接)                                      │
 │  ↓ 崩溃自动重启 + 跨重启状态恢复 (特性①)                           │
 │                                                                       │
 └─────────────────────────────────────────────────────────────────────┘
@@ -517,17 +517,17 @@ return candidates[0]
 |------|------|------|
 | 关窗后任务消失 | PM2 未守护 或 `active-runs.json` 被删 | `pm2 start ecosystem.config.cjs` 或检查 `store/active-runs.js` 写入逻辑 |
 | 重开页面接不回任务 | 前端 `attachStream` 逻辑错 | 检查 `/api/run/pending` 返回 + 前端 `openConv(convId)` 调用 |
-| 飞书凭证改了但长连接没更新 | `fs.watch` 未触发 或 `WSClient.start()` 未调用 | 手动 `pm2 restart claude-feishu` |
+| 飞书凭证改了但长连接没更新 | `fs.watch` 未触发 或 `WSClient.start()` 未调用 | 手动 `pm2 restart principal-feishu` |
 | token 池有号但始终只用第一个 | `pickActive()` 逻辑错 或 status 未更新 | 检查 `onRateLimit` 是否被调用；手动改 `settings.json` 验证 |
 | 额度续跑失败（pending 不清除） | 续跑超过熔断上限（≥4 次） | 清除 `pending-resume.json` 并 POST `/api/run/pending/dismiss` |
 | 权限卡片不弹（工具直接执行） | `.claude/settings.json` 全局 `permissions.allow` 优先级更高 | `server.js` 注入 SDK `hooks.PreToolUse` 返回 `permissionDecision: 'ask'` 强制交回 |
-| Web 设置页改凭证后没生效 | 飞书进程未热重载 | 手动 `pm2 restart claude-feishu` 或等 `fs.watch` 触发 |
+| Web 设置页改凭证后没生效 | 飞书进程未热重载 | 手动 `pm2 restart principal-feishu` 或等 `fs.watch` 触发 |
 
 ---
 
 ## 总结
 
-claude-agent-web-demo 通过以下设计实现 7 大特性：
+Principal 通过以下设计实现 7 大特性：
 
 | 特性 | 核心技术 | 关键文件 |
 |------|---------|---------|

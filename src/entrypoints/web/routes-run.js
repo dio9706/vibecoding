@@ -19,6 +19,7 @@ import {
   cancelPendingAsks,
 } from '../../store/runs.js';
 import { getPending, removePendingByConv } from '../../store/pending-resume.js';
+import { runIdsToAbortOnDismiss, isResumePlanned } from './run-claude.logic.js';
 import { appendUserLog } from '../../store/user-log.js';
 import { classifyTier } from './tier.js';
 import { startClaudeRun } from './run-claude.js';
@@ -101,12 +102,18 @@ export function handleRunPending(res) {
   sendJson(res, 200, { pending });
 }
 
-/** 前端失效清除 / 熔断消费后：按 convId 移除待续跑条目 */
+/** 前端失效清除 / 熔断消费 / 等待重试期间点停止后：按 convId 移除待续跑条目 */
 export function handleRunPendingDismiss(req, res) {
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
   return withJsonBody(req, res, (data) => {
     const convId = str(data.convId);
-    if (convId) removePendingByConv(convId);
+    if (convId) {
+      // 已起跑的重试/续跑 run 必须一并中止：删条目只是让前端不再接流，进程还在烧额度、
+      // 还在写工作目录。窄竞态——用户在 2 秒重试窗口的末尾点停止时 doResume 可能已经起跑了。
+      const doomed = runIdsToAbortOnDismiss(getPending().filter((e) => e.convId === convId));
+      for (const id of doomed) abortRunById(id, '已手动停止');
+      removePendingByConv(convId);
+    }
     sendJson(res, 200, { ok: !!convId });
   });
 }
@@ -203,7 +210,11 @@ export function handleRunAttach(url, res) {
 
   const run = getRun(runId);
   if (!run) {
-    sendTo(res, 'error', { message: 'run 不存在或已过期' });
+    // convId 缺失（老前端/异常调用）时给 null 而不是 false：前端把 null 当「未知」按现状静默
+    // 等待。拿不到判据就谎报 false 会把真会续跑的任务提前终结，代价比多转一会儿圈大。
+    const convId = (url.searchParams.get('convId') || '').trim();
+    const resumePlanned = convId ? isResumePlanned(getPending(), convId) : null;
+    sendTo(res, 'error', { message: 'run 不存在或已过期', resumePlanned });
     return res.end();
   }
 

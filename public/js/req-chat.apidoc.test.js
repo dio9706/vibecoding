@@ -16,11 +16,13 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { JSDOM } from 'jsdom';
+import { makeNetworkError, NETWORK_ERROR_MSG } from './net-error.js';
 
 let dom;
 let mountReqChrome;
 let toastCalls;
 let fetchLog;
+let openedMdPaths; // 经 bindMarkdownNav 注入的视图桥收到的路径（断言「点文档名跳查看器」）
 
 /** 右栏渲染所需的需求详情（phase=dev 才渲染 renderDevRail） */
 function devReq(overrides = {}) {
@@ -63,6 +65,11 @@ before(async () => {
   const mod = await import('./req-chat.js');
   mountReqChrome = mod.mountReqChrome;
   mod.initReqChat(); // 绑定 #reqBanner / #reqRail 容器
+
+  // Markdown 查看器视图桥：生产里由 app.js 注入（showView + openFileByPath），这里只记录路径
+  const chat = await import('./chat.js');
+  openedMdPaths = [];
+  chat.bindMarkdownNav((p) => openedMdPaths.push(p));
 
   // toast 是全局桥（window.toast），断言点就在这
   toastCalls = [];
@@ -282,4 +289,55 @@ test('新增 API 文档：点击＋上传，选择新文件，name 应为新文�
     toastCalls.some(([kind, msg]) => kind === 'success' && msg.includes('已入队自动修正')),
     `应提示已入队自动修正，实际 toast：${JSON.stringify(toastCalls)}`,
   );
+});
+
+test('点击 .md 文档名：跳 Markdown 查看器，传的是 path 而不是 name', async () => {
+  // 替换过的文档 name 仍是旧名、path 已指向新文件，查看器必须按 path 读盘
+  const data = devReq({
+    apiDocs: [
+      { id: 'd1', name: 'existing-api.md', path: 'C:\\tmp\\new-api.md', updatedAt: '2026-08-28' },
+    ],
+  });
+  stubFetch({ '/api/req/get': () => data });
+  await mountReqChrome(data.id);
+
+  const nameEl = dom.window.document.querySelector('#reqRail .req-apidoc-item .name');
+  assert.equal(nameEl.tagName, 'BUTTON', 'md 文档名应渲染成可点按钮');
+
+  openedMdPaths = [];
+  nameEl.click();
+  assert.deepEqual(openedMdPaths, ['C:\\tmp\\new-api.md'], '应把 doc.path 交给 Markdown 查看器');
+});
+
+test('非 .md 文档名不可点：查看器读不了，别给假的可点提示', async () => {
+  // /api/fs/read 只放行 .md/.markdown，渲染成按钮等于诱导用户点出一个必然失败的请求
+  const data = devReq({
+    apiDocs: [{ id: 'd2', name: 'openapi.json', path: 'C:\\tmp\\openapi.json', updatedAt: '2026-08-28' }],
+  });
+  stubFetch({ '/api/req/get': () => data });
+  await mountReqChrome(data.id);
+
+  const nameEl = dom.window.document.querySelector('#reqRail .req-apidoc-item .name');
+  assert.equal(nameEl.tagName, 'SPAN', '非 md 文档名应保持纯文本');
+});
+
+test('后端不可达时：toast 说系统故障，不叠加业务前缀（回归：Failed to fetch 被当成上传功能坏了）', async () => {
+  const data = devReq();
+  const input = await mountAndGetFileInput(data);
+
+  // 用生产同款构造器，而不是手搓一个形状相同的假货 ——
+  // 手搓的话，makeNetworkError 那边改了属性名这里也不会挂，契约就没被咬住
+  globalThis.fetch = async () => {
+    throw makeNetworkError(new TypeError('Failed to fetch'));
+  };
+  toastCalls = [];
+
+  await pickFile(input);
+
+  const errors = toastCalls.filter(([kind]) => kind === 'error');
+  assert.equal(errors.length, 1, `应只弹一条错误，实际：${JSON.stringify(toastCalls)}`);
+  const [, msg] = errors[0];
+  assert.equal(msg, NETWORK_ERROR_MSG, `系统故障不该叠业务前缀，实际：「${msg}」`);
+  assert.ok(!msg.includes('API 文档上传失败'), '不该把后端掉线说成上传功能失败');
+  assert.ok(!msg.includes('Failed to fetch'), '不该把浏览器原文透给用户');
 });

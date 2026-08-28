@@ -24,7 +24,10 @@ import { JSDOM } from 'jsdom';
 let dom;
 let renderPathsInText;
 
-before(() => {
+before(async () => {
+  // 段内 classifyPath 调用的 isMarkdownPath 现住在 util.js（需求右栏也要用同一判据），
+  // 抽出来的源码片段拿不到 import 绑定，只能作为形参注入
+  const { isMarkdownPath } = await import('./util.js');
   const src = fs.readFileSync('public/js/chat.js', 'utf8');
   const start = src.indexOf('const PATH_SEP_HEAD');
   const tail = src.indexOf('* 显示图片灯箱');
@@ -38,8 +41,9 @@ before(() => {
   globalThis.showLightbox = () => {};
   // 用 window.Function 编译，段内创建的节点才属于这个 jsdom 文档
   renderPathsInText = new dom.window.Function(
+    'isMarkdownPath',
     `${segment}; return { renderPathsInText };`
-  ).call(dom.window).renderPathsInText;
+  ).call(dom.window, isMarkdownPath).renderPathsInText;
 });
 
 after(() => {
@@ -140,7 +144,7 @@ test('尾部粘连的标点剥回文本，不算进路径', async () => {
 
 test('Windows 路径允许中文文件名，但中文标点即截断', async () => {
   assert.equal(await render('路径是 C:\\Users\\DELL\\项目\\说明.md，看下'),
-    '路径是 [📄:C:\\Users\\DELL\\项目\\说明.md]，看下');
+    '路径是 [📝:C:\\Users\\DELL\\项目\\说明.md]，看下'); // 📝 = markdown 分类，本例只验证截断边界
 });
 
 test('带空格的路径只认到第一段——刻意的保守取舍，不是漏洞', async () => {
@@ -154,7 +158,8 @@ test('扩展名后直接粘中文也要截断（中文输入里不打空格是�
 });
 
 test('中文目录名/中文文件名本身不受扩展名截断影响', async () => {
-  assert.equal(await render('C:\\项目\\说明.md'), '[📄:C:\\项目\\说明.md]');
+  // 本例只关心路径边界不被中文吃掉；.md 归 markdown 分类故图标是 📝（chip 点击进查看器）
+  assert.equal(await render('C:\\项目\\说明.md'), '[📝:C:\\项目\\说明.md]');
   assert.equal(await render('C:\\a\\项目文档\\b.png'), '[📄:C:\\a\\项目文档\\b.png]');
   // 目录路径没有扩展名，末尾中文段要完整保留（并被判成目录）
   assert.equal(await render('C:\\v1.2\\说明书'), '[📁:C:\\v1.2\\说明书]');
@@ -217,7 +222,7 @@ test('图片加载失败时原地降级成 chip（没有 path_exists，onerror �
 });
 
 test('上传图片的完整路径后接中文说明（线上原始案例）', async () => {
-  const p = 'C:\\Users\\DELL\\AppData\\Roaming\\com.vibecoding.desktop\\.uploads\\a-screenshot-20260814.png';
+  const p = 'C:\\Users\\DELL\\AppData\\Roaming\\com.principal.desktop\\.uploads\\a-screenshot-20260814.png';
   assert.equal(await render(`${p}   路径的判断有问题, 仅判断绝对路径吧`),
     `[📄:${p}]   路径的判断有问题, 仅判断绝对路径吧`);
 });

@@ -1,4 +1,6 @@
 /** API 基址引导：Tauri 打包模式端口探测 + fetch/EventSource 相对路径补丁。必须最先 import。 */
+import { reportNetworkFailure } from './net-guard.js';
+import { classifyFetchRejection } from './net-error.js';
       // ============================================================
       // API 基址：桌面版（打包 release）后端端口由 Rust 动态探测后经
       // `backend_port` Tauri 命令告知前端；web / tauri dev 模式走相对路径。
@@ -54,7 +56,9 @@
                   }
                   console.log('[Diag] API_BASE 已设为:', API_BASE);
                   // 立即探一次连通性
-                  fetch(API_BASE + '/api/ping').then(r => r.json()).then(d => {
+                  // __skipGuard：这是打包态刚拿到端口后的连通性探测，此刻 Node sidecar
+                  // 往往还在冷启动，失败是常态而非掉线。不旁路会让掉线罩盖在启动罩上。
+                  fetch(API_BASE + '/api/ping', { __skipGuard: true }).then(r => r.json()).then(d => {
                     console.log('[Diag] /api/ping 成功:', d);
                   }).catch(e => {
                     console.error('[Diag] ⚠️ /api/ping 失败（后端可能未就绪）:', e.message);
@@ -68,21 +72,50 @@
               })
           : Promise.resolve();
 
-      if (_isTauriPackaged) {
+      // ── fetch 包装：无条件安装 ────────────────────────────────────
+      // 原先只在打包态装（为了改写相对路径）。改为无条件装，是为了让「网络层失败」
+      // 在所有模式下都能被分类：不分类的话全项目几十处 fetch 的 catch 拿到的都是
+      // 浏览器原文 `Failed to fetch`，被拼进业务文案后把系统故障说成功能故障
+      //（req-chat.js 的「API 文档上传失败：Failed to fetch」就是这么来的）。
+      // 守卫 typeof window.fetch：jsdom 不实现 window.fetch（undefined），测试用的是
+      // globalThis.fetch。改动前这行在 if (_isTauriPackaged) 里、测试态恒假所以永不求值；
+      // 无条件化之后若不守卫，.bind 作用在 undefined 上会在**模块加载期**直接抛，
+      // 把整条 import 链带崩（offline-overlay.test.js 的 5 个用例就是这么全挂的）。
+      // 测试态不装包装，恰好与「测试走 globalThis.fetch」的既有隔离一致；
+      // 真实浏览器里 window.fetch 必然存在，运行时行为不受影响。
+      if (typeof window.fetch !== 'function') {
+        // 真实浏览器里不该发生。若真发生，打包态会**静默**丢掉相对路径改写
+        //（所有 /api/* 请求打到 tauri.localhost 而非后端端口），比直接抛错更难查，
+        // 所以至少留一行痕迹。jsdom 测试环境走这条是预期的。
+        console.warn('[Diag] window.fetch 不可用，跳过 fetch 包装（URL 改写与掉线守卫均不生效）');
+      } else {
         const _origFetch = window.fetch.bind(window);
-        // fetch 包裹：等端口就绪后再改写相对路径（对调用方透明，fetch 本就返回 Promise）
         window.fetch = async (input, init) => {
-          const base = API_BASE ?? (await baseReady, API_BASE);
           let url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input));
-          if (typeof input === 'string' && input.startsWith('/')) {
-            input = base + input;
-          } else if (input instanceof Request && input.url.startsWith('/')) {
-            input = new Request(base + input.url, input);
+          if (_isTauriPackaged) {
+            // 等端口就绪后再改写相对路径（对调用方透明，fetch 本就返回 Promise）
+            const base = API_BASE ?? (await baseReady, API_BASE);
+            if (typeof input === 'string' && input.startsWith('/')) {
+              input = base + input;
+            } else if (input instanceof Request && input.url.startsWith('/')) {
+              input = new Request(base + input.url, input);
+            }
+            console.debug('[Diag] fetch ->', typeof input === 'string' ? input : url, 'API_BASE=', base);
           }
-          // 每次请求都打一条简短日志（生产期间可注释掉）
-          console.debug('[Diag] fetch ->', typeof input === 'string' ? input : url, 'API_BASE=', base);
-          return _origFetch(input, init);
+          try {
+            return await _origFetch(input, init);
+          } catch (e) {
+            // 只有 reject 路径才在这里。resolve 但 !r.ok 的业务错误一律不碰 ——
+            // 那种情况后端是活着的，不该升掉线罩。
+            // 分类规则本身在 net-error.js（纯函数，可单测；这里的包装在 jsdom 下不安装）。
+            const { report, error } = classifyFetchRejection(e, init);
+            if (report) reportNetworkFailure();
+            throw error;
+          }
         };
+      }
+
+      if (_isTauriPackaged) {
         // EventSource 构造器同步，无法内部 await；
         // 约束：所有 EventSource 创建均发生在 await baseReady 之后（run 流式连接在引导后，天然满足）。
         const _OrigES = window.EventSource;
@@ -102,8 +135,9 @@
         window.EventSource = PatchedES;
       } else {
         console.log('[Diag] 非打包模式（web/tauri dev），使用相对路径，API_BASE=""');
-        // 非打包模式也探一下
-        fetch('/api/ping').then(r => r.json()).then(d => {
+        // 非打包模式也探一下。带 __skipGuard：启动期后端可能还没起来，
+        // 这条诊断请求的失败不该升掉线罩。
+        fetch('/api/ping', { __skipGuard: true }).then(r => r.json()).then(d => {
           console.log('[Diag] /api/ping (相对路径) 成功:', d);
         }).catch(e => {
           console.error('[Diag] ⚠️ /api/ping (相对路径) 失败（后端未就绪？）:', e.message);

@@ -18,7 +18,7 @@ import { loadConvs, convSetMeta } from './conv-store.js';
 const POLL_MS = 5000;
 
 /**
- * @param {{ applyInjected: (convId:string, items:any[]) => string[],
+ * @param {{ applyInjected: (convId:string, items:any[]) => Promise<string[]>,
  *           getCurrentConvId: () => (string|null) }} deps
  */
 export function bindConvNotify(deps) {
@@ -141,8 +141,11 @@ export function bindConvNotify(deps) {
 
     const items = Array.isArray(d.items) ? d.items : [];
     if (!items.length) return;
-    // applyInjected 自带「非当前会话不上屏」守卫，只返回真正上了屏的 id
-    const applied = applyInjected?.(convId, items) || [];
+    // applyInjected 自带「非当前会话不上屏」守卫，只返回真正上了屏的 id。
+    // 必须 await：真身（chat.js 的 applyInjectedItems）是 async，漏掉 await 拿到的是 Promise，
+    // 它没有 .length → 下面的空判永远成立 → /claim 一次都不发 → 条目烂在服务端收件箱里，
+    // 5s 一轮的轮询把同一条补充内容反复上屏（表现为「最后那句话被无限自动重发」）。
+    const applied = (await applyInjected?.(convId, items)) || [];
     // 空数组绝不能调 /claim：认领即从服务端收件箱删除，没上屏就认领 = 这条补充内容永久蒸发
     if (!applied.length) return;
     postJson('/api/conv-notify/claim', { convId, ids: applied });

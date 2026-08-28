@@ -16,7 +16,7 @@
  *
  * 与 event-log.js 的差别只有一处：**这里加了文件锁**。event-log 的行都是小结构化对象
  * （远小于 4KB，单次 write 近似原子，丢一行也无所谓），而本日志的 text 是用户原文、长度无上限，
- * 超过一次 write 的量时 PM2 的 claude-web / claude-feishu 两个进程会把彼此的行交错写坏 ——
+ * 超过一次 write 的量时 PM2 的 principal-web / principal-feishu 两个进程会把彼此的行交错写坏 ——
  * 而「无损」正是这一层唯一的价值，坏一行就是永久丢一份证据。
  */
 import fs from 'node:fs';

@@ -345,7 +345,8 @@ export async function initializeDefaults() {
   }
 }
 
-/** 通过 Vibe Coding 编辑器打开指定目录（Windsurf / Cursor / VS Code 依次尝试） */
+/** 用外部 AI 编辑器打开指定目录（Windsurf / Cursor / VS Code 依次尝试）。
+ *  函数名与路由里的 "vibe" 是改名前的历史标识符，非产品名 Principal，勿混淆。 */
 export function handleOpenInVibe(req, res) {
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
   return withJsonBody(req, res, (data) => {

@@ -17,9 +17,10 @@ import { createServer } from 'node:http';
 
 process.env.APP_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'run-routes-'));
 const DATA_DIR = process.env.APP_DATA_DIR;
-const { handleRunStart, handleRunSend } = await import('./routes-run.js');
+const { handleRunStart, handleRunSend, handleRunAttach } = await import('./routes-run.js');
 const { createRun, getRun, finishRun } = await import('../../store/runs.js');
 const { readUserLog, userLogFile } = await import('../../store/user-log.js');
+const { addPending } = await import('../../store/pending-resume.js');
 
 let server, base;
 test.before(async () => {
@@ -27,6 +28,7 @@ test.before(async () => {
     const url = new URL(req.url, 'http://x');
     if (url.pathname === '/start') return handleRunStart(req, res);
     if (url.pathname === '/send') return handleRunSend(req, res);
+    if (url.pathname === '/api/run') return handleRunAttach(url, res);
     res.writeHead(404).end();
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -144,4 +146,35 @@ test('空文本仍按原有 400 处理，且不落日志', async () => {
   finishRun(run);
   assert.equal(r.status, 400);
   assert.deepEqual(logged(), []);
+});
+
+/**
+ * attach 撞上不存在的 run 时，必须如实告诉前端「还有没有人会送新 run 上来」。
+ * 前端的「run 不存在 → 静默等待」分支等的就是这个新 run；没有计划却让它等，
+ * 气泡就永久停在「运行中…」（2026-08-28 事故的后半段）。
+ */
+test('GET /api/run 撞上不存在的 run：按 pending 条目回 resumePlanned', async () => {
+  // SSE 端点会持续挂住连接，只读首个事件块即可断开
+  const readFirstEvent = async (query) => {
+    const ac = new AbortController();
+    const res = await fetch(`${base}/api/run?${query}`, { signal: ac.signal });
+    const reader = res.body.getReader();
+    const { value } = await reader.read();
+    ac.abort();
+    return new TextDecoder().decode(value);
+  };
+
+  // 无 pending 条目 → false
+  let chunk = await readFirstEvent('runId=run_ghost&convId=c_no_plan');
+  assert.match(chunk, /run 不存在或已过期/);
+  assert.match(chunk, /"resumePlanned":false/, '无续跑条目必须明确回 false，前端据此中性终结');
+
+  // 有活条目 → true
+  addPending({ convId: 'c_has_plan', session_id: 's1', resetsAt: Math.floor(Date.now() / 1000) });
+  chunk = await readFirstEvent('runId=run_ghost&convId=c_has_plan');
+  assert.match(chunk, /"resumePlanned":true/, '有 waiting 条目应让前端继续静默等待');
+
+  // 不传 convId → null（未知），前端按现状静默等待，老前端不回归
+  chunk = await readFirstEvent('runId=run_ghost');
+  assert.match(chunk, /"resumePlanned":null/, '拿不到判据时不能谎报 false');
 });

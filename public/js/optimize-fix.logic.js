@@ -31,6 +31,9 @@ const STEP_LABEL = {
   'write-skill': '写入技能文件',
   'delete-rule': '删除原规则文件',
   'replace-refs': '改写文档引用',
+  'dead-link': '修复地图死链',
+  'gen-map': '生成项目地图',
+  cancelling: '正在停止',
   abort: '已中止',
 };
 
