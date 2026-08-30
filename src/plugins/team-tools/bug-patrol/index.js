@@ -12,7 +12,7 @@ import {
   updateBitableRecord,
   resolveWikiNodeObj,
 } from '../../../integrations/lark.js';
-import { runClassifierOnce } from '../../../features/llm-classify.js';
+import { runClassifierOnce } from '../../../capabilities/llm-classify.js';
 import { reviewTask } from '../review/index.js';
 import { requestAutoDevelop } from '../auto-dev/index.js';
 import { createTask } from '../../../store/tasks.js';

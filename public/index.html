@@ -789,12 +789,14 @@
     <button id="sidebarNew" hidden>新对话代理</button>
     <button id="sidebarNewReq" hidden>新需求代理</button>
 
-    <!-- Markdown 渲染组件（本地 vendor，无需构建/联网）-->
+    <!-- Markdown 渲染组件（本地 vendor，无需构建/联网）
+         三份 vendor 文件由 `npm run sync:vendor` 从 node_modules 同步，版本见 vendor/VERSIONS.md，
+         切勿手工替换——构建前的 --check 会拦下漂移。 -->
     <!-- DOMPurify 必须先于任何渲染：renderMarkdown 缺它会退化成纯文本（见 js/util.js） -->
     <script src="/vendor/purify.min.js"></script>
-    <script src="/vendor/marked.min.js"></script>
-    <!-- Anime.js 动画库（v4.1.4，本地 vendor：桌面版离线可用，且不再让同步 CDN 请求阻塞 DOMContentLoaded）-->
-    <script src="/vendor/anime.iife.min.js"></script>
+    <script src="/vendor/marked.umd.js"></script>
+    <!-- Anime.js 动画库（本地 vendor：桌面版离线可用，且不再让同步 CDN 请求阻塞 DOMContentLoaded）-->
+    <script src="/vendor/anime.umd.min.js"></script>
     <script src="/js/markdown-tool.js"></script>
     <script type="module" src="/app.js"></script>
   </body>

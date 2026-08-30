@@ -20,6 +20,7 @@
  * 运行：node tests/e2e-retro-summary.mjs
  */
 import { chromium } from 'playwright';
+import { seedConfiguredSettings } from './helpers.mjs';
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import fs from 'node:fs';
@@ -53,6 +54,9 @@ async function waitForReady(baseUrl, timeoutMs = 20000) {
 const port = await findFreePort();
 const BASE = `http://127.0.0.1:${port}`;
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'retro-e2e-'));
+// 预置「已配置用户」settings：空数据目录会被 onboarding 判为新用户，
+// 引导罩覆盖全屏后所有点击都被拦截（详见 helpers.mjs 的说明）。
+seedConfiguredSettings(dataDir);
 const reqFile = path.join(dataDir, 'requirements.json');
 function patchReqOnDisk(id, mutate) {
   const data = JSON.parse(fs.readFileSync(reqFile, 'utf8'));

@@ -11,7 +11,7 @@
  * 新增动作意图无需改此文件，走 action-configs 配置即可。
  */
 import { matchStrongIntent } from './intent-keywords.js';
-import { runClassifierOnce } from '../features/llm-classify.js';
+import { runClassifierOnce } from '../capabilities/llm-classify.js';
 import { config } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 

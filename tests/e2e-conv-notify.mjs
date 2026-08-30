@@ -30,6 +30,7 @@
  * 运行：node tests/e2e-conv-notify.mjs
  */
 import { chromium } from 'playwright';
+import { seedConfiguredSettings, writeSettings } from './helpers.mjs';
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import fs from 'node:fs';
@@ -79,6 +80,9 @@ async function waitForReady(baseUrl, timeoutMs = 20000) {
 const port = Number(process.env.E2E_PORT) || (await findFreePort());
 const BASE = `http://127.0.0.1:${port}`;
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'conv-notify-e2e-'));
+// 预置「已配置用户」settings：空数据目录会被 onboarding 判为新用户，
+// 引导罩覆盖全屏后所有点击都被拦截（详见 helpers.mjs 的说明）。
+seedConfiguredSettings(dataDir);
 const settingsFile = path.join(dataDir, 'settings.json');
 const notifyFile = path.join(dataDir, 'conv-notify.json');
 
@@ -225,14 +229,13 @@ try {
 
   // ==================== ② 配好飞书 ====================
   console.log('── ② 配好飞书：点亮 / 快照 / 切会话 / 轮询上屏 + claim ──');
-  // 直写 settings.json：getSettings() 每次读盘无缓存，不必重启服务端
-  fs.writeFileSync(
-    settingsFile,
-    JSON.stringify({
-      bots: [{ id: 'bot_t', name: 'T', platform: 'feishu', appId: 'a', appSecret: 's', enabled: true }],
-      myFeishuOpenId: 'ou_test',
-    }),
-  );
+  // 直写 settings.json：getSettings() 每次读盘无缓存，不必重启服务端。
+  // 走 writeSettings 而非手写整个对象 —— 覆写是整体替换，漏掉 tokens 会把用例
+  // 打回「新用户」，后续开页面即被 onboarding 引导罩接管并挡住所有点击。
+  writeSettings(settingsFile, {
+    bots: [{ id: 'bot_t', name: 'T', platform: 'feishu', appId: 'a', appSecret: 's', enabled: true }],
+    myFeishuOpenId: 'ou_test',
+  });
   {
     const { ctx, page } = await openPage();
     page.assertNoErrors('启动');

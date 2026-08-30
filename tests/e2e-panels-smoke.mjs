@@ -37,11 +37,25 @@ try {
   // 设置页全部 tab
   await page.click('#settingsBtn');
   await page.waitForSelector('#settingsTabs', { state: 'visible', timeout: 3000 });
-  for (const tab of ['basic', 'lark', 'messages', 'tokens', 'providers', 'mcp', 'actions']) {
+  // tab 列表**从 DOM 动态读取**，不写死。
+  // 教训（2026-08-28）：这里原先硬编码 ['basic','lark','messages','tokens',...]，
+  // 而 lark / messages / tokens 三个 tab 早已在重构中消失、又新增了 claude / custom / desktop。
+  // 结果本门禁长期卡在 `waiting for button[data-tab="lark"]` 超时失败，
+  // 而它不在 `npm test` 里、只能手动跑，于是**没人发现安全网已经锈掉**。
+  // 必须按可见性过滤：`desktop` tab 带 hidden 属性，只在 Tauri 桌面版才显出来，
+  // 浏览器里点它会一直等到超时。offsetParent 判可见比查 hidden 属性可靠 ——
+  // 隐藏也可能是 CSS 控制的。
+  const tabs = await page.$$eval('#settingsTabs button[data-tab]', (els) =>
+    els.filter((e) => e.offsetParent !== null).map((e) => e.dataset.tab),
+  );
+  // 下限断言不可省：选择器一旦失效会返回空数组，for 循环直接跳过 → 假绿通过。
+  if (tabs.length < 3) fail(`设置 tab 只读到 ${tabs.length} 个（${tabs.join(',')}），选择器可能已失效`);
+  for (const tab of tabs) {
     await page.click(`#settingsTabs button[data-tab="${tab}"]`);
     const visible = await page.isVisible(`.set-tab[data-tab="${tab}"]`);
     if (!visible) fail(`设置 tab ${tab} 未显示`);
   }
+  console.log(`  设置 tab 已遍历 ${tabs.length} 个: ${tabs.join(', ')}`);
   assertNoErrors('设置页');
 
   // 需求/故障、访问日志、JSON 工具视图

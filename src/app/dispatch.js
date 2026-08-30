@@ -1,7 +1,10 @@
 /**
  * 路由核心 —— 把统一 Context 分发到某个 feature。
  * 顺序：未完成会话状态优先 → owner 兜底(match) → 意图匹配(permission + intents) → 帮助。
- * 加功能不改这里，只在 features/index.js 注册。
+ *
+ * 加功能不改这里：业务功能一律作为插件挂载（`src/plugins/`，清单在 plugins/index.js），
+ * 由 features/index.js 按 order 与内核 claude-exec 合并。契约见 docs/ARCHITECTURE.md
+ * 「Feature 契约与装配」。（早期版本是「在 features/index.js 注册」，现已不再登记业务 feature。）
  */
 import { classify } from './intent.js';
 import { features } from '../features/index.js';

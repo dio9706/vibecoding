@@ -75,25 +75,27 @@ claude-p-web-demo/
 │   │  └── 📂 web/
 │   │      └── server.js          # Web 服务器入口（HTTP + SSE）
 │   │
-│   ├─ 📂 features/               # 业务功能模块
-│   │  ├── index.js               # 功能导出汇总
-│   │  ├── task-ops.js            # 任务操作（分析、开发）
+│   ├─ 📂 capabilities/           # 通用能力（无业务语义，可被任意上层复用）
 │   │  ├── token-rotation.js      # Token 轮换管理 ⭐ 降级机制核心
-│   │  ├── token-rotation.test.js # Token 轮换测试
+│   │  ├── llm-classify.js        # LLM 分类（意图/动作判定的公共骨架）
+│   │  └── llm-readonly-agent.js  # 只读 agent（禁写工具的受限调用）
+│   │
+│   ├─ 📂 features/               # 内核 feature + 不走 dispatch 的功能模块
+│   │  ├── index.js               # 装配：内核 + 启用插件按 order 合并
 │   │  │
-│   │  ├── 📂 claude-exec/        # Claude 执行器
-│   │  │  └── index.js            # 执行任务和生成代码
+│   │  ├── 📂 claude-exec/        # 内核 feature：owner 全接（order 20）
+│   │  │  └── index.js
 │   │  │
-│   │  ├── 📂 data-cleanup/       # 数据清理和维护
-│   │  │  └── index.js            # 清理日志、缓存等
-│   │  │
-│   │  ├── 📂 feedback/           # 反馈系统
-│   │  │  └── index.js            # 收集和管理反馈
-│   │  │
-│   │  └── 📂 task-triage/        # 任务分类和分级
-│   │     ├── index.js            # 分类模块入口
-│   │     ├── logic.js            # 分类算法逻辑
-│   │     └── logic.test.js       # 分类逻辑单元测试
+│   │  ├── 📂 memory-bank/        # 记忆库：转录提炼 → 记忆条目
+│   │  ├── 📂 project-checkup/    # 项目体检（五个检测器）
+│   │  └── 📂 project-optimize/   # 一键优化（rules 降级 + 备份还原）
+│   │
+│   ├─ 📂 plugins/                # 业务插件（settings.plugins 可启停，停用即不加载）
+│   │  ├── index.js               # PLUGIN_MANIFEST + 动态加载
+│   │  ├── 📂 team-tools/         # 需求/故障收集、待办分诊、自动开发、状态汇报
+│   │  ├── 📂 action-runner/      # 配置驱动的动作执行（脚本 + 槽位填充）
+│   │  ├── 📂 feishu-relay/       # web 会话的飞书回控
+│   │  └── 📂 tracking-stats/     # 埋点统计
 │   │
 │   ├─ 📂 integrations/           # 外部服务集成
 │   │  ├── claude.js              # Claude Agent SDK 封装 ⭐ 核心
@@ -171,9 +173,13 @@ entrypoints/
   - 卡片富文本交互
   - 与 web 服务器共享数据存储
 
-### 3️⃣ **features/** - 业务功能实现
+### 3️⃣ **capabilities/ 与 features/** - 通用能力与功能实现
 
-#### 📌 **token-rotation.js** - Token 轮换与降级机制 ⭐
+> `capabilities/` 放通用能力（无业务语义，任意上层可复用）；
+> `features/` 放内核 feature 与不走 dispatch 的功能模块；
+> 业务功能一律在 `plugins/`。判据与检验命令见 `docs/ARCHITECTURE.md` 的「关键约定」。
+
+#### 📌 **capabilities/token-rotation.js** - Token 轮换与降级机制 ⭐
 ```javascript
 // 核心降级流程
 getActiveToken()        // 获取当前可用 Token
@@ -319,7 +325,7 @@ failRun()        // 标记为失败
 项目内置多层降级机制，确保服务可用性：
 
 ### 1. **Token 轮换降级**
-**文件**: `src/features/token-rotation.js`
+**文件**: `src/capabilities/token-rotation.js`
 
 ```javascript
 // 当前 Token 限流 → 自动切换备用 Token
@@ -425,7 +431,7 @@ settings: {
 |------|------|---------|
 | `src/entrypoints/web/server.js` | Web 服务器核心 | `createRun()`, `runSend()` |
 | `src/integrations/claude.js` | Claude 调用接口 | `runClaude()` |
-| `src/features/token-rotation.js` | Token 管理 | `getActiveToken()` |
+| `src/capabilities/token-rotation.js` | Token 管理 | `getActiveToken()` |
 | `src/store/runs.js` | 运行状态管理 | `subscribe()`, `finishRun()` |
 | `src/app/dispatch.js` | 请求分发 | `dispatch()` |
 | `src/features/task-triage/logic.js` | 任务分类 | `classifyTier()` |

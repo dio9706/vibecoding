@@ -35,7 +35,7 @@ fs.writeFileSync(
 );
 
 const { isChitchat, classify, INTENT_CLASSIFY_TIMEOUT_MS } = await import('./intent.js');
-const { isPoolExhausted } = await import('../features/token-rotation.js');
+const { isPoolExhausted } = await import('../capabilities/token-rotation.js');
 const { matchStrongIntent } = await import('./intent-keywords.js');
 const { REGISTRY } = await import('../shared/messages.js');
 

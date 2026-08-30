@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { appDataPath } from '../shared/app-paths.js';
-import { dirSlug } from '../entrypoints/web/req-uispec.logic.js';
+import { dirSlug } from '../shared/dir-slug.js';
 
 function specPath(dir) {
   const root = appDataPath('ui-specs');

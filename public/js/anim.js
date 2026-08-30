@@ -7,9 +7,13 @@
         function hasAnime() { return typeof anime !== 'undefined'; }
 
         // anime.js v4 API 兼容层：
-        //   - v4 IIFE 中 anime.createDrawable 已移至 anime.svg.createDrawable
-        //   - v4 不含 scrambleText / splitText，用原生 rAF 实现等价效果
+        //   - v4 中 anime.createDrawable 已移至 anime.svg.createDrawable
+        //   - scrambleText / splitText 用原生 rAF 实现等价效果
         //   - v4 timeline.add() 位置参数只支持数值(ms)，不再支持 "<+N" 字符串格式
+        //
+        // 注：anime 4.5.0 起官方已提供 scrambleText / splitText（4.1.4 时还没有，故当初自己实现）。
+        // 这里刻意不迁移——现有原生实现工作正常且无依赖，换成官方 API 是纯粹的重写风险。
+        // 若日后要动这块动画，可以考虑改用官方实现以减少代码量。
 
         // ---------- 1. Claude 卡通吉祥物状态管理 ----------
         let _vibeDrawn = false;

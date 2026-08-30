@@ -2,7 +2,7 @@
  * 提炼输入（按会话分组的用户原话）→ 候选偏好条目。LLM 层。
  * 复用 runClassifierOnce（额度耗尽 fail-fast / 30s 超时 / 单轮禁工具 / 首个 JSON 块提取）。
  */
-import { runClassifierOnce } from '../llm-classify.js';
+import { runClassifierOnce } from '../../capabilities/llm-classify.js';
 import { attributeTurn } from './prefilter.js';
 import { config } from '../../shared/config.js';
 import { logger } from '../../shared/logger.js';

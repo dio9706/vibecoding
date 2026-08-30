@@ -6,7 +6,7 @@
  */
 import { getTasks, getTask, updateTask } from '../../../store/tasks.js';
 import { sendText } from '../../../integrations/lark.js';
-import { runClassifierOnce } from '../../../features/llm-classify.js';
+import { runClassifierOnce } from '../../../capabilities/llm-classify.js';
 import { config } from '../../../shared/config.js';
 import { develop, analyze } from '../task-ops.js';
 import { groupPending, sortForTriage, parseAction, parseYesNo } from './logic.js';
@@ -64,7 +64,7 @@ async function pumpQueue() {
   }
 }
 
-// ---- 意图兜底：关键词未命中时用 Claude 判 action（骨架细节见 features/llm-classify）----
+// ---- 意图兜底：关键词未命中时用 Claude 判 action（骨架细节见 capabilities/llm-classify）----
 // 行为修正：disallowedTools 补全 Agent/Task（原缺失，历史事故来源）+ 新增额度耗尽 fail-fast（原无）
 async function classifyAction(text) {
   const j = await runClassifierOnce({

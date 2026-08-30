@@ -33,6 +33,8 @@
 | [CONFIGURATION.md](#configuration) | 初次配置、敏感文件 | 环境变量、凭证来源、安全自查 |
 | [HISTORY_FEATURE.md](#history) | 历史检索 | 如何查看和恢复历史会话 |
 | [action-config*.md](#action_config) | 自定义脚本 | 如何添加触发词动作、脚本配置格式 |
+| [RETRY_LOGIC.md](RETRY_LOGIC.md) | 排查任务随机失败 | `Response stalled mid-stream` 的指数退避重试机制 |
+| [archive/](archive/README.md) | 追溯历史决策 | 已完成阶段的报告与蓝图，**不代表当前状态** |
 
 ---
 

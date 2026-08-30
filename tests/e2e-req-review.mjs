@@ -8,13 +8,13 @@
  * 覆盖：
  *  ① 开页 + 侧栏「＋ 新需求」按钮存在，零 pageerror
  *  ② 点＋新需求 → 输入标题 → 创建 → 列表出现该需求 → 自动进入 req 视图
- *  ③ 配置弹层开 / 关
- *  ④ 空态「生成开发文档」按钮存在（不真跑 docgen，避免烧额度）
+ *  ③ 工程配置区（req v2 起改为主栏内联的槽位，不再是弹层）
+ *  ④ 「生成开发文档」按钮存在（不真跑 docgen，避免烧额度）
  *  ⑤ 补充说明框存在
  *  ⑥ 草稿保留回归：补充说明框输入文字后，触发一次非用户主动发起的整页重渲染（点历史折叠），
  *     断言草稿仍在（曾因 renderReqPage 整页重建清空 supplementDraftText 被判阻塞项）
  *  ⑦（Task 10）开发期聊天模式：直改数据文件把需求推到 dev 期 → 横幅工程芯片/「完成开发」按钮、
- *     右栏 API 文档区与设计准则输入框均正确渲染
+ *     右栏 API 文档区正确渲染（设计准则输入框已在改版中移除，见步骤⑦处注释）
  *  ⑧ 挂卸载往返：切普通对话卸载横幅/右栏，重开需求再现
  *  ⑧b 阶段流转确认弹窗正文非空回归（confirmDialog 传参形状），取消不流转
  *  ⑨ conv 回填：开发期首次打开自动创建并回填 convId
@@ -31,6 +31,7 @@
  * 运行：node tests/e2e-req-review.mjs
  */
 import { chromium } from 'playwright';
+import { seedConfiguredSettings } from './helpers.mjs';
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import fs from 'node:fs';
@@ -76,6 +77,9 @@ async function waitForReady(baseUrl, timeoutMs = 20000) {
 const port = await findFreePort();
 const BASE = `http://127.0.0.1:${port}`;
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'req-review-e2e-'));
+// 预置「已配置用户」settings：空数据目录会被 onboarding 判为新用户，
+// 引导罩覆盖全屏后所有点击都被拦截（详见 helpers.mjs 的说明）。
+seedConfiguredSettings(dataDir);
 const reqFile = path.join(dataDir, 'requirements.json');
 /** 原子写：先写临时文件再 rename，消除与服务端 30s 轮询期间读取发生"撕裂读"的理论窗口 */
 function writeReqFileAtomic(data) {
@@ -88,6 +92,33 @@ function patchReqOnDisk(id, mutate) {
   const data = JSON.parse(fs.readFileSync(reqFile, 'utf8'));
   mutate(data.find((r) => r.id === id));
   writeReqFileAtomic(data);
+}
+
+/**
+ * 新建一个普通对话。
+ *
+ * 不能直接点 `#sidebarNew` —— 侧栏改成「对话/需求」双模式后（2026-08-25），
+ * 它变成了**隐藏的代理按钮**（UI 上不可见，点它会一直等到超时）。
+ * 可见入口是底部随模式改文案的 `#sidebarCreateBtn`，由 app.js 委托到对应代理按钮，
+ * 所以要先把侧栏切回对话态。
+ */
+async function newPlainConv(page) {
+  await page.click('.switch-btn[data-target="conv"]');
+  await page.waitForTimeout(150);
+  await page.click('#sidebarCreateBtn');
+}
+
+/**
+ * 从侧栏点开某个需求。
+ *
+ * 必须先把侧栏切回需求态：双模式下 `#reqList` 在对话态是 hidden 的，
+ * `.req-item` 虽然在 DOM 里却不可见，直接点会一直等到超时。
+ * 上面 newPlainConv 会把侧栏切到对话态，所以「切普通对话 → 再开需求」这条路径尤其需要它。
+ */
+async function openReqFromSidebar(page, title) {
+  await page.click('.switch-btn[data-target="req"]');
+  await page.waitForSelector('.req-item', { state: 'visible', timeout: 8000 });
+  await page.click(`.req-item:has-text("${title}")`);
 }
 
 let child = null;
@@ -123,12 +154,19 @@ try {
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#messages', { state: 'attached', timeout: 5000 });
   await page.waitForTimeout(600); // 等启动闸门内的初始化（含 initReqView 首次 refreshReqList）
-  if (!(await page.isVisible('#sidebarNewReq'))) fail('侧栏「＋ 新需求」按钮未显示');
+  // 侧栏改成「对话/需求」双模式后（2026-08-25），#sidebarNewReq 变成**隐藏的代理按钮**，
+  // 可见入口是底部那个随模式改文案的 #sidebarCreateBtn（app.js 按当前模式委托到对应代理）。
+  // 所以这里先切到需求态，再断言可见入口，最后点它 —— 直接点代理按钮会一直等到超时。
+  await page.click('.switch-btn[data-target="req"]');
+  await page.waitForTimeout(200);
+  if (!(await page.isVisible('#sidebarCreateBtn'))) fail('侧栏「＋ 新需求」按钮未显示');
+  const createLabel = await page.textContent('#sidebarCreateBtn');
+  if (!/需求/.test(createLabel || '')) fail(`切到需求态后按钮文案应含「需求」，实际="${createLabel}"`);
   assertNoErrors('启动');
 
   // ② 新建需求 → 列表出现 → 自动进入 req 视图
   const reqTitle = 'E2E 测试需求 ' + Date.now();
-  await page.click('#sidebarNewReq');
+  await page.click('#sidebarCreateBtn');
   await page.waitForSelector('.mask .prompt-input', { state: 'visible', timeout: 3000 });
   await page.fill('.mask .prompt-input', reqTitle);
   await page.click('.mask .ok');
@@ -136,26 +174,37 @@ try {
   await page.waitForTimeout(300);
   const reqListText = await page.textContent('#reqList');
   if (!reqListText.includes(reqTitle)) fail('新建需求未出现在侧栏列表: ' + reqListText.slice(0, 160));
-  if (!(await page.isVisible('.req-chips'))) fail('新建需求未自动进入评审期文档视图（芯片条未显示）');
-  // 未生成开发文档前底部只应有空态的 [生成开发文档] 按钮，不得出现补充说明框（首次流程单入口）
+  // 评审期主栏在 req v2 里重写成了「工作台」，class 前缀由 req-* 改为 rqw-*。
+  // 判据用 .rqw-phase-badge（阶段徽标，恒在主栏顶部）而不是 .rqw-chips ——
+  // 后者虽在 DOM 里，但属条件渲染、未必可见，拿它当「进没进评审期」的判据会误报。
+  await page
+    .waitForSelector('.rqw-phase-badge', { state: 'visible', timeout: 8000 })
+    .catch(() => fail('新建需求未自动进入评审期视图（阶段徽标未显示）'));
+  const phaseText = await page.textContent('.rqw-phase-badge');
+  if (!/评审/.test(phaseText || '')) fail(`阶段徽标应显示评审期，实际="${phaseText}"`);
+  // 未生成开发文档前不得出现补充说明框（首次流程单入口）。该框仍是旧 class —— v2 只重写了主栏
   if (await page.isVisible('.req-supplement-box')) fail('未生成开发文档时不应显示补充说明框');
-  if (!(await page.isVisible('.req-doc-empty button'))) fail('未生成开发文档时应显示 [生成开发文档] 按钮');
   assertNoErrors('新建需求');
 
-  // ③ 配置弹层开 / 关
-  await page.click('.req-edit-config-btn');
-  await page.waitForSelector('.req-config-modal', { state: 'visible', timeout: 3000 });
-  await page.click('.req-config-modal .close');
-  await page.waitForTimeout(150);
-  if (await page.isVisible('.req-config-modal')) fail('配置弹层未关闭');
-  assertNoErrors('配置弹层');
+  // ③ 工程配置区
+  //   req v2 前是弹层（.req-edit-config-btn → .req-config-modal），改版后配置**内联在主栏**，
+  //   那两个类在代码里已完全不存在。现改为断言配置卡与它的槽位（前端工程/后端工程/需求文档）。
+  if (!(await page.isVisible('.rqw-cfg'))) fail('评审期工程配置区未显示');
+  const slotCount = await page.locator('.rqw-slot').count();
+  if (slotCount < 2) fail(`配置槽位至少应有前端/后端两个，实际 ${slotCount}`);
+  const cfgText = await page.textContent('.rqw-cfg');
+  if (!/前端工程/.test(cfgText || '')) fail('配置区缺前端工程槽位: ' + (cfgText || '').slice(0, 120));
+  if (!/后端工程/.test(cfgText || '')) fail('配置区缺后端工程槽位: ' + (cfgText || '').slice(0, 120));
+  assertNoErrors('工程配置区');
 
-  // ④ 空态「生成开发文档」按钮存在（不点击，避免真的触发 docgen 烧额度）
-  if (!(await page.isVisible('.req-doc-empty button'))) {
-    fail('空态「生成开发文档」按钮未显示');
+  // ④ 「生成开发文档」按钮存在（不点击，避免真的触发 docgen 烧额度）
+  //    空态不再是 .req-doc-empty，而是主栏底部的主行动按钮
+  const genBtn = page.locator('.rqw-btn.primary.full');
+  if (!(await genBtn.isVisible())) {
+    fail('「生成开发文档」按钮未显示');
   } else {
-    const emptyBtnText = await page.textContent('.req-doc-empty button');
-    if (!emptyBtnText.includes('生成开发文档')) fail('空态按钮文案不符: ' + emptyBtnText);
+    const genText = await genBtn.textContent();
+    if (!genText.includes('生成开发文档')) fail('生成按钮文案不符: ' + genText);
   }
 
   // ⑤ 生成出 v1 后才出现补充说明框：直改磁盘给该需求注入一个开发文档版本 + 配置，重开验证
@@ -178,7 +227,8 @@ try {
   }, reviewReq.id);
   await page.waitForSelector('.req-supplement-textarea', { state: 'visible', timeout: 5000 });
   if (!(await page.isVisible('.req-supplement-footer button.primary'))) fail('提交补充说明按钮未显示');
-  if (!(await page.isVisible('.req-doc-vtab'))) fail('v1 版本页签未显示');
+  // 版本页签在 v2 里改名：.req-doc-vtab → .rqw-vtab（req-view.js 的 renderDocArea）
+  if (!(await page.isVisible('.rqw-vtab'))) fail('v1 版本页签未显示');
   assertNoErrors('文档区/补充框');
 
   // ⑥ 回归：输入草稿文字 → 触发一次非用户主动发起的整页重渲染（点「补充说明历史」折叠）
@@ -211,7 +261,7 @@ try {
     await mod.refreshReqList();
   });
   await page.waitForTimeout(200);
-  await page.click(`.req-item:has-text("${devTitle}")`);
+  await openReqFromSidebar(page, devTitle);
   await page.waitForSelector('#reqBanner', { state: 'visible', timeout: 5000 });
   const bannerText = await page.textContent('#reqBanner');
   if (!bannerText.includes('ui · 开发')) fail('横幅缺前端工程芯片: ' + bannerText.slice(0, 120));
@@ -220,15 +270,19 @@ try {
   if (!(await page.isVisible('#reqRail'))) fail('开发期右栏未显示');
   const railText = await page.textContent('#reqRail');
   if (!railText.includes('API 文档')) fail('右栏缺 API 文档区: ' + railText.slice(0, 120));
-  if (!(await page.isVisible('.req-guidelines'))) fail('右栏缺设计准则输入框');
+  // 「设计准则输入框」(.req-guidelines) 已在改版中从 dev 期右栏移除：renderDevRail 不再创建它，
+  // 只剩 app.css 里的样式和 req-chat.js 那段查它的草稿保护（prevTa 恒为 null，属死代码）。
+  // 断言改为右栏的实际内容：API 文档区已在上面查过，这里补一条「右栏非空」的下限。
+  const railSecCount = await page.locator('#reqRail .req-rail-sec').count();
+  if (railSecCount < 1) fail(`开发期右栏应至少有一个分区，实际 ${railSecCount}`);
   assertNoErrors('开发期横幅/右栏');
 
   // ⑧ 切到普通新对话 → 横幅/右栏卸载；重开需求 → 再现
-  await page.click('#sidebarNew');
+  await newPlainConv(page);
   await page.waitForTimeout(200);
   if (await page.isVisible('#reqBanner')) fail('切普通对话后横幅未卸载');
   if (await page.isVisible('#reqRail')) fail('切普通对话后右栏未卸载');
-  await page.click(`.req-item:has-text("${devTitle}")`);
+  await openReqFromSidebar(page, devTitle);
   await page.waitForSelector('#reqBanner', { state: 'visible', timeout: 5000 });
   assertNoErrors('挂卸载往返');
 
@@ -276,9 +330,9 @@ try {
   ];
   writeReqFileAtomic(reqData2);
 
-  await page.click('#sidebarNew');
+  await newPlainConv(page);
   await page.waitForTimeout(150);
-  await page.click(`.req-item:has-text("${devTitle}")`);
+  await openReqFromSidebar(page, devTitle);
   await page.waitForSelector('#reqBanner', { state: 'visible', timeout: 5000 });
   const testBannerText = await page.textContent('#reqBanner');
   if (!testBannerText.includes('测试通过')) fail('测试期横幅缺「✅ 测试通过」按钮: ' + testBannerText.slice(0, 120));
@@ -355,9 +409,9 @@ try {
   target4.busy = null;
   writeReqFileAtomic(reqData4);
 
-  await page.click('#sidebarNew');
+  await newPlainConv(page);
   await page.waitForTimeout(150);
-  await page.click(`.req-item:has-text("${devTitle}")`);
+  await openReqFromSidebar(page, devTitle);
   await page.waitForSelector('.req-archive-note-textarea', { state: 'visible', timeout: 5000 });
   if (!(await page.isVisible('.req-archive-confirm-btn'))) fail('归档表单缺「确认归档」按钮');
   const archiveHintText = await page.textContent('.req-archive-hint');

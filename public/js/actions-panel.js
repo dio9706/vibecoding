@@ -2,6 +2,7 @@
  *  由 bots-panel 经 setActionsBot(botId) 注入当前机器人上下文后才加载/新建。 */
 import { $, escapeHtml } from './util.js';
 import { toast, confirmDialog } from './ui.js';
+import { getJson, postJson, putJson, delJson } from './api.js';
 
       let currentBotId = null; // 当前编辑中的机器人（动作归属）
 
@@ -15,8 +16,9 @@ import { toast, confirmDialog } from './ui.js';
       async function loadActions() {
         if (!currentBotId) return [];
         try {
-          const res = await fetch('/api/actions?botId=' + encodeURIComponent(currentBotId));
-          return await res.json();
+          // 该接口直接返回数组，不是 {actions:[...]}
+          const { data } = await getJson('/api/actions?botId=' + encodeURIComponent(currentBotId));
+          return Array.isArray(data) ? data : [];
         } catch (e) {
           console.error('加载动作配置失败', e);
           return [];
@@ -121,6 +123,8 @@ import { toast, confirmDialog } from './ui.js';
           const file = fileInput.files[0];
           if (!file) return;
           try {
+            // 刻意不走 api.js：请求体是 File 二进制，不是 JSON。
+            // postJson 会强加 Content-Type: application/json 并 JSON.stringify 掉它。
             const res = await fetch('/api/scripts/upload?name=' + encodeURIComponent(file.name), {
               method: 'POST',
               body: file,
@@ -232,14 +236,9 @@ import { toast, confirmDialog } from './ui.js';
         };
 
         const url = actionId ? `/api/actions/${actionId}` : '/api/actions';
-        const method = actionId ? 'PUT' : 'POST';
 
         try {
-          const res = await fetch(url, {
-            method,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
+          const res = actionId ? await putJson(url, payload) : await postJson(url, payload);
           if (res.ok) {
             $('#actionFormPanel').style.display = 'none';
             await renderActionsList();
@@ -255,7 +254,7 @@ import { toast, confirmDialog } from './ui.js';
       async function deleteAction(actionId) {
         if (!(await confirmDialog({ title: '删除动作', message: '确认删除该动作？', danger: true }))) return;
         try {
-          const res = await fetch(`/api/actions/${actionId}`, { method: 'DELETE' });
+          const res = await delJson(`/api/actions/${actionId}`);
           if (res.ok) {
             await renderActionsList();
           } else {

@@ -1,6 +1,6 @@
 /** web 入口：任务档位判定（关键词快判 + Haiku 极速分类，自动选 model/effort 省额度） */
 import { runClaude } from '../../integrations/claude.js';
-import { claudeAuthOpts } from '../../features/token-rotation.js';
+import { claudeAuthOpts } from '../../capabilities/token-rotation.js';
 
 /** 关键词快速判档（省一次分类往返）；命中返回 {model,effort}，未命中返回 null */
 export function quickTier(prompt) {

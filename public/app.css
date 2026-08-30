@@ -3592,20 +3592,9 @@
 }
 .req-apidoc-item button.name:hover { color: var(--accent, #d97757); text-decoration: underline; }
 .req-apidoc-item.uploading { opacity: 0.6; }
-.req-guidelines-confirm { margin-top: 6px; }
 .req-rail-empty { color: var(--faint, #777); font-size: 12px; }
-.req-guidelines {
-  width: 100%;
-  min-height: 120px;
-  resize: vertical;
-  border: 1px solid var(--border, #2a2a35);
-  border-radius: 8px;
-  background: var(--bg, #111);
-  color: inherit;
-  font-size: 12.5px;
-  padding: 8px;
-  box-sizing: border-box;
-}
+/* 已删除 .req-guidelines / .req-guidelines-confirm：设计准则输入框已从 dev 期右栏移除，
+   renderDevRail 不再创建该元素，这两条是无主样式。 */
 
 /* ---- 测试期 BUG 面板（Task 12） ---- */
 .req-rail .req-bitable-form { display: flex; gap: 6px; margin-bottom: 10px; }

@@ -99,12 +99,16 @@ const run = async () => {
     chip = await askChipState(page);
     if (!chip.hidden) fail('聊天视图下 #askChip 不应显示，实际: ' + JSON.stringify(chip));
 
-    // 4) 切到任务面板视图：#askChip 应显示「⏳ 1 待确认」
+    // 4) 切到任务面板视图：#askChip 应显示「<沙漏图标> 1 待确认」
     await page.click('#taskBtn');
     await page.waitForTimeout(150);
     chip = await askChipState(page);
     if (chip.hidden) fail('任务视图下 #askChip 应显示');
-    if (!/⏳\s*1\s*待确认/.test(chip.text)) fail('#askChip 文案不符预期: ' + chip.text);
+    // 不要求 ⏳ 字符：图标已从 emoji 改为内联 SVG（chat.js 走 setIconText + WAITING_ICON_SVG），
+    // textContent 里自然不含 emoji。断言文字部分即可，图标另行单独查。
+    if (!/1\s*待确认/.test(chip.text)) fail('#askChip 文案不符预期: ' + chip.text);
+    const hasIcon = await page.evaluate(() => !!document.querySelector('#askChip svg'));
+    if (!hasIcon) fail('#askChip 缺少沙漏 SVG 图标');
 
     // 5) 切到日志视图：#askChip 仍应显示（离开聊天视图即算）
     await page.click('#logBtn');

@@ -47,14 +47,19 @@
 │                 │                                                     │
 │  ┌──────────────┴─────────────────────────────────────┐             │
 │  │                                                     │             │
-│  │  【核心业务层】src/features/                       │             │
+│  │  【能力层】src/capabilities/ (通用，无业务语义)     │             │
 │  │  ├─ token-rotation.js  (特性④⑦: 多账号轮换)       │             │
-│  │  ├─ claude-exec/       (执行编排)                 │             │
-│  │  ├─ task-ops.js        (任务分析)                 │             │
-│  │  ├─ task-triage/       (owner 待办分诊)           │             │
-│  │  ├─ action-runner/     (特性⑤: 脚本执行)         │             │
-│  │  ├─ feedback/          (故障反馈)                 │             │
-│  │  └─ notify.js          (通知/表情)                │             │
+│  │  ├─ llm-classify.js    (LLM 分类)                 │             │
+│  │  └─ llm-readonly-agent.js (只读 agent)            │             │
+│  │                                                     │             │
+│  │  【功能层】src/features/ (内核) + src/plugins/      │             │
+│  │  ├─ features/claude-exec/  (内核: owner 全接)     │             │
+│  │  ├─ features/memory-bank/  (记忆库)               │             │
+│  │  ├─ features/project-*/    (项目体检 / 优化)      │             │
+│  │  └─ plugins/  (业务插件，settings 可启停)          │             │
+│  │      ├─ team-tools/    (需求/故障/待办/埋点)       │             │
+│  │      ├─ action-runner/ (特性⑤: 脚本执行)         │             │
+│  │      └─ feishu-relay/  (会话飞书回控)             │             │
 │  │                                                     │             │
 │  │  【状态管理层】src/store/                          │             │
 │  │  ├─ runs.js            (task 管理 + 权限队列)    │             │
@@ -211,7 +216,7 @@ result 回复到飞书会话（群聊自动 @ 提问人）
 
 ### 特性④ 多 Claude 订阅账户
 
-**关键模块**：`store/settings.js` + `features/token-rotation.js` + `integrations/claude.js`
+**关键模块**：`store/settings.js` + `capabilities/token-rotation.js` + `integrations/claude.js`
 
 **配置**：Web 设置页 ⚙ → Claude 账号 tab
 - 添加多个 token（`sk-ant-oat01-xxx`）
@@ -219,7 +224,7 @@ result 回复到飞书会话（群聊自动 @ 提问人）
 
 **自动选号机制**：
 ```
-features/token-rotation.pickActive()
+capabilities/token-rotation.pickActive()
   ├─ 扫描 settings.json 里所有 token
   ├─ 按健康度排序：healthy > warning > rejected
   ├─ 同级按 updatedAt 最近排序
@@ -251,7 +256,7 @@ settings.json 更新 token 状态
 
 ### 特性⑤ 自定义脚本
 
-**关键模块**：`features/action-runner/` + `store/action-configs.js` + `/api/actions` 端点
+**关键模块**：`plugins/action-runner/` + `store/action-configs.js` + `/api/actions` 端点
 
 **配置步骤**：
 
@@ -352,7 +357,7 @@ pending-resume.json 写入（跨重启持久化）
 
 ### 特性⑦ 额度耗尽后新窗口自动切下一个账号
 
-**关键模块**：`features/token-rotation.js pickActive()`
+**关键模块**：`capabilities/token-rotation.js pickActive()`
 
 **原理**：特性④ 已是「多账号 + 自动选号」；特性⑦ 就是「当当前号限流时，pickActive() 返回下一个可用号」。
 
@@ -525,7 +530,7 @@ return candidates[0]
 
 ---
 
-## 总结
+## 七大特性总结
 
 Principal 通过以下设计实现 7 大特性：
 
@@ -534,10 +539,10 @@ Principal 通过以下设计实现 7 大特性：
 | ① 关窗续跑 | 后端进程 + PM2 + 状态落盘 | `store/active-runs.json`, `ecosystem.config.cjs` |
 | ② 历史检索 | 会话归档 + 侧栏搜索 | `store/history.js`, `/api/history` |
 | ③ 飞书接入 | WSClient 长连接 + 热重载 | `entrypoints/feishu/`, `integrations/lark.js` |
-| ④ 多账号 | token 池 + 自动选号 | `store/settings.js`, `features/token-rotation.js` |
-| ⑤ 自定义脚本 | 触发词 + action-runner | `action-configs.json`, `features/action-runner/` |
+| ④ 多账号 | token 池 + 自动选号 | `store/settings.js`, `capabilities/token-rotation.js` |
+| ⑤ 自定义脚本 | 触发词 + action-runner | `action-configs.json`, `plugins/action-runner/` |
 | ⑥ 额度续跑 | 定时器 + 熔断机制 | `store/pending-resume.json`, `server.js` 定时器 |
-| ⑦ 自动切号 | `pickActive()` + status 更新 | `features/token-rotation.js` |
+| ⑦ 自动切号 | `pickActive()` + status 更新 | `capabilities/token-rotation.js` |
 
 **核心设计思想**：
 - **后端进程常驻**（PM2 守护）→ 关窗续跑
@@ -547,111 +552,147 @@ Principal 通过以下设计实现 7 大特性：
 - **自动选号与降级**（token 池）→ 多账号无缝切换
 
 既保留了 Claude Code 的完整能力，又让它适应团队级、生产级的协作场景。
-  intents: string[];                       // 关注的意图，如 ['cleanup']
-  match?: (ctx) => boolean;                // 可选：自定义命中（如 owner 的兜底全接）
-  handle: (ctx, intentResult) => Promise<void>;
-}
-```
-
-**加新功能的完整步骤**：
-1. `features/<name>/index.js` 导出 `Feature`；
-2. 在 `features/index.js` 注册；
-3. 若需新意图，在 `intent` 的分类提示里加一类（关键词可留空，靠 Claude + 自学习）。
-
-**不改** 入口、router、store、集成。这就是「加功能 = 加模块」。
 
 ---
 
-## 6. 任务状态机（规划 3 / 4 的地基）
+## Feature 契约与装配
 
-bug / 需求 / 大开发都是一个 **Task**，落在 `store/tasks`：
+上面「七大特性」讲的是纵向能力，这一节讲横向扩展点：**加一个新的对话功能要往哪落。**
+
+### Feature 契约
+
+`app/dispatch.js` 消费的就是这个形状（以代码为准，勿照抄本表去改 dispatch）：
 
 ```ts
-interface Task {
-  id: string;
-  type: 'bug' | 'feature' | 'big-feature';
-  title: string; detail: string;
-  source: { via: 'feishu'; openId: string };
-  status: 'new' | 'confirmed' | 'analyzing' | 'analyzed'
-        | 'developing' | 'done' | 'rejected';
-  docs?: { feishuDoc?: string; figma?: string; apiDoc?: string; notes?: string[] };
-  analysis?: { suggestion: string; files: string[] };  // Claude 产出
-  history: { at: string; event: string }[];
+interface Feature {
+  name: string;                                 // 日志里的标识
+  permission: 'any' | 'owner' | 'guest';        // 与 ctx.user.role 比对
+  intents: string[];                            // 关注的意图，如 ['bug', 'feature']
+  hasPending?: (ctx) => boolean;                // 有未完成会话（如追问中）→ 抢在意图识别之前接管
+  match?: (ctx) => boolean;                     // 自定义命中，用于 owner 兜底全接
+  handle: (ctx, intentResult) => Promise<any>;  // 可返回 PASS 把消息交还 dispatch
 }
 ```
 
-- **状态迁移**由 feature（`feedback`/`dev-task`/`doc-driven`）驱动，web 管理台展示与操作（确认/补充/触发）。
-- **文档驱动（规划4）**：`doc-driven` 监听某 Task 的 `docs` 补充事件 → 判断「可开发部分」→ 调 `integrations/claude` 开发 → 更新 `status`/`history`。文档分批到、会变化，都只是往 `task.docs` 追加 + 触发一次评估。
-
----
-
-## 7. 目录结构（目标）
+### dispatch 的四段顺序
 
 ```
-src/
-├── entrypoints/
-│   ├── web/        server.js(瘦)、routes/(run/dirs/logs/tasks 各一文件)、public/
-│   └── feishu/     长连接入口、ctx 适配（含表情 react 实现）
-├── app/
-│   ├── dispatch.js router：权限 + 意图 + 分发
-│   └── intent.js   关键词+Claude+自学习
-├── features/
-│   ├── index.js    注册表
-│   ├── claude-exec/    (owner 完整 Claude)
-│   ├── data-cleanup/   (现有清理，迁入)
-│   ├── qrcode/         (规划1)
-│   ├── feedback/       (规划2)
-│   ├── dev-task/       (规划3)
-│   └── doc-driven/     (规划4)
-├── integrations/
-│   ├── claude.js       (=现 run-claude)
-│   ├── lark.js         (发消息/表情/文件，从 feishu.js 抽出)
-│   ├── shell.js        (python/CLI 执行，从 data-cleanup 抽出)
-│   ├── miniprogram.js  (规划1：小程序 CLI)
-│   ├── notify.js       (规划2：系统通知)
-│   └── figma.js        (规划4)
-├── store/
-│   ├── index.js        (json 读写基座，最多 N 条、原子写)
-│   └── <domain>.js     (bindings/cleanupLog/feedback/tasks/docs/…)
-└── shared/  config.js · logger.js · util.js
+0. hasPending 命中        → 交给它；若返回 PASS 则交还，继续往下
+1. match 命中             → 交给它（owner 兜底走这条）
+2. 意图识别 → permission + intents 双匹配 → 交给第一个命中的
+3. 都不匹配               → 回欢迎卡
 ```
 
----
+`hasPending` 是**同步**判定，判不出「这条到底是不是在回答追问」，所以必须有 `PASS`
+这条退路 —— 否则一次动作追问会把该用户后续所有消息都粘住（已发生过的事故）。
 
-## 8. 四个规划功能的落位（验证架构够用）
+### 装配路径
 
-| # | 功能 | feature | 依赖的 integrations / store |
-|---|------|---------|------------------------------|
-| 1 | 二维码 | `qrcode`（intent: qrcode） | `miniprogram`(CLI 生成) + `lark`(发图) |
-| 2 | 需求/bug 记录 | `feedback`（intent: bug/feature） | `store/tasks`(存) + `notify`(系统提示) + web 管理台展示 |
-| 3 | 确认→分析→开发 | `dev-task` | `store/tasks`(状态机) + `claude`(分析代码/开发) + web(确认/补充) |
-| 4 | 文档驱动开发 | `doc-driven` | `store/tasks.docs` + `claude` + `figma`/飞书文档；docs 补充即触发评估 |
+```
+src/features/index.js
+  ├─ CORE：claude-exec（order 20，owner 全接）
+  └─ loadEnabledPluginFeatures()  ← 业务功能全部从这里来
+       └─ src/plugins/index.js  PLUGIN_MANIFEST
+```
 
-四个都只是「新增一个 feature + 复用集成/存储」，印证架构不需为它们改公共层。
+- **业务功能一律是插件**，不再往 `features/index.js` 登记。内核只留 `claude-exec`。
+- 停用的插件**不 import**（动态 `load()`）——「内核更纯」是实打实的：进程根本不载入那段业务代码。
+- 启停走 `settings.json` 的 `plugins` 节，缺省为启用（向后兼容）。
+- 单个插件加载失败会被隔离并告警，不拖垮内核启动。
+- `order` 决定匹配优先级，小者先。**业务插件的 order 必须小于 claude-exec 的 20**，
+  否则对 owner 发的消息，`claude-exec` 的 `match` 会先全部接走，插件永远等不到。
+  现有取值见各插件 `index.js` 顶部注释（都写明了为什么占那个数）。
 
----
+### 加一个新功能
 
-## 9. 迁移路线（增量，每步可验证，不推倒重来）
-
-> 现功能全程保持可用；每阶段跑 `node --check` + 手测关键路径。
-
-- **阶段 0（准备）**：建 `src/` 骨架 + `store` 基座 + `shared/config`。
-- **阶段 1（抽集成）**：`run-claude`→`integrations/claude`；飞书发消息/表情→`integrations/lark`；python spawn→`integrations/shell`。各 JSON 读写→`store/<domain>`。**行为不变**，只是搬家 + 改引用。
-- **阶段 2（抽核心）**：`app/intent`(把 data-cleanup 里的意图/自学习提出来) + `app/dispatch`(权限+路由)。`data-cleanup` 改造成 `features/data-cleanup`（符合 Feature 契约）。
-- **阶段 3（瘦入口）**：`feishu.js`/`server.js` 只保留协议适配 + 产出 Context + 调 dispatch；owner 逻辑变 `features/claude-exec`。
-- **阶段 4（web 管理台）**：web 从「纯聊天」扩展出 tab：对话 / 清理日志 / 需求任务 / 目录设置（为规划 2/3/4 铺路）。
-- **阶段 5+**：按你逐个细化，依次落地 `qrcode`→`feedback`→`dev-task`→`doc-driven`。
-
----
-
-## 10. 关键约定
-
-- 依赖单向向下；`features` 之间不互相 import（要协作走 `store`/事件）。
-- 外部系统只经 `integrations`；持久化只经 `store`；env 只经 `shared/config`。
-- 每个 feature 自包含、可独立读懂与测试。
-- 破坏性/外呼操作（清理、开发改码、发消息）在 feature 层显式确认或留痕（`store/*-log`）。
-- 增量提交可工作的代码；单文件过大即拆。
+1. 建 `src/plugins/<id>/index.js`，default 导出 `{ id, features: [{ order, feature }] }`；
+2. 在 `src/plugins/index.js` 的 `PLUGIN_MANIFEST` 登记（id + description + 动态 `load`）；
+3. 需要新意图时，在 `app/intent.js` 的分类里加一类；
+4. **不改** dispatch、入口、store、集成 —— 「加功能 = 加插件」。
 
 ---
 
-_本文件为架构蓝图。功能细节随你逐个细化时，补到各 `features/<name>/README.md`。_
+## 关键约定
+
+约定必须**可判定**，否则迟早退化成装饰 —— 2026-08-28 的体检就发现原来那版
+「持久化只经 store」在实测里有 21 处越界，其中大多数其实是正当的，
+但约定没写清边界，导致既无法判断谁违规、也就无人再当回事。
+所以下面每条都给出**怎么验**和**正当例外**。
+
+### 1. 分层与依赖方向
+
+```
+entrypoints → app → features / plugins → capabilities → integrations / store → shared
+```
+
+**下层不得 import 上层。** 验（应全部为空）：
+
+```bash
+grep -rn "from '.*\(features\|plugins\|entrypoints\|app\)/" src/store src/shared src/integrations src/capabilities --include="*.js" | grep -v test
+```
+
+**插件之间不得互相 import**（要协作走 `store` 或事件）。验：
+
+```bash
+grep -rn "from '.*plugins/" src/plugins --include="*.js" | grep -v test
+```
+
+> 注意匹配的是 **import 路径**里的 `plugins/`，不是文件所在路径 ——
+> 写成 `grep "plugins/"` 会把每一行 `../../shared/...` 都算进去（因为文件本身就在 `src/plugins/` 下），
+> 得到一份全是误报的清单。
+
+插件**可以**依赖 `capabilities/` —— 那是共享能力，不是别人的业务。
+
+### 2. `features` / `capabilities` / `integrations` 的分工
+
+这三个最容易混。判据：
+
+| 目录 | 放什么 | 判据 |
+|---|---|---|
+| `features/` | 内核 feature（`claude-exec`，走 dispatch）+ 不走 dispatch 的独立功能模块（`memory-bank`、`project-checkup`、`project-optimize`） | 是产品功能；**不被其它 feature / 插件 import** |
+| `capabilities/` | 通用能力：`llm-classify`（LLM 分类）、`token-rotation`（账号轮换）、`llm-readonly-agent`（只读 agent） | 换个业务场景仍能原样复用；**自身不 import 任何 feature / plugin / entrypoint**（可 grep 验证，见上）。判据是性质而非使用次数 —— `llm-readonly-agent` 目前只有一个调用方，但它是通用机制 |
+| `integrations/` | 外部系统适配：Claude SDK、飞书、shell、系统通知 | 有对外 IO |
+
+> 历史教训：`llm-classify` / `token-rotation` 原先放在 `features/` 里，被 7 处插件依赖，
+> 使得「feature 之间不互相 import」这条约定**必然失效**。它们本就是基础能力而非业务功能，
+> 2026-08-28 迁至 `capabilities/`，约定才重新自洽。
+
+### 3. 持久化
+
+**本项目自身的状态**一律经 `store/`（它负责跨进程文件锁与 tmp+rename 原子写）。
+
+**正当例外**（不算违规）：
+
+- `shared/logger.js` 写日志 —— 它自己就是基础设施，不能反过来依赖 store；
+- `features/project-optimize`、`features/project-checkup` 写**用户项目**的文件 —— 那是功能本身；
+- `integrations/` 落临时文件（如 lark 下载的附件）。
+
+验：下面命中的每一项都必须落在上述例外内。
+
+```bash
+grep -rn "writeFileSync\|appendFileSync" src --include="*.js" | grep -v test | grep -v "^src/store/"
+```
+
+### 4. 环境变量
+
+业务代码只经 `shared/config`。
+
+**正当例外**：`APP_DATA_DIR` 的路径解析（`store/index.js`、`shared/app-paths.js`）——
+`config` 自身依赖它们，不可能反过来。
+
+### 5. 其它
+
+- 破坏性 / 外呼操作（清理、改码、发消息）在 feature 层显式确认或留痕（`store/*-log`）。
+- 单文件过大即拆。
+- 前端渲染任何来自后端或模型的文本，一律 `createElement` + `textContent`；
+  必须渲染 markdown 时走 `util.js` 的 `renderMarkdown`（内含强制消毒），**禁裸 innerHTML**。
+- `public/vendor/` 的三方库由 `npm run sync:vendor` 从 node_modules 同步，
+  版本见 `public/vendor/VERSIONS.md`，**不要手工替换**（构建前的 `--check` 会拦下漂移）。
+- 卡片回调的 kind 处理器由**各插件自注册**（`registerCardKindHandler`），
+  `shared/card-actions.js` 只提供注册表机制、不含任何 kind 的实现 ——
+  这样插件停用时对应 kind 自然没有处理器。
+
+---
+
+_2026-07 期的迁移路线与规划功能落位（已完成的历史蓝图）见
+`archive/ARCHITECTURE-legacy-sections-6-10.md`。_

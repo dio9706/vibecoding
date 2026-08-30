@@ -17,7 +17,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { runClassifierOnce } from '../llm-classify.js';
+import { runClassifierOnce } from '../../capabilities/llm-classify.js';
 import { logger } from '../../shared/logger.js';
 import {
   pickSampleFiles,

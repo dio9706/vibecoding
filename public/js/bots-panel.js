@@ -4,6 +4,7 @@ import { $ } from './util.js';
 import { toast, confirmDialog } from './ui.js';
 import { setActionsBot } from './actions-panel.js';
 import { iconHtml, DELETE_ICON_SVG, EDIT_ICON_SVG } from './icons.js';
+import { getJson, postJson, putJson, delJson } from './api.js';
 
 let editingId = null; // 非空 = 编辑既有机器人
 let messagesMeta = []; // 可配文案元数据 [{key,label,defaultText}]（GET /api/bots 返回）
@@ -23,10 +24,9 @@ function paintAutonomyHint() {
 
 async function loadBots() {
   try {
-    const r = await fetch('/api/bots');
-    const d = await r.json();
-    messagesMeta = d.messagesMeta || [];
-    return d.bots || [];
+    const { data } = await getJson('/api/bots');
+    messagesMeta = data?.messagesMeta || [];
+    return data?.bots || [];
   } catch {
     return [];
   }
@@ -65,13 +65,8 @@ export async function renderBotList() {
 
 async function toggleBot(id, enabled) {
   try {
-    const r = await fetch('/api/bots/' + encodeURIComponent(id), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled }),
-    });
-    const d = await r.json();
-    if (!r.ok || d.error) toast(d.error || '切换失败');
+    const { ok, data: d } = await putJson('/api/bots/' + encodeURIComponent(id), { enabled });
+    if (!ok || d?.error) toast(d?.error || '切换失败');
     else toast(enabled ? '已启用，其余机器人自动停用' : '已停用');
   } catch {
     toast('网络错误');
@@ -141,13 +136,8 @@ async function saveBot() {
   };
   try {
     const url = editingId ? '/api/bots/' + encodeURIComponent(editingId) : '/api/bots';
-    const r = await fetch(url, {
-      method: editingId ? 'PUT' : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const d = await r.json();
-    if (!r.ok || d.error) return toast(d.error || '保存失败');
+    const { ok, data: d } = editingId ? await putJson(url, payload) : await postJson(url, payload);
+    if (!ok || d?.error) return toast(d?.error || '保存失败');
     toast('机器人已保存，下一条消息生效');
     await renderBotList();
     if (!editingId && d.bot) {
@@ -169,11 +159,10 @@ async function deleteBot(bot) {
   });
   if (!ok) return;
   try {
-    const r = await fetch('/api/bots/' + encodeURIComponent(bot.id), { method: 'DELETE' });
-    const d = await r.json();
-    if (!r.ok || d.error) return toast(d.error || '删除失败');
+    const { ok, data: d } = await delJson('/api/bots/' + encodeURIComponent(bot.id));
+    if (!ok || d?.error) return toast(d?.error || '删除失败');
     if (editingId === bot.id) closeBotForm();
-    toast(d.removedActions ? `已删除（含 ${d.removedActions} 条动作）` : '已删除');
+    toast(d?.removedActions ? `已删除（含 ${d.removedActions} 条动作）` : '已删除');
     await renderBotList();
   } catch {
     toast('网络错误');
@@ -185,9 +174,9 @@ $('#botProjectDirPickBtn')?.addEventListener('click', async () => {
   const btn = $('#botProjectDirPickBtn');
   btn.disabled = true;
   try {
-    const r = await (await fetch('/api/dirs/pick')).json();
-    if (r.path) $('#botProjectDir').value = r.path;
-    else if (r.error) toast(r.error);
+    const { data: r } = await getJson('/api/dirs/pick');
+    if (r?.path) $('#botProjectDir').value = r.path;
+    else if (r?.error) toast(r.error);
     // r.path=null：用户取消，忽略
   } catch {
     toast('调用系统对话框失败');

@@ -10,7 +10,7 @@ import { hasActiveRunForConv, createRun, getRun } from '../../store/runs.js';
 import { getPending } from '../../store/pending-resume.js';
 import { startClaudeRun } from './run-claude.js';
 import { runClaude } from '../../integrations/claude.js';
-import { claudeAuthOpts } from '../../features/token-rotation.js';
+import { claudeAuthOpts } from '../../capabilities/token-rotation.js';
 import { runScript } from '../../integrations/shell.js';
 import { appDataPath } from '../../shared/app-paths.js';
 import { logger } from '../../shared/logger.js';

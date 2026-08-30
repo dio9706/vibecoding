@@ -9,7 +9,7 @@ import {
   searchBitableRecords,
   resolveWikiNodeObj,
 } from '../../integrations/lark.js';
-import { runClassifierOnce } from '../../features/llm-classify.js';
+import { runClassifierOnce } from '../../capabilities/llm-classify.js';
 import { reviewTask } from '../../plugins/team-tools/review/index.js';
 import { getRequirement, updateRequirement } from '../../store/requirements.js';
 import { getMyFeishuOpenId } from '../../store/settings.js';

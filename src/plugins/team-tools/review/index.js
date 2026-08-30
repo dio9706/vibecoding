@@ -4,7 +4,7 @@
  * 每次判决记入判例库（review-log.jsonl），人工覆盖沉淀为后续校准素材。
  */
 import { runClaude } from '../../../integrations/claude.js';
-import { claudeAuthOpts } from '../../../features/token-rotation.js';
+import { claudeAuthOpts } from '../../../capabilities/token-rotation.js';
 import { config } from '../../../shared/config.js';
 import { logger } from '../../../shared/logger.js';
 import { getActiveBot } from '../../../store/settings.js';

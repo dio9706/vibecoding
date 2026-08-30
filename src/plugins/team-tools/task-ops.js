@@ -6,7 +6,7 @@
 import { updateTask, getTasks } from '../../store/tasks.js';
 import { systemNotify } from '../../integrations/notify.js';
 import { runClaude } from '../../integrations/claude.js';
-import { claudeAuthOpts } from '../../features/token-rotation.js';
+import { claudeAuthOpts } from '../../capabilities/token-rotation.js';
 import { config } from '../../shared/config.js';
 import { logger } from '../../shared/logger.js';
 import { botScopePrompt } from '../../shared/bot-scope.js';

@@ -8,11 +8,12 @@ import { config } from '../../shared/config.js';
 import { logger } from '../../shared/logger.js';
 import { appendEvent } from '../../store/event-log.js';
 import { checkOrigin } from './origin.js';
+import { matchRouteFrom, findShadowedRoutes } from './route-match.js';
 import { installProcessGuards } from '../../shared/process-guard.js';
 
 // 最后兜底：单个畸形请求不得打死进程（runs 是纯内存的，一崩全灭）。详见 process-guard.js。
 installProcessGuards();
-import { scheduleAllSwitchBacks } from '../../features/token-rotation.js';
+import { scheduleAllSwitchBacks } from '../../capabilities/token-rotation.js';
 import { recoverPendingAndOrphans } from './run-claude.js';
 import { startRequirementPump } from './requirement-ops.js';
 import { startAutoDevPump } from '../../plugins/team-tools/auto-dev/index.js';
@@ -102,6 +103,111 @@ const ACCESS_LOG_SKIP = new Set([
   '/api/conv-notify/sync', // 同上，会话快照心跳
 ]);
 
+/**
+ * 路由表 —— **按顺序**匹配的数组。加端点只往这张表里加一行，不再动请求处理函数。
+ *
+ * 为什么是数组而不是 Map：匹配顺序有语义。`/api/history` 的精确匹配必须先于
+ * `/api/history/` 的前缀匹配；`/api/credentials` 的 GET/POST 必须先于
+ * `/api/credentials/` 的 PUT/DELETE。Map 表达不了顺序，而拆成「精确 Map + 前缀数组」
+ * 又要额外论证两者之间的优先级，反而更容易错。
+ * 59 条线性字符串比较对本地服务可忽略 —— 原实现同样是 59 个顺序 if。
+ *
+ * 为什么每条都包一层箭头函数：现有 handler 的签名**并不统一**，有 `(req,res)`、
+ * `(res)`、`(url,res)`、`(req,res,url)`，还有 `(res,url)`（handleActionsGet 独一份）。
+ * 在表里做适配，就不必为了统一签名去改 30 多个 handler 和它们的测试。
+ *
+ * 约定：`path` 精确匹配，`prefix` 前缀匹配，`method` 可选（缺省=不限方法）；
+ * handler 返回 `false` 表示「这条我不处理」，匹配继续往后走 ——
+ * conv-notify 的子路由表用到这一点（它未命中时不自行 404）。
+ */
+const ROUTES = [
+  { path: '/api/run/start', h: (req, res) => handleRunStart(req, res) },
+  { path: '/api/run/abort', h: (req, res) => handleRunAbort(req, res) },
+  { path: '/api/run/decision', h: (req, res) => handleRunDecision(req, res) },
+  { path: '/api/run/send', h: (req, res) => handleRunSend(req, res) },
+  { path: '/api/run/msg/withdraw', h: (req, res) => handleRunMsgWithdraw(req, res) },
+  { path: '/api/run/msg/now', h: (req, res) => handleRunMsgNow(req, res) },
+  { path: '/api/run/set-mode', h: (req, res) => handleRunSetMode(req, res) },
+  { path: '/api/run/pending', h: (req, res) => handleRunPending(res) },
+  { path: '/api/run/pending/dismiss', h: (req, res) => handleRunPendingDismiss(req, res) },
+  { path: '/api/run', h: (req, res, url) => handleRunAttach(url, res) },
+  { path: '/api/history', h: (req, res, url) => handleHistory(url, res) },
+  // 前缀必须排在上面的精确匹配之后
+  { prefix: '/api/history/', h: (req, res, url) => handleHistoryDetail(url, res) },
+  { path: '/api/upload', h: (req, res, url) => handleUpload(req, res, url) },
+  { path: '/api/fs/stat', h: (req, res) => handleFsStat(req, res) },
+  { path: '/api/fs/read', h: (req, res, url) => handleFsRead(url, res) },
+  { path: '/api/dirs/browse', h: (req, res, url) => handleBrowse(url, res) },
+  { path: '/api/dirs/pick', h: (req, res) => handlePickDir(res) },
+  { path: '/api/dirs/saved', h: (req, res) => handleSaved(req, res) },
+  { path: '/api/logs', h: (req, res) => handleLogs(res) },
+  { path: '/api/logs/clear', h: (req, res) => handleLogsClear(req, res) },
+  { path: '/api/bot-logs', h: (req, res) => handleBotLogs(res) },
+  { path: '/api/bot-logs/clear', h: (req, res) => handleBotLogsClear(req, res) },
+  { path: '/api/tasks', h: (req, res) => handleTasks(res) },
+  { path: '/api/tasks/action', h: (req, res) => handleTaskAction(req, res) },
+  // 返回 false 时继续往后匹配（见表头说明）
+  { prefix: '/api/conv-notify/', h: (req, res, url) => handleConvNotifyRoutes(req, res, url) },
+  { prefix: '/api/req/', h: (req, res, url) => handleRequirementRoutes(req, res, url) },
+  { prefix: '/api/memory/', h: (req, res, url) => handleMemoryRoutes(req, res, url) },
+  { prefix: '/api/optimize/', h: (req, res, url) => handleOptimizeRoutes(req, res, url) },
+  { path: '/api/settings', h: (req, res) => handleSettings(req, res) },
+  { path: '/api/settings/export', h: (req, res) => handleSettingsExport(req, res) },
+  { path: '/api/settings/import', h: (req, res) => handleSettingsImport(req, res) },
+  { path: '/api/tokens/status', h: (req, res) => handleTokensStatus(res) },
+  { path: '/api/tokens/list', h: (req, res) => handleTokensList(res) },
+  { path: '/api/tokens/switch', h: (req, res) => handleTokensSwitch(req, res) },
+  { path: '/api/tokens/dismiss', h: (req, res) => handleTokensDismiss(req, res) },
+  { path: '/api/credentials', method: 'GET', h: (req, res) => handleCredentialsList(res) },
+  { path: '/api/credentials', method: 'POST', h: (req, res) => handleCredentialsAdd(req, res) },
+  { prefix: '/api/credentials/', method: 'PUT', h: (req, res, url) => handleCredentialsUpdate(req, res, url) },
+  { prefix: '/api/credentials/', method: 'DELETE', h: (req, res, url) => handleCredentialsDelete(req, res, url) },
+  { path: '/api/plugins', method: 'GET', h: (req, res) => handlePluginsList(res) },
+  { prefix: '/api/plugins/', method: 'PUT', h: (req, res, url) => handlePluginsUpdate(req, res, url) },
+  { path: '/api/mcp-servers', method: 'GET', h: (req, res) => handleMcpServersList(res) },
+  { path: '/api/mcp-servers', method: 'POST', h: (req, res) => handleMcpServersAdd(req, res) },
+  { prefix: '/api/mcp-servers/', method: 'PUT', h: (req, res, url) => handleMcpServersUpdate(req, res, url) },
+  { prefix: '/api/mcp-servers/', method: 'DELETE', h: (req, res, url) => handleMcpServersDelete(req, res, url) },
+  { path: '/api/bots', method: 'GET', h: (req, res) => handleBotsList(res) },
+  { path: '/api/bots', method: 'POST', h: (req, res) => handleBotsAdd(req, res) },
+  { prefix: '/api/bots/', method: 'PUT', h: (req, res, url) => handleBotsUpdate(req, res, url) },
+  { prefix: '/api/bots/', method: 'DELETE', h: (req, res, url) => handleBotsDelete(req, res, url) },
+  // 注意参数顺序是 (res, url)，与相邻 handler 都不同 —— 表内适配的价值就在这
+  { path: '/api/actions', method: 'GET', h: (req, res, url) => handleActionsGet(res, url) },
+  { path: '/api/actions', method: 'POST', h: (req, res) => handleActionsPost(req, res) },
+  { prefix: '/api/actions/', method: 'PUT', h: (req, res, url) => handleActionsPut(req, res, url) },
+  { prefix: '/api/actions/', method: 'DELETE', h: (req, res, url) => handleActionsDelete(req, res, url) },
+  { path: '/api/scripts/upload', h: (req, res, url) => handleScriptUpload(req, res, url) },
+  { path: '/api/scripts', h: (req, res) => handleScripts(res) },
+  { path: '/api/ping', h: (req, res) => handlePing(res) },
+  { path: '/api/open-in-vibe', h: (req, res) => handleOpenInVibe(req, res) },
+  { path: '/internal/notify', h: (req, res) => handleNotify(req, res) },
+];
+
+// 启动自检：新加端点时把顺序放错（精确排在能覆盖它的前缀之后）会导致该端点
+// 静默 404 或被错误的 handler 接走。这里让它在启动时就喊出来，而不是等线上排查。
+const shadowed = findShadowedRoutes(ROUTES);
+if (shadowed.length) {
+  for (const s of shadowed) {
+    logger.error('routing', '路由被前面的前缀遮蔽，永远不会命中', s);
+  }
+}
+
+/**
+ * 在路由表里找到第一个命中的条目并执行。
+ * @returns {boolean} 是否已被某条路由处理（false 时调用方走静态托管兜底）
+ */
+function routeRequest(req, res, url) {
+  let from = 0;
+  for (;;) {
+    const m = matchRouteFrom(ROUTES, req.method, url.pathname, from);
+    if (!m) return false;
+    // 子路由表未命中时会回 false，此时不算已处理，从下一条继续匹配
+    if (m.route.h(req, res, url) !== false) return true;
+    from = m.index + 1;
+  }
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   // CORS：打包后 Tauri webview（源 tauri.localhost）跨源访问本机后端。
@@ -142,68 +248,7 @@ const server = http.createServer((req, res) => {
       }),
     );
   }
-  if (url.pathname === '/api/run/start') return handleRunStart(req, res);
-  if (url.pathname === '/api/run/abort') return handleRunAbort(req, res);
-  if (url.pathname === '/api/run/decision') return handleRunDecision(req, res);
-  if (url.pathname === '/api/run/send') return handleRunSend(req, res);
-  if (url.pathname === '/api/run/msg/withdraw') return handleRunMsgWithdraw(req, res);
-  if (url.pathname === '/api/run/msg/now') return handleRunMsgNow(req, res);
-  if (url.pathname === '/api/run/set-mode') return handleRunSetMode(req, res);
-  if (url.pathname === '/api/run/pending') return handleRunPending(res);
-  if (url.pathname === '/api/run/pending/dismiss') return handleRunPendingDismiss(req, res);
-  if (url.pathname === '/api/run') return handleRunAttach(url, res);
-  if (url.pathname === '/api/history') return handleHistory(url, res);
-  if (url.pathname.startsWith('/api/history/')) return handleHistoryDetail(url, res);
-  if (url.pathname === '/api/upload') return handleUpload(req, res, url);
-  if (url.pathname === '/api/fs/stat') return handleFsStat(req, res);
-  if (url.pathname === '/api/fs/read') return handleFsRead(url, res);
-  if (url.pathname === '/api/dirs/browse') return handleBrowse(url, res);
-  if (url.pathname === '/api/dirs/pick') return handlePickDir(res);
-  if (url.pathname === '/api/dirs/saved') return handleSaved(req, res);
-  if (url.pathname === '/api/logs') return handleLogs(res);
-  if (url.pathname === '/api/logs/clear') return handleLogsClear(req, res);
-  if (url.pathname === '/api/bot-logs') return handleBotLogs(res);
-  if (url.pathname === '/api/bot-logs/clear') return handleBotLogsClear(req, res);
-  if (url.pathname === '/api/tasks') return handleTasks(res);
-  if (url.pathname === '/api/tasks/action') return handleTaskAction(req, res);
-  if (url.pathname.startsWith('/api/conv-notify/')) {
-    // 该子路由未命中时返回 false（不自行 404），此处放行继续往后匹配
-    const handled = handleConvNotifyRoutes(req, res, url);
-    if (handled !== false) return handled;
-  }
-  if (url.pathname.startsWith('/api/req/')) return handleRequirementRoutes(req, res, url);
-  if (url.pathname.startsWith('/api/memory/')) return handleMemoryRoutes(req, res, url);
-  if (url.pathname.startsWith('/api/optimize/')) return handleOptimizeRoutes(req, res, url);
-  if (url.pathname === '/api/settings') return handleSettings(req, res);
-  if (url.pathname === '/api/settings/export') return handleSettingsExport(req, res);
-  if (url.pathname === '/api/settings/import') return handleSettingsImport(req, res);
-  if (url.pathname === '/api/tokens/status') return handleTokensStatus(res);
-  if (url.pathname === '/api/tokens/list') return handleTokensList(res);
-  if (url.pathname === '/api/tokens/switch') return handleTokensSwitch(req, res);
-  if (url.pathname === '/api/tokens/dismiss') return handleTokensDismiss(req, res);
-  if (url.pathname === '/api/credentials' && req.method === 'GET') return handleCredentialsList(res);
-  if (url.pathname === '/api/credentials' && req.method === 'POST') return handleCredentialsAdd(req, res);
-  if (url.pathname.startsWith('/api/credentials/') && req.method === 'PUT') return handleCredentialsUpdate(req, res, url);
-  if (url.pathname.startsWith('/api/credentials/') && req.method === 'DELETE') return handleCredentialsDelete(req, res, url);
-  if (url.pathname === '/api/plugins' && req.method === 'GET') return handlePluginsList(res);
-  if (url.pathname.startsWith('/api/plugins/') && req.method === 'PUT') return handlePluginsUpdate(req, res, url);
-  if (url.pathname === '/api/mcp-servers' && req.method === 'GET') return handleMcpServersList(res);
-  if (url.pathname === '/api/mcp-servers' && req.method === 'POST') return handleMcpServersAdd(req, res);
-  if (url.pathname.startsWith('/api/mcp-servers/') && req.method === 'PUT') return handleMcpServersUpdate(req, res, url);
-  if (url.pathname.startsWith('/api/mcp-servers/') && req.method === 'DELETE') return handleMcpServersDelete(req, res, url);
-  if (url.pathname === '/api/bots' && req.method === 'GET') return handleBotsList(res);
-  if (url.pathname === '/api/bots' && req.method === 'POST') return handleBotsAdd(req, res);
-  if (url.pathname.startsWith('/api/bots/') && req.method === 'PUT') return handleBotsUpdate(req, res, url);
-  if (url.pathname.startsWith('/api/bots/') && req.method === 'DELETE') return handleBotsDelete(req, res, url);
-  if (url.pathname === '/api/actions' && req.method === 'GET') return handleActionsGet(res, url);
-  if (url.pathname === '/api/actions' && req.method === 'POST') return handleActionsPost(req, res);
-  if (url.pathname.startsWith('/api/actions/') && req.method === 'PUT') return handleActionsPut(req, res, url);
-  if (url.pathname.startsWith('/api/actions/') && req.method === 'DELETE') return handleActionsDelete(req, res, url);
-  if (url.pathname === '/api/scripts/upload') return handleScriptUpload(req, res, url);
-  if (url.pathname === '/api/scripts') return handleScripts(res);
-  if (url.pathname === '/api/ping') return handlePing(res);
-  if (url.pathname === '/api/open-in-vibe') return handleOpenInVibe(req, res);
-  if (url.pathname === '/internal/notify') return handleNotify(req, res);
+  if (routeRequest(req, res, url)) return;
   return serveStatic(url.pathname, res);
 });
 

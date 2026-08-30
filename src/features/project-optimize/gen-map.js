@@ -9,7 +9,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { runReadonlyAgent } from '../llm-readonly-agent.js';
+import { runReadonlyAgent } from '../../capabilities/llm-readonly-agent.js';
 import { logger } from '../../shared/logger.js';
 import { collectRootFacts, collectModuleFacts } from './map-facts.js';
 import {

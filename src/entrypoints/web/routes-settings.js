@@ -42,7 +42,7 @@ import {
   getActiveTokenId,
   getTokenById,
   maskToken,
-} from '../../features/token-rotation.js';
+} from '../../capabilities/token-rotation.js';
 import { sendJson } from './http-util.js';
 import { withJsonBody } from './body.js';
 import { str, safeDecodeId } from './input.js';

@@ -23,7 +23,7 @@
  * 模型压根看不见。runClassifierOnce 内部已经是 `disallowedTools: ['*']`（见 llm-classify.js），
  * 所以本模块不传任何工具相关参数，别在这里覆盖它。
  */
-import { runClassifierOnce } from '../llm-classify.js';
+import { runClassifierOnce } from '../../capabilities/llm-classify.js';
 import { logger } from '../../shared/logger.js';
 
 /**

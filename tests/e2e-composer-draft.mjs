@@ -86,7 +86,12 @@ const run = async () => {
   await page.addInitScript(initScript);
   page.on('pageerror', (e) => pageErrors.push(e.message));
   await page.goto(BASE, { waitUntil: 'load' });
-  await page.waitForTimeout(500);
+  // 等启动初始化完成（cwd 异步拉取）。固定 sleep 在慢机器上不够，
+  // 点太早会让 send() 因 cwd 未就绪提前返回，表现为「点了没反应」。
+  await page.waitForFunction(() => !!document.querySelector('#dirLabel')?.textContent?.trim(), null, {
+    timeout: 15000,
+  });
+  await page.waitForTimeout(300);
 
   const results = [];
   const check = (name, ok, detail) => {
@@ -97,7 +102,9 @@ const run = async () => {
   // ── 准备两个已落地的会话 ──
   await sendOnce(page, 'TASK_A');
   const afterA = await convIds(page);
-  await page.click('#sidebarNew');
+  // 走真实用户路径：#sidebarNew 是**隐藏**的代理按钮（UI 上不可见，点它会超时），
+  // 可见入口是侧栏底部的「＋ 新建对话」，由 app.js 按当前侧栏模式委托到对应代理按钮。
+  await page.click('#sidebarCreateBtn');
   await page.waitForTimeout(200);
   await sendOnce(page, 'TASK_B');
   const both = await convIds(page);

@@ -5,7 +5,7 @@
  *   ①窗口末尾 —— 距当前计费窗口重置 <30 分钟且额度正常，用本来要作废的额度，边际成本最低；
  *   ②凌晨窗口 —— 保底路径。若某天拿不到 windowResetsAt（SDK 未推限流事件），①自动失效，②仍可跑。
  *
- * token 语义与 src/features/token-rotation.js 对齐（就地复刻谓词，不 import 该文件——
+ * token 语义与 src/capabilities/token-rotation.js 对齐（就地复刻谓词，不 import 该文件——
  * 它在模块级 import 了 store/settings.js，会把 IO 依赖带进来，破坏本文件的纯函数可测性）：
  *   - warning（对应 SDK 的 allowed_warning）是「可用」状态而非耗尽，选号要退而取之（对齐 pickActive）；
  *   - 选号 / 耗尽判定都必须先按 providerId 过滤——getTokens() 返回的是跨 provider 混放的全量池，

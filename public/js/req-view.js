@@ -1,6 +1,6 @@
 /** 需求视图 —— 侧栏需求列表 + 评审设计期文档模式（P1 范围；dev/test 聊天模式与横幅右栏见 Task 10）。
  *  导出 initReqView（绑定入口 + 启动列表轮询）/ openRequirement（打开单个需求）/ refreshReqList（刷新侧栏列表）。 */
-import { $, fmtTime, renderMarkdown, dirTail } from './util.js';
+import { $, fmtTime, renderMarkdown, dirTail, lsSet } from './util.js';
 import { confirmDialog, promptDialog, textareaDialog } from './ui.js';
 import { loadConvs } from './conv-store.js';
 import { openConv, createReqConv, isConvRunning, getCurrentConvId, sendMessageProgrammatically } from './chat.js';
@@ -98,9 +98,9 @@ function loadReqPinned() {
 }
 
 function saveReqPinned() {
-  try {
-    localStorage.setItem(REQ_PINNED_LS_KEY, Array.from(reqPinnedIds).join(','));
-  } catch {}
+  // 走 util.js 的 lsSet 而不是裸 setItem + 空 catch：写失败（配额满 / 隐私模式）
+  // 至少留一行 console.warn，否则「置顶怎么点了没保存」完全无迹可寻。
+  lsSet(REQ_PINNED_LS_KEY, Array.from(reqPinnedIds).join(','));
 }
 
 function isReqPinned(reqId) {

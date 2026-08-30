@@ -10,7 +10,7 @@ import { ensureImport } from '../../shared/claude-md.js';
 import { readBank, writeBank } from '../../store/memory-bank.js';
 import { getMemoryBankSettings } from '../../store/settings.js';
 import { listActiveRuns, isPidAlive } from '../../store/active-runs.js';
-import { getTokens } from '../token-rotation.js';
+import { getTokens } from '../../capabilities/token-rotation.js';
 import { readUserLog } from '../../store/user-log.js';
 import { buildExtractionInput } from './prefilter.js';
 import { extractFromSessions } from './extract.js';

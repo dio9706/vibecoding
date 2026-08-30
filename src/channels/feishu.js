@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getLarkCredentials } from '../shared/config.js';
 import {
-  larkSdk,
+  getLarkSdk,
   createWsClient,
   resetApiClient,
   sendText,
@@ -189,25 +189,34 @@ export function createFeishuChannel() {
   // 卡片回调处理器（由上级注册）
   let _onCardAction = null;
 
-  const dispatcher = new larkSdk.EventDispatcher({}).register({
-    'im.message.receive_v1': async (data) => {
-      (async () => {
-        const inbound = await toInbound(data);
-        if (inbound && _onInbound) await _onInbound(inbound);
-      })().catch((e) => logger.error('feishu', '处理失败', { err: e?.message || String(e) }));
-    },
-    'im.message.reaction.created_v1': async (data) => {
-      // 表情回复事件（可选，目前未使用）
-    },
-    'card.action.trigger': async (data) => {
-      // 卡片按钮点击回调
-      if (_onCardAction) {
+  // 懒创建（单例）：飞书 SDK 现在是按需加载的（见 integrations/lark.js 文件头），
+  // 拿不到同步的命名空间。dispatcher 只在 startWs 里用一次，延后到那时创建即可 ——
+  // 它是无状态的事件路由表，闭包变量（_onInbound / _onCardAction）照常捕获。
+  let _dispatcher = null;
+  async function getDispatcher() {
+    if (_dispatcher) return _dispatcher;
+    const larkSdk = await getLarkSdk();
+    _dispatcher = new larkSdk.EventDispatcher({}).register({
+      'im.message.receive_v1': async (data) => {
         (async () => {
-          await _onCardAction(data);
-        })().catch((e) => logger.error('feishu', '卡片回调处理失败', { err: e?.message || String(e) }));
-      }
-    },
-  });
+          const inbound = await toInbound(data);
+          if (inbound && _onInbound) await _onInbound(inbound);
+        })().catch((e) => logger.error('feishu', '处理失败', { err: e?.message || String(e) }));
+      },
+      'im.message.reaction.created_v1': async (data) => {
+        // 表情回复事件（可选，目前未使用）
+      },
+      'card.action.trigger': async (data) => {
+        // 卡片按钮点击回调
+        if (_onCardAction) {
+          (async () => {
+            await _onCardAction(data);
+          })().catch((e) => logger.error('feishu', '卡片回调处理失败', { err: e?.message || String(e) }));
+        }
+      },
+    });
+    return _dispatcher;
+  }
 
   /** 用当前凭证启动 WS；无凭证则置 failed 并等待设置页写入 */
   async function startWs() {
@@ -226,7 +235,7 @@ export function createFeishuChannel() {
     };
     // 注：SDK 的 start() 立即 resolve，凭证/网络失败经 onError 异步回调上报；先置 connecting，避免卡在旧状态
     writeStatus('connecting');
-    wsClient = createWsClient(creds, {
+    wsClient = await createWsClient(creds, {
       onReady: () => {
         st('connected');
         logger.info('feishu', 'WS 已连接');
@@ -239,7 +248,7 @@ export function createFeishuChannel() {
       onReconnected: () => st('connected'),
     });
     try {
-      await wsClient.start({ eventDispatcher: dispatcher });
+      await wsClient.start({ eventDispatcher: await getDispatcher() });
     } catch (e) {
       st('failed', e?.message || String(e));
       logger.error('feishu', 'WS 启动失败', { err: e?.message || String(e) });

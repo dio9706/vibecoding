@@ -345,6 +345,27 @@ export async function initializeDefaults() {
   }
 }
 
+/**
+ * 编辑器白名单。
+ *
+ * 为什么必须有：`editor` 来自请求体且直接进 `execFile(editor, [path])`。
+ * execFile 不走 shell，所以没有命令拼接注入的问题，但它照样能启动
+ * **PATH 里的任意程序** —— 不限制的话这个接口的真实语义是「执行任意程序」，
+ * 而它的本意只是「打开编辑器」。本地服务无鉴权，攻击面不该白送。
+ */
+const ALLOWED_EDITORS = new Set(['windsurf', 'cursor', 'code']);
+
+/**
+ * 文件管理器命令按平台映射。
+ *
+ * 前端传语义值 `'filemanager'`，具体命令由后端决定 —— **平台判断只能在后端做**：
+ * 前端是浏览器环境，没有 `process`。此前 dir-popover.js 里直接写了
+ * `process.platform === 'win32' ? 'explorer' : 'open'`，运行时抛
+ * ReferenceError 并被外层空 catch 吞掉，「在文件管理器中打开」这个菜单项
+ * 从上线起就没工作过，且没有任何报错痕迹。
+ */
+const FILE_MANAGER_BY_PLATFORM = { win32: 'explorer', darwin: 'open' };
+
 /** 用外部 AI 编辑器打开指定目录（Windsurf / Cursor / VS Code 依次尝试）。
  *  函数名与路由里的 "vibe" 是改名前的历史标识符，非产品名 Principal，勿混淆。 */
 export function handleOpenInVibe(req, res) {
@@ -353,8 +374,24 @@ export function handleOpenInVibe(req, res) {
     const targetPath = str(data.path);
     if (!targetPath) return sendJson(res, 400, { error: 'path 不能为空' });
 
-    // 编辑器优先级：windsurf → cursor → code（VS Code）
-    const editors = data.editor ? [data.editor] : ['windsurf', 'cursor', 'code'];
+    const want = str(data.editor);
+    let editors;
+    let asFileManager = false;
+    if (want === 'filemanager') {
+      asFileManager = true;
+      // 兜底 xdg-open：Linux 桌面的通用打开器
+      editors = [FILE_MANAGER_BY_PLATFORM[process.platform] || 'xdg-open'];
+    } else if (want) {
+      if (!ALLOWED_EDITORS.has(want)) {
+        return sendJson(res, 400, {
+          error: `不支持的 editor：${want}（可选 ${[...ALLOWED_EDITORS].join(' / ')} 或 filemanager）`,
+        });
+      }
+      editors = [want];
+    } else {
+      // 编辑器优先级：windsurf → cursor → code（VS Code）
+      editors = ['windsurf', 'cursor', 'code'];
+    }
     let idx = 0;
 
     function tryNext() {
@@ -363,7 +400,11 @@ export function handleOpenInVibe(req, res) {
       }
       const editor = editors[idx++];
       execFile(editor, [targetPath], { timeout: 8000, windowsHide: true }, (err) => {
-        if (err && (err.code === 'ENOENT' || err.code === 127 || err.message?.includes('not found'))) {
+        // Windows 的 explorer.exe 打开成功时退出码就是 1（系统怪癖，不是失败）。
+        // 不特判的话文件管理器每次都会被报成「启动失败」。
+        if (asFileManager && editor === 'explorer' && err && err.code === 1) {
+          sendJson(res, 200, { ok: true, editor });
+        } else if (err && (err.code === 'ENOENT' || err.code === 127 || err.message?.includes('not found'))) {
           tryNext(); // 该编辑器不存在，试下一个
         } else if (err && err.killed) {
           // 超时但进程已启动，视为成功（部分编辑器启动慢）

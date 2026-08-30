@@ -18,6 +18,7 @@
  * 运行：node tests/e2e-no-auto-switch.mjs
  */
 import { chromium } from 'playwright';
+import { seedConfiguredSettings } from './helpers.mjs';
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import fs from 'node:fs';
@@ -55,6 +56,9 @@ async function waitForReady(baseUrl, timeoutMs = 20000) {
 const port = await findFreePort();
 const BASE = `http://127.0.0.1:${port}`;
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'no-auto-switch-e2e-'));
+// 预置「已配置用户」settings：空数据目录会被 onboarding 判为新用户，
+// 引导罩覆盖全屏后所有点击都被拦截（详见 helpers.mjs 的说明）。
+seedConfiguredSettings(dataDir);
 const reqFile = path.join(dataDir, 'requirements.json');
 
 function writeReqFileAtomic(data) {
@@ -180,6 +184,10 @@ try {
     await mod.refreshReqList();
   });
   await page.waitForTimeout(200);
+  // 侧栏是「对话/需求」双模式（2026-08-25 改版）：默认停在对话态，此时 #reqList 是 hidden 的，
+  // 直接点 .req-item 会一直等到超时（元素在 DOM 里但不可见）。先切到需求态。
+  await page.click('.switch-btn[data-target="req"]');
+  await page.waitForSelector('.req-item', { state: 'visible', timeout: 5000 });
   await page.click(`.req-item:has-text("${bgTitle}")`);
   await page.waitForSelector('#reqBanner', { state: 'visible', timeout: 5000 });
   const viewGesture = await activeView();

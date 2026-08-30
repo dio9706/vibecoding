@@ -73,16 +73,24 @@ try {
     console.log('✔ 审批徽标 CSS 类正确');
   }
 
-  // 5. 验证 refreshAskChip 函数存在（通过控制台测试）
+  // 5. 徽标可点击且不抛错（点击处理器已挂上）
+  //
+  // 这里原先断言 `typeof refreshAskChip === 'function'`，从 app.js 模块化那天起就必然失败：
+  // 该函数在 `js/chat.js` 里是 `export function`，**模块作用域**内的符号本来就不是全局变量
+  // （那次拆分刻意只留 4 个 window 接口）。测「某个内部函数是不是全局的」既测不到行为，
+  // 又和模块化的设计目标相反 —— 改成验证徽标本身可交互。
   try {
-    const refreshExists = await page.evaluate(() => typeof refreshAskChip === 'function');
-    if (!refreshExists) {
-      fail('refreshAskChip() 函数未定义或不是函数');
-    } else {
-      console.log('✔ refreshAskChip() 函数存在');
-    }
+    const clickable = await page.evaluate(() => {
+      const chip = document.getElementById('askChip');
+      if (!chip) return { ok: false, why: '#askChip 不存在' };
+      // 隐藏态也应能安全点击（不该抛错）；点击后徽标仍在 DOM 里
+      chip.click();
+      return { ok: !!document.getElementById('askChip'), why: '' };
+    });
+    if (!clickable.ok) fail('审批徽标点击后异常：' + clickable.why);
+    else console.log('✔ 审批徽标可点击且点击后仍在 DOM');
   } catch (e) {
-    fail(`检查 refreshAskChip 函数时出错：${e.message}`);
+    fail(`点击审批徽标时出错：${e.message}`);
   }
 
   assertNoErrors('审批徽标完整性测试');

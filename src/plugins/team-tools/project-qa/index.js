@@ -9,7 +9,7 @@
  * 三道保护：同用户串行闸（防连问打爆额度）、3 分钟超时（SDK 流在限流时可能永不结束）、答案截断（飞书 2000 字上限）。
  */
 import { runClaude } from '../../../integrations/claude.js';
-import { claudeAuthOpts } from '../../../features/token-rotation.js';
+import { claudeAuthOpts } from '../../../capabilities/token-rotation.js';
 import { getActiveBot } from '../../../store/settings.js';
 import { botSystemAppend } from '../../../shared/bot-scope.js';
 import { msg } from '../../../shared/messages.js';

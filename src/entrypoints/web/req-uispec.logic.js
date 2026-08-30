@@ -1,41 +1,12 @@
 /**
- * UI 规范纯逻辑 —— 工程目录 → 存储 slug / 还原 prompt / 规范草稿 prompt（单测目标，零 IO）。
+ * UI 规范纯逻辑 —— 还原 prompt / 规范草稿 prompt（单测目标，零 IO）。
  *
  * 规范是**项目级**的（按工程目录归属），但不写进用户工程目录——那是别人的仓库，
  * 落 APP_DATA_DIR/ui-specs/<dirSlug>.md，还原时把全文注入 prompt（见 spec §3.2）。
+ *
+ * `dirSlug` 已移到 `shared/dir-slug.js`：它是存储层算文件名要用的纯函数，
+ * 留在这里会让 `store/ui-specs.js` 反向依赖 web 入口（分层倒挂）。
  */
-
-/** 目录路径规范化：反斜杠转正斜杠、去末尾分隔符。Windows 下同一目录有多种写法。 */
-function normDir(dir) {
-  return String(dir ?? '')
-    .replace(/\\/g, '/')
-    .replace(/\/+$/, '')
-    .trim();
-}
-
-/** FNV-1a 32 位哈希 → 6 位 base36。够短、够稳、无依赖。 */
-function shortHash(s) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(36).padStart(6, '0').slice(-6);
-}
-
-/**
- * 工程目录 → 存储文件名 slug：`<清洗过的目录尾段>-<路径短哈希>`。
- * 带哈希是因为前后端仓库都叫 web 是常态，只取尾段会让两个项目共用一份规范。
- */
-export function dirSlug(dir) {
-  const norm = normDir(dir);
-  const tail = norm.split('/').filter(Boolean).pop() || '';
-  const clean = tail
-    .replace(/[^A-Za-z0-9一-龥]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .toLowerCase();
-  return `${clean || 'root'}-${shortHash(norm)}`;
-}
 
 /**
  * 按 UI 规范还原某个页面的 prompt。规范为空时不能假装有规范——

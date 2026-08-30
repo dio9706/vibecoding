@@ -11,7 +11,7 @@
  * 归一层放在 Node 侧而不是各脚本里：脚本是用户可自己加的，不能要求每个脚本都自带别名表。
  */
 import { getVar } from '../../../store/user-vars.js';
-import { runClassifierOnce } from '../../../features/llm-classify.js';
+import { runClassifierOnce } from '../../../capabilities/llm-classify.js';
 import { logger } from '../../../shared/logger.js';
 
 // 抽取用轻模型（Haiku）：仅做单轮抽取，不需要重模型（与 config.intent.classifyModel 无关，那是分类用的 sonnet）

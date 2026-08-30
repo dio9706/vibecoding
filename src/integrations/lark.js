@@ -5,7 +5,16 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import * as Lark from '@larksuiteoapi/node-sdk';
+// 飞书 SDK **不在模块顶部静态 import** —— 实测它单独就占 25.6MB heap / 40.3MB RSS，
+// 是全进程最大的一块。而 web 进程只在「用户开了会话飞书通知」「需求流程发卡片」这类
+// 按需路径上才真正用到它，绝大多数 web 会话一次都不碰。
+// 静态 import 会让 web 一启动就背上这 40MB（本文件被 16 处引用，其中含 web 必经路径）。
+// 改为首次真正要用时才加载；feishu 进程照旧在连长连接时立刻加载，行为不变。
+let _sdk = null;
+async function sdk() {
+  if (!_sdk) _sdk = await import('@larksuiteoapi/node-sdk');
+  return _sdk;
+}
 import { getLarkCredentials } from '../shared/config.js';
 import { appDataPath } from '../shared/app-paths.js';
 import { logger, preview } from '../shared/logger.js';
@@ -16,14 +25,26 @@ import { logger, preview } from '../shared/logger.js';
 // 「📎 文件下载失败（UNKNOWN_ERROR）」，即**打包版所有图片/文件/文档材料链路失效**。
 const RESOURCE_DIR = appDataPath('.uploads', 'feishu');
 
-// 供入口层使用 EventDispatcher / LoggerLevel 等
-export const larkSdk = Lark;
+/** 供入口层使用 EventDispatcher / LoggerLevel 等（异步：SDK 按需加载，见文件头说明） */
+export async function getLarkSdk() {
+  return sdk();
+}
 
 let _client = null;
-/** 懒实例化 API client；凭证取 getLarkCredentials（settings 优先、env 兜底） */
-function getClient() {
+/**
+ * 凭证覆盖值。`resetApiClient(creds)` 传进来的凭证存这里，等下次 getClient() 懒建时用。
+ *
+ * 为什么不在 resetApiClient 里直接 new：那样它就得变成 async，而它是凭证热重载路径上的
+ * 同步调用。存下来延后到 getClient()（本就是 async）里用，语义完全一致 ——
+ * 反正在下一次真正发请求之前，client 用不上。
+ */
+let _overrideCreds = null;
+
+/** 懒实例化 API client；凭证优先用 resetApiClient 传入的，否则取 getLarkCredentials */
+async function getClient() {
   if (!_client) {
-    const c = getLarkCredentials();
+    const c = _overrideCreds || getLarkCredentials();
+    const Lark = await sdk();
     _client = new Lark.Client({ appId: c.appId, appSecret: c.appSecret });
   }
   return _client;
@@ -35,8 +56,9 @@ const BOT_OPEN_ID_FAIL_TTL = 60_000; // 负缓存 TTL（毫秒）
 
 /** 凭证变更后重建 API client（让 sendText 等换新号）；creds 省略则重新读取 */
 export function resetApiClient(creds) {
-  const c = creds || getLarkCredentials();
-  _client = new Lark.Client({ appId: c.appId, appSecret: c.appSecret });
+  // 只清缓存并记下凭证，真正的 new 延后到 getClient()（SDK 是按需加载的，见文件头）
+  _overrideCreds = creds || null;
+  _client = null;
   // 换号即失效：拿旧机器人的 id 判 @ 会让新号在群里彻底不响应；负缓存同时清掉，新号无需等 TTL
   _botOpenId = null;
   _botOpenIdFailedAt = 0;
@@ -55,7 +77,7 @@ export async function getBotOpenId() {
   if (_botOpenId) return _botOpenId;
   if (_botOpenIdFailedAt && Date.now() - _botOpenIdFailedAt < BOT_OPEN_ID_FAIL_TTL) return null;
   try {
-    const r = await getClient().request({ method: 'GET', url: '/open-apis/bot/v3/info' });
+    const r = await (await getClient()).request({ method: 'GET', url: '/open-apis/bot/v3/info' });
     // SDK generic request 不校验业务 code：HTTP 200 + code!=0 也是失败
     if (r?.code) throw new Error(`bot/v3/info 失败: ${r.msg || r.code}`);
     const id = r?.bot?.open_id || r?.data?.bot?.open_id || null;
@@ -102,7 +124,7 @@ export async function getUserName(id) {
   const failedAt = _userNameFailedAt.get(key);
   if (failedAt && Date.now() - failedAt < USER_NAME_FAIL_TTL) return null;
   try {
-    const r = await getClient().request({
+    const r = await (await getClient()).request({
       method: 'GET',
       url: `/open-apis/contact/v3/users/${encodeURIComponent(key)}`,
       params: { user_id_type: key.startsWith('ou_') ? 'open_id' : 'user_id' },
@@ -125,8 +147,9 @@ export async function getUserName(id) {
 }
 
 /** 创建长连接客户端（入口层 start 用）；creds 省略则读 getLarkCredentials，handlers 挂状态回调 */
-export function createWsClient(creds, handlers = {}) {
+export async function createWsClient(creds, handlers = {}) {
   const c = creds || getLarkCredentials();
+  const Lark = await sdk();
   return new Lark.WSClient({
     appId: c.appId,
     appSecret: c.appSecret,
@@ -141,7 +164,7 @@ export function createWsClient(creds, handlers = {}) {
 /** 发送文本消息到会话 */
 export async function sendText(chatId, text) {
   try {
-    await getClient().im.v1.message.create({
+    await (await getClient()).im.v1.message.create({
       params: { receive_id_type: 'chat_id' },
       data: {
         receive_id: chatId,
@@ -189,7 +212,7 @@ export async function sendMarkdown(chatId, markdownText) {
 
 /** 上传图片到飞书图床，返回 image_key（失败抛错，由调用方兜底）。SDK 接受 Buffer 直传。 */
 export async function uploadImage(buf) {
-  const r = await getClient().im.v1.image.create({
+  const r = await (await getClient()).im.v1.image.create({
     data: { image_type: 'message', image: buf },
   });
   // code-gen client 已剥外层信封 → image_key 在顶层；保留 .data.image_key 兜底
@@ -200,7 +223,7 @@ export async function uploadImage(buf) {
 
 /** 发送图片消息（已有 image_key） */
 export async function sendImage(chatId, imageKey) {
-  await getClient().im.v1.message.create({
+  await (await getClient()).im.v1.message.create({
     params: { receive_id_type: 'chat_id' },
     data: {
       receive_id: chatId,
@@ -236,7 +259,7 @@ export async function uploadFile(buf, fileName, fileType = 'stream') {
   if (buf.length > 30 * 1024 * 1024) {
     throw new Error(`文件超过 30MB 限制（${(buf.length / 1024 / 1024).toFixed(1)}MB）`);
   }
-  const r = await getClient().im.v1.file.create({
+  const r = await (await getClient()).im.v1.file.create({
     data: { file_type: fileType, file_name: fileName, file: buf },
   });
   const key = r?.file_key || r?.data?.file_key || null;
@@ -247,7 +270,7 @@ export async function uploadFile(buf, fileName, fileType = 'stream') {
 
 /** 发送文件消息（已有 file_key） */
 export async function sendFile(chatId, fileKey) {
-  await getClient().im.v1.message.create({
+  await (await getClient()).im.v1.message.create({
     params: { receive_id_type: 'chat_id' },
     data: {
       receive_id: chatId,
@@ -269,7 +292,7 @@ export async function sendFileByPath(chatId, filePath, fileName) {
 export async function addReaction(messageId, emojiType) {
   if (!messageId) return null;
   try {
-    const r = await getClient().im.v1.messageReaction.create({
+    const r = await (await getClient()).im.v1.messageReaction.create({
       path: { message_id: messageId },
       data: { reaction_type: { emoji_type: emojiType } },
     });
@@ -298,7 +321,7 @@ function imageExt(buf) {
  */
 export async function downloadMessageResource(messageId, fileKey, type = 'image', fileName = '') {
   try {
-    const resp = await getClient().im.v1.messageResource.get({
+    const resp = await (await getClient()).im.v1.messageResource.get({
       path: { message_id: messageId, file_key: fileKey },
       params: { type },
     });
@@ -342,7 +365,7 @@ export async function downloadMessageResource(messageId, fileKey, type = 'image'
  * 无权限/不存在 → 抛错（调用方回复引导话术，不静默丢材料）。
  */
 export async function fetchDocRawContent(documentId) {
-  const r = await getClient().docx.v1.document.rawContent({ path: { document_id: documentId } });
+  const r = await (await getClient()).docx.v1.document.rawContent({ path: { document_id: documentId } });
   const content = r?.data?.content ?? r?.content;
   if (typeof content !== 'string') throw new Error(`raw_content 无内容返回${r?.code ? `（code=${r.code} ${r?.msg || ''}）` : ''}`);
   return content;
@@ -353,7 +376,7 @@ export async function fetchDocRawContent(documentId) {
  * 业务错误（无权限/不存在）抛错。docx / bitable 等类型的分流由调用方决定。
  */
 export async function resolveWikiNodeObj(token) {
-  const r = await getClient().request({
+  const r = await (await getClient()).request({
     method: 'GET',
     url: '/open-apis/wiki/v2/spaces/get_node',
     params: { token },
@@ -374,7 +397,7 @@ export async function resolveWikiNode(token) {
 
 /** 列出多维表格下的数据表：[{ table_id, name }] */
 export async function listBitableTables(appToken) {
-  const r = await getClient().bitable.v1.appTable.list({
+  const r = await (await getClient()).bitable.v1.appTable.list({
     path: { app_token: appToken },
     params: { page_size: 100 },
   });
@@ -384,7 +407,7 @@ export async function listBitableTables(appToken) {
 
 /** 列出数据表字段：[{ field_name, type, ui_type, property }]（选项值在 property.options） */
 export async function listBitableFields(appToken, tableId) {
-  const r = await getClient().bitable.v1.appTableField.list({
+  const r = await (await getClient()).bitable.v1.appTableField.list({
     path: { app_token: appToken, table_id: tableId },
     params: { page_size: 100 },
   });
@@ -402,7 +425,7 @@ export async function searchBitableRecords(appToken, tableId, { filter } = {}) {
   let pageToken;
   const MAX_RECORDS = 1000;
   do {
-    const r = await getClient().bitable.v1.appTableRecord.search({
+    const r = await (await getClient()).bitable.v1.appTableRecord.search({
       path: { app_token: appToken, table_id: tableId },
       params: { user_id_type: 'open_id', page_size: 100, ...(pageToken ? { page_token: pageToken } : {}) },
       data: filter ? { filter } : {},
@@ -417,7 +440,7 @@ export async function searchBitableRecords(appToken, tableId, { filter } = {}) {
 
 /** 更新单条记录的字段（fields 只含要改的字段，如 { 进展状态: '修复中' }） */
 export async function updateBitableRecord(appToken, tableId, recordId, fields) {
-  const r = await getClient().bitable.v1.appTableRecord.update({
+  const r = await (await getClient()).bitable.v1.appTableRecord.update({
     path: { app_token: appToken, table_id: tableId, record_id: recordId },
     params: { user_id_type: 'open_id' },
     data: { fields },
@@ -431,7 +454,7 @@ export async function updateBitableRecord(appToken, tableId, recordId, fields) {
 export async function removeReaction(messageId, reactionId) {
   if (!messageId || !reactionId) return;
   try {
-    await getClient().im.v1.messageReaction.delete({
+    await (await getClient()).im.v1.messageReaction.delete({
       path: { message_id: messageId, reaction_id: reactionId },
     });
   } catch (e) {
@@ -447,7 +470,7 @@ export async function removeReaction(messageId, reactionId) {
  */
 export async function sendCard(chatId, cardContent) {
   try {
-    const r = await getClient().im.v1.message.create({
+    const r = await (await getClient()).im.v1.message.create({
       params: { receive_id_type: 'chat_id' },
       data: {
         receive_id: chatId,
@@ -471,7 +494,7 @@ export async function sendCard(chatId, cardContent) {
  */
 export async function updateCard(messageId, cardContent) {
   try {
-    await getClient().im.v1.message.patch({
+    await (await getClient()).im.v1.message.patch({
       path: { message_id: messageId },
       data: {
         content: JSON.stringify(cardContent),
@@ -495,7 +518,7 @@ export async function updateCard(messageId, cardContent) {
  */
 export async function downloadMessageResourceWithError(messageId, fileKey, type = 'image', fileName = '') {
   try {
-    const resp = await getClient().im.v1.messageResource.get({
+    const resp = await (await getClient()).im.v1.messageResource.get({
       path: { message_id: messageId, file_key: fileKey },
       params: { type },
     });
@@ -562,6 +585,7 @@ export async function sendTextToUser(botCreds, openId, text) {
   }
   try {
     // 创建临时 client，不影响全局 singleton
+    const Lark = await sdk();
     const tempClient = new Lark.Client({
       appId: botCreds.appId,
       appSecret: botCreds.appSecret,
@@ -599,6 +623,7 @@ export async function sendCardToUser(botCreds, openId, cardContent) {
     return null;
   }
   try {
+    const Lark = await sdk();
     const tempClient = new Lark.Client({ appId: botCreds.appId, appSecret: botCreds.appSecret });
     const r = await tempClient.im.v1.message.create({
       params: { receive_id_type: 'open_id' },

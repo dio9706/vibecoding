@@ -21,7 +21,7 @@ let renderMarkdown;
 before(async () => {
   dom = new JSDOM('<!doctype html><html><body></body></html>', { runScripts: 'outside-only' });
   // 把 vendor 的 marked / DOMPurify 装进这个 window（两者都是 IIFE/UMD 全局）
-  for (const f of ['public/vendor/marked.min.js', 'public/vendor/purify.min.js']) {
+  for (const f of ['public/vendor/marked.umd.js', 'public/vendor/purify.min.js']) {
     dom.window.eval(fs.readFileSync(f, 'utf8'));
   }
   globalThis.window = dom.window;

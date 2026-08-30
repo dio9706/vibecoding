@@ -14,7 +14,7 @@ import {
   nextReqId,
 } from '../../store/runs.js';
 import { getMcpServers } from '../../store/settings.js';
-import { pickActive, getTokens, getTokenById } from '../../features/token-rotation.js';
+import { pickActive, getTokens, getTokenById } from '../../capabilities/token-rotation.js';
 import { DEFAULT_PROVIDER_ID } from '../../shared/provider-ids.js';
 import { summarizeTool } from './tool-summary.js';
 

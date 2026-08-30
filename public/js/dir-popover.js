@@ -4,6 +4,22 @@ import { $ } from './util.js';
 import { toast } from './ui.js';
 // ui.js 的 toast 只有 info 级，系统对话框失败要出红色提示，另取 toast.js 的分级 API
 import toastApi from './toast.js';
+import { getJson, postJson, postJsonQuiet } from './api.js';
+
+/**
+ * 造一条提示行（加载中 / 空态 / 错误）。
+ *
+ * 为什么不用 innerHTML 拼：本文件展示的错误文本来自后端的
+ * `无法读取目录：${err.message}`，而 err.message 里带着**用户自己输入的路径**。
+ * 拼进 innerHTML 就是一条可自我触发的 XSS —— 在 Tauri 下 webview 可达
+ * shell:allow-execute，代价不只是弹窗。项目硬性约定：后端文本一律 textContent。
+ */
+function hintRow(text, { color = 'var(--faint)', pad = '8px' } = {}) {
+  const d = document.createElement('div');
+  d.style.cssText = `color:${color};padding:${pad};font-size:12px`;
+  d.textContent = text;
+  return d;
+}
 
 let _defaults = { getCwd: () => '', selectDir: () => {} };
 let _getCwd = () => '';
@@ -54,9 +70,10 @@ export function openDirPickerFor({ getCwd, selectDir }) {
         const list = document.querySelector('#savedList');
         list.innerHTML = '';
         try {
-          const { dirs } = await (await fetch('/api/dirs/saved')).json();
+          const { data } = await getJson('/api/dirs/saved');
+          const dirs = data?.dirs;
           if (!dirs || !dirs.length) {
-            list.innerHTML = '<div style="color:var(--faint);font-size:12px">（暂无，浏览到某目录后点＋常用）</div>';
+            list.replaceChildren(hintRow('（暂无，浏览到某目录后点＋常用）', { pad: '0' }));
             return;
           }
           for (const p of dirs) {
@@ -69,28 +86,25 @@ export function openDirPickerFor({ getCwd, selectDir }) {
             row.querySelector('.folder').onclick = () => _selectDir(p);
             row.querySelector('.rm').onclick = async (ev) => {
               ev.stopPropagation();
-              await fetch('/api/dirs/saved', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'remove', path: p }),
-              });
+              await postJson('/api/dirs/saved', { action: 'remove', path: p });
               loadSaved();
             };
             list.appendChild(row);
           }
         } catch {
-          list.innerHTML = '<div style="color:var(--red);font-size:12px">读取失败</div>';
+          list.replaceChildren(hintRow('读取失败', { color: 'var(--red)', pad: '0' }));
         }
       }
       async function browse(path) {
         const rows = $('#dirRows');
-        rows.innerHTML = '<div style="color:var(--faint);padding:8px">加载中…</div>';
+        rows.replaceChildren(hintRow('加载中…'));
         try {
-          const data = await (
-            await fetch('/api/dirs/browse?path=' + encodeURIComponent(path || ''))
-          ).json();
-          if (data.error) {
-            rows.innerHTML = '<div style="color:var(--red);padding:8px">' + data.error + '</div>';
+          const { data } = await getJson(
+            '/api/dirs/browse?path=' + encodeURIComponent(path || ''),
+          );
+          // data 为 null = 响应不是 JSON（后端 500 等）；与 data.error 同样按读取失败处理
+          if (!data || data.error) {
+            rows.replaceChildren(hintRow(data?.error || '读取失败', { color: 'var(--red)' }));
             return;
           }
           browsePath = data.current;
@@ -126,7 +140,7 @@ export function openDirPickerFor({ getCwd, selectDir }) {
             rows.appendChild(none);
           }
         } catch {
-          rows.innerHTML = '<div style="color:var(--red);padding:8px">读取失败</div>';
+          rows.replaceChildren(hintRow('读取失败', { color: 'var(--red)' }));
         }
       }
       /** 目录浏览器右键菜单 */
@@ -167,31 +181,28 @@ export function openDirPickerFor({ getCwd, selectDir }) {
         // 是历史标识符，改它要同时动路由表与前端，收益不抵风险。
         addItem('⚡', '用 AI 编辑器打开', async () => {
           try {
-            const r = await fetch('/api/open-in-vibe', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ path: dirPath }),
-            });
-            const d = await r.json();
-            if (d.ok) {
+            const { data: d } = await postJson('/api/open-in-vibe', { path: dirPath });
+            if (d?.ok) {
               if (typeof toast === 'function') toast(`已在 ${d.editor} 中打开`);
             } else {
-              if (typeof toast === 'function') toast(d.error || '打开失败');
+              if (typeof toast === 'function') toast(d?.error || '打开失败');
             }
           } catch (e) {
             if (typeof toast === 'function') toast('打开失败：' + e.message);
           }
         });
 
-        // 菜单项：在文件管理器中打开
+        // 菜单项：在文件管理器中打开。
+        // editor 传语义值 'filemanager'，由后端按 process.platform 映射成
+        // explorer / open / xdg-open —— 前端是浏览器环境，**没有 process**。
+        // 此处原先直接写 `process.platform === 'win32' ? …`，运行时抛 ReferenceError
+        // 并被空 catch 吞掉，这个菜单项从上线起就没工作过，且毫无报错痕迹。
         addItem('📂', '在文件管理器中打开', async () => {
-          try {
-            await fetch('/api/open-in-vibe', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ path: dirPath, editor: process.platform === 'win32' ? 'explorer' : 'open' }),
-            });
-          } catch {}
+          const ok = await postJsonQuiet('/api/open-in-vibe', {
+            path: dirPath,
+            editor: 'filemanager',
+          });
+          if (!ok && typeof toast === 'function') toast('打开文件管理器失败');
         });
 
         document.body.appendChild(menu);
@@ -240,9 +251,9 @@ export function openDirPickerFor({ getCwd, selectDir }) {
         btn.textContent = '选择中…';
         btn.disabled = true;
         try {
-          const r = await (await fetch('/api/dirs/pick')).json();
-          if (r.path) _selectDir(r.path); // 选中即应用并关闭
-          else if (r.error) toastApi.error(r.error);
+          const { data: r } = await getJson('/api/dirs/pick');
+          if (r?.path) _selectDir(r.path); // 选中即应用并关闭
+          else if (r?.error) toastApi.error(r.error);
           // r.path=null：用户点了取消，忽略
         } catch {
           toastApi.error('调用系统对话框失败');
@@ -255,10 +266,6 @@ export function openDirPickerFor({ getCwd, selectDir }) {
       });
       $('#starBtn').addEventListener('click', async () => {
         if (!browsePath) return;
-        await fetch('/api/dirs/saved', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'add', path: browsePath }),
-        });
+        await postJson('/api/dirs/saved', { action: 'add', path: browsePath });
         loadSaved();
       });

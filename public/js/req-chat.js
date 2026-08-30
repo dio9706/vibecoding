@@ -411,12 +411,9 @@ async function openDocDrawer(reqId) {
 // ---- 右栏 ----
 
 function renderRail(data) {
-  // 草稿保护（与 req-view 补充框同类病防复发）：busy 结束的 renderChrome 会整栏重建，
-  // 用户正在编辑、尚未失焦保存的设计准则不能被服务端旧值覆盖。dataset.saved 记录
-  // 「最后一次已保存值」，当前值与之不同即视为草稿，重建后原样回填并还原焦点。
-  const prevTa = railEl.querySelector('.req-guidelines');
-  const draft = prevTa && prevTa.value !== (prevTa.dataset.saved ?? '') ? prevTa.value : null;
-  const hadFocus = prevTa && document.activeElement === prevTa;
+  // 注：这里原有一段「设计准则」输入框(.req-guidelines)的草稿保护，已随该输入框
+  // 从 dev 期右栏移除而删除 —— renderDevRail 早就不再创建它，querySelector 恒为 null、
+  // 算出的 draft/hadFocus 也从未被使用，整段是死代码。下面测试期的保护仍然有效。
   // 测试期贴表格输入框同类保护：url 不落库、没有「已保存基线」，非空值即视为未提交草稿——
   // 轮询每 3s 整栏重画一次，不保护的话用户正粘贴到一半的链接会被反复清空
   const prevUrlInput = railEl.querySelector('.req-bitable-form input');
@@ -426,12 +423,12 @@ function renderRail(data) {
   const scrollTop = railEl.scrollTop;
   railEl.innerHTML = '';
   railEl.hidden = false;
-  if (data.phase === 'dev') renderDevRail(data, { draft, hadFocus });
+  if (data.phase === 'dev') renderDevRail(data);
   else if (data.phase === 'test') renderTestRail(data, { urlDraft, hadUrlFocus });
   railEl.scrollTop = scrollTop;
 }
 
-function renderDevRail(data, { draft = null, hadFocus = false } = {}) {
+function renderDevRail(data) {
   // 渲染时刻的世代号，供下面的异步 handler 判断「回来时用户是否已切走/换了需求」。
   // chromeEpoch 只在 mount/unmount 自增，重绘链路（renderChrome→renderRail→本函数）不动它，
   // 所以捕获渲染时刻的值就是正确的过期判据。

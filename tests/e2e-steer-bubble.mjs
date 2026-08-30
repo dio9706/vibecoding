@@ -50,6 +50,14 @@ const run = async () => {
   await page.addInitScript(initScript);
   page.on('pageerror', (e) => console.log('PAGE ERROR:', e.message));
   await page.goto(BASE, { waitUntil: 'load' });
+  // 等应用完成启动初始化再操作。
+  // `load` 只保证资源加载完，而 app.js 的启动流程里 cwd / UI 偏好是**异步拉取**的；
+  // 点得太早，send() 会因 cwd 未就绪而提前返回 —— 现象是「点了没反应、不建 EventSource」，
+  // 下面 waitForFunction(__sse.length >= 1) 就会超时，且没有任何 pageerror 可查。
+  // 以工作目录标签出现文本作为就绪信号（它由启动初始化回填）。
+  await page.waitForFunction(() => !!document.querySelector('#dirLabel')?.textContent?.trim(), null, {
+    timeout: 15000,
+  });
 
   // 1) 首条消息：新建 run
   await type(page, 'FIRST_TASK');

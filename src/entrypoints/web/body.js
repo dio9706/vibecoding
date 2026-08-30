@@ -75,10 +75,14 @@ export function readJsonBody(req, { maxBytes = DEFAULT_MAX_BYTES } = {}) {
 /**
  * 读 body → 交给业务回调，并兜住回调抛出的一切异常。
  *
- * 替代 `req.on('end', async () => {...})` 这个写法：回调内抛错时既没有 catch，
- * 全仓也没有进程级 uncaughtException/unhandledRejection 兜底，后果是
- * **进程退出 + 该请求永久挂死**（res 从未 end）。典型触发：routes-run 的
+ * 替代 `req.on('end', async () => {...})` 这个写法：回调内抛错时没有任何 catch，
+ * 后果是**进程退出 + 该请求永久挂死**（res 从未 end）。典型触发：routes-run 的
  * startClaudeRun 同步抛错、routes-ops 的 updateTask 写盘 EPERM/ENOSPC。
+ *
+ * 注：`shared/process-guard.js` 现已提供进程级兜底，异常不再打死进程
+ * （本注释原先写「全仓也没有进程级兜底」，那是 process-guard 落地前的状态）。
+ * 但那一层只保证进程活着，**救不回这个请求** —— res 依然永远不会 end，
+ * 前端就是一直转圈。所以这里的 try/catch 仍是必需的，不能因为有兜底就省掉。
  *
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res

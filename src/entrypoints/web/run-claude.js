@@ -39,7 +39,7 @@ import {
   isPidAlive,
 } from '../../store/active-runs.js';
 import os from 'node:os';
-import { getActiveToken, noteRateLimit } from '../../features/token-rotation.js';
+import { getActiveToken, noteRateLimit } from '../../capabilities/token-rotation.js';
 import { summarizeTool, READONLY_TOOLS, parseDialog } from './tool-summary.js';
 import { isRetryEligible } from './run-claude.logic.js';
 import { getUiPrefs } from '../../store/settings.js';

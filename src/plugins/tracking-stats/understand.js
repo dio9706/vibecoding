@@ -5,7 +5,7 @@
  * 字面召回直接归零 —— 而召回不到的事件，后续模型再聪明也选不出来。
  * 阶段 A 先把口语转成规范检索词，阶段 B 再从召回结果里挑。
  */
-import { runClassifierDetailed } from '../../features/llm-classify.js';
+import { runClassifierDetailed } from '../../capabilities/llm-classify.js';
 import { config } from '../../shared/config.js';
 import { logger } from '../../shared/logger.js';
 
