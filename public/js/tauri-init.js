@@ -1,6 +1,7 @@
 /** Tauri API 异步初始化：产出 window.tauriApi / window.notifyUser（非 Tauri 环境为降级实现）。 */
 import { API_BASE } from './bootstrap.js';
 import toastApi from './toast.js';
+import { shouldOpenExternally } from './nav-guard.js';
 
 // 视图桥：托盘导航 / 通知点击需要跳视图、开会话，但 showView 在 app.js、openConv 在 chat.js 的
 // 模块作用域里，本模块拿不到（同 bindTasksNav 的做法，避免反向依赖）。由 app.js 注入。
@@ -36,6 +37,36 @@ export function bindTauriNav({ showView, openConv }) {
             // revealItemInDir 走系统文件管理器定位，不执行目标文件，无 RCE 面。
             let revealPath = null;
             let openUrl = null;
+
+            // ── 全局超链接拦截：强制用系统浏览器打开，防止 WebView 内导航 ──────────
+            // ⚠️ 故意注册在 await import() 之前：JS 闭包捕获的是变量引用而非当前值，
+            //    vendor 加载完后 openUrl 更新，点击时读到的就是最新函数；
+            //    若在 import 完成前就有点击，invoke 兜底也能正确拦截。
+            //    Rust 侧的 on_navigation 作为第二道防线（见 main.rs create_app_window_ctx）。
+            // 捕获阶段拦截所有 <a> 点击；仅处理 http/https 外链，内部资源放行。
+            document.addEventListener('click', (e) => {
+              const anchor = e.target.closest('a[href]');
+              if (!anchor) return;
+              const href = anchor.getAttribute('href');
+              if (!href) return;
+              let url;
+              try { url = new URL(href, window.location.href); } catch { return; }
+              // 内部资源（本机后端 / 打包版的 *.localhost 页面）一律放行，判据见 nav-guard.js
+              if (!shouldOpenExternally(url)) return;
+              // 拦截外链：阻止 WebView 导航，改为系统浏览器打开
+              e.preventDefault();
+              e.stopImmediatePropagation();
+              if (openUrl) {
+                openUrl(url.href).catch((err) => {
+                  console.warn('[App] opener.openUrl failed, fallback to invoke:', err);
+                  invoke('plugin:opener|open_url', { url: url.href }).catch(console.error);
+                });
+              } else {
+                // vendor 尚未加载或加载失败时直接 invoke opener 插件命令
+                invoke('plugin:opener|open_url', { url: url.href }).catch(console.error);
+              }
+            }, true); // true = 捕获阶段，确保在子元素 handler 前拦截
+
             try {
               // 一律走随包 vendor，不再从 jsdelivr 动态 import。
               // 原因有二：① 供应链——CDN 投毒/DNS 劫持/企业 MITM 任一成立，攻击者的 JS
@@ -62,33 +93,6 @@ export function bindTauriNav({ showView, openConv }) {
             };
 
             console.log('[App] Tauri environment detected and initialized');
-
-            // ── 全局超链接拦截：强制用系统浏览器打开，防止 WebView 内导航 ──────────
-            // 捕获阶段拦截所有 <a> 点击；仅处理 http/https 外链，内部资源放行
-            document.addEventListener('click', (e) => {
-              const anchor = e.target.closest('a[href]');
-              if (!anchor) return;
-              const href = anchor.getAttribute('href');
-              if (!href) return;
-              let url;
-              try { url = new URL(href, window.location.href); } catch { return; }
-              // 只拦截 http / https 协议
-              if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
-              // 放行对本机后端的请求（127.0.0.1 / localhost）
-              if (url.hostname === '127.0.0.1' || url.hostname === 'localhost') return;
-              // 拦截外链：阻止 WebView 导航，改为系统浏览器打开
-              e.preventDefault();
-              e.stopImmediatePropagation();
-              if (openUrl) {
-                openUrl(url.href).catch((err) => {
-                  console.warn('[App] opener.openUrl failed, fallback to invoke:', err);
-                  invoke('plugin:opener|open_url', { url: url.href }).catch(console.error);
-                });
-              } else {
-                // vendor 加载失败时直接 invoke opener 插件命令
-                invoke('plugin:opener|open_url', { url: url.href }).catch(console.error);
-              }
-            }, true); // true = 捕获阶段，确保在子元素 handler 前拦截
 
             // ── 桌面 tab 在设置中显示 ─────────────────────────────
             // autostartToggle 已移至基础 tab，显示其父容器

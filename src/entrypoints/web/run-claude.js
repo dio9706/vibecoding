@@ -116,6 +116,12 @@ export function startClaudeRun(run, { prompt, cwd, addDirs, session, model, effo
     //   user_question / question / multiple_choice —— 两侧均查无此物，已删
     supportedDialogKinds: ['refusal_fallback_prompt', 'ask_user_question'],
     toolConfig: { askUserQuestion: { previewFormat: 'html' } }, // 我们是 web 消费者
+    systemPrompt: {
+      type: 'custom',
+      content: `当你遇到需要用户在多个选项间做出决策、选择、判断时，必须使用 AskUserQuestion 工具来提问，而不是在正文中直接列出选项等待用户手动打字回答。
+
+AskUserQuestion 工具会呈现出格式良好的选择卡片，用户可以点击选项来快速完成决策，这是比在文本中列出「1. 2. 3.」更好的交互方式。`,
+    },
     // 「询问」模式必须强制走 canUseTool：用户全局 settings.json 把 Bash/Edit/Write 等整体 allow，
     // 而 allow 规则优先于 canUseTool（回调被架空、工具直接执行）。PreToolUse 钩子返回 ask
     // 把每次工具调用的裁决权交回 canUseTool（SDK 官方推荐做法）；只读工具仍在回调里自动放行。

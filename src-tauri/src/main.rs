@@ -404,6 +404,20 @@ fn create_app_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     create_app_window_ctx(app, None, None)
 }
 
+/// host 是否属于应用内部 / 本机——on_navigation 据此决定放行还是丢给系统浏览器。
+///
+/// `.localhost` 子域必须整体放行：Windows 与 Android 上 Tauri v2 把内部协议映射成
+/// http://<scheme>.localhost（tauri.localhost = 应用页面本身，asset./ipc.localhost =
+/// 资源与 IPC 通道），scheme 已经是 http，光比对 "localhost" 会把应用首页当成外链
+/// 丢给系统浏览器并阻断导航——表现就是「一打开就弹网页、窗口空白」。
+/// macOS 那边是 tauri://localhost，走 scheme 白名单，不经过这里。
+///
+/// 放行整个 `.localhost` 后缀不扩大攻击面：该 TLD 由 RFC 6761 保留，无法公网注册。
+/// 前端 public/js/nav-guard.js 是同一套规则的第一道防线，两边改动需保持一致。
+fn is_internal_host(host: &str) -> bool {
+    host == "127.0.0.1" || host == "localhost" || host.ends_with(".localhost")
+}
+
 /// cwd/conv：项目上下文（一窗一项目），经 initialization_script 注入全局变量；均 None=默认窗口。
 /// URL 恒为干净的 index.html——避免打包版 custom protocol 把 query 当文件名解析失败。
 fn create_app_window_ctx(app: &AppHandle, cwd: Option<&str>, conv: Option<&str>) -> tauri::Result<tauri::WebviewWindow> {
@@ -441,6 +455,39 @@ fn create_app_window_ctx(app: &AppHandle, cwd: Option<&str>, conv: Option<&str>)
             serde_json::to_string(&conv).unwrap_or_else(|_| "null".into()),
         );
         builder = builder.initialization_script(script);
+    }
+    // ── 外链拦截（Rust 层第二道防线）──────────────────────────────────────────
+    // JS 侧 tauri-init.js 已有 click 捕获监听器作为第一道防线；
+    // 此处在 WebView2 导航事件层面兜底：若 JS 因竞态/异常未拦截，
+    // Rust 侧调 opener 插件用系统浏览器打开后返回 false 阻断 WebView 内导航，
+    // 避免自定义标题栏/控制按钮被外部网页覆盖后用户无法关窗。
+    {
+        let app_nav = app.clone();
+        builder = builder.on_navigation(move |url| {
+            let scheme = url.scheme();
+            // 内部协议一律放行（tauri:// / asset:// / ipc:// / blob: / data:）
+            if matches!(scheme, "tauri" | "asset" | "ipc" | "blob" | "data") {
+                return true;
+            }
+            if scheme == "http" || scheme == "https" {
+                let host = url.host_str().unwrap_or("");
+                if is_internal_host(host) {
+                    return true;
+                }
+                // 外部 URL：在独立线程调 opener 打系统浏览器，阻止 WebView 内导航
+                let url_str = url.to_string();
+                let app = app_nav.clone();
+                std::thread::spawn(move || {
+                    use tauri_plugin_opener::OpenerExt;
+                    if let Err(e) = app.opener().open_url(url_str, None::<String>) {
+                        eprintln!("[Nav] 无法用系统浏览器打开外部链接: {:?}", e);
+                    }
+                });
+                return false; // 阻止 WebView 内导航
+            }
+            // 其他协议（file:// 等）：安全兜底，阻止
+            false
+        });
     }
     builder
     .build()
@@ -887,4 +934,27 @@ fn main() {
                 kill_backend(app_handle);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归钉子：Windows 打包版首页 host 是 tauri.localhost，判成外链就打不开窗口。
+    #[test]
+    fn internal_host_covers_tauri_custom_protocol() {
+        assert!(is_internal_host("tauri.localhost"));
+        assert!(is_internal_host("asset.localhost"));
+        assert!(is_internal_host("ipc.localhost"));
+        assert!(is_internal_host("127.0.0.1"));
+        assert!(is_internal_host("localhost"));
+    }
+
+    #[test]
+    fn external_hosts_stay_external() {
+        assert!(!is_internal_host("example.com"));
+        // 后缀匹配不能退化成子串匹配
+        assert!(!is_internal_host("notlocalhost"));
+        assert!(!is_internal_host("evil-localhost.com"));
+    }
 }

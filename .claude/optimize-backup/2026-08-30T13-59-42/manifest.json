@@ -1,0 +1,79 @@
+{
+  "at": "2026-08-30T13:59:42.355Z",
+  "dir": "C:\\Users\\DELL\\Desktop\\claude-p-web-demo",
+  "dimensions": [
+    "map",
+    "tests",
+    "comments",
+    "hygiene"
+  ],
+  "entries": [
+    {
+      "path": "CLAUDE.md",
+      "action": "created",
+      "backed": false,
+      "postHash": "8b1fb87e841f39e52870438444e5eb1fe4be8072aea5816e4546ed315de3e6b5"
+    },
+    {
+      "path": "src/app/CLAUDE.md",
+      "action": "created",
+      "backed": false,
+      "postHash": "99b3d6828b732400e47baf022e148ba24b9db4a4da8d0fe7803d9c99cb98b0ba"
+    },
+    {
+      "path": "src/capabilities/CLAUDE.md",
+      "action": "created",
+      "backed": false,
+      "postHash": "b495e81e8ca0f21268ff385a2ecc89b043671f841ad615c1a0c33d0335d87e76"
+    },
+    {
+      "path": "src/channels/CLAUDE.md",
+      "action": "created",
+      "backed": false,
+      "postHash": "3f8b3cffa1c55c42327ddd3d00b4ff4a2e92cd0dcd15623ddca88722106e2dcc"
+    },
+    {
+      "path": "src/entrypoints/CLAUDE.md",
+      "action": "created",
+      "backed": false,
+      "postHash": "c9a9b56e5bac1b4511da962d5e416eff2274f34b1b7e8f49f8a0379460dfb625"
+    },
+    {
+      "path": "src/features/CLAUDE.md",
+      "action": "created",
+      "backed": false,
+      "postHash": "52e423c4b817b21936455b0e24a6faf4cedf7360581c9a1e7da127412faa03b5"
+    },
+    {
+      "path": "src/integrations/CLAUDE.md",
+      "action": "created",
+      "backed": false,
+      "postHash": "d83fba841febc272666f48f835b21958594f2a144e724bc9acf5fbdb3b1a44de"
+    },
+    {
+      "path": "src/plugins/CLAUDE.md",
+      "action": "created",
+      "backed": false,
+      "postHash": "77ddbe05a84eac6ca3bfefc2d3ea2057bdc064d1dee77fcd7bb2b2abce003532"
+    },
+    {
+      "path": "src/providers/CLAUDE.md",
+      "action": "created",
+      "backed": false,
+      "postHash": "d84f8e96ee0fdef7db70092eef9ac468693f6f83fd14cbdeca85f8378b664725"
+    },
+    {
+      "path": "src/shared/CLAUDE.md",
+      "action": "created",
+      "backed": false,
+      "postHash": "5d37da58e6fe9772de85e6af5a0033a6cf2d99bf15dc49b1ca687c1cdb23f385"
+    },
+    {
+      "path": "src/store/CLAUDE.md",
+      "action": "created",
+      "backed": false,
+      "postHash": "ebddbe9d2e832385a413f4fdc3836aa5aab73adf5c55072d6772eca178954b33"
+    }
+  ],
+  "postRecordedAt": "2026-08-30T14:11:47.603Z"
+}

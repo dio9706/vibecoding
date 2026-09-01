@@ -146,9 +146,13 @@ export function noteRateLimit(tokenId, info) {
 
 /** 前端轮询数据：active + 掩码列表 + 待消费通知。
  *  active 按 provider 计算（默认 claude-agent），与 getActiveToken/getActiveTokenId 语义一致——
- *  避免 openai-compat 凭证排序靠前时被误报为 Claude 池的 active。 */
+ *  避免 openai-compat 凭证排序靠前时被误报为 Claude 池的 active。
+ *  展示层做一次瞬态到期检查：resetsAt 已过的 token 即刻显示为 healthy，
+ *  无需等定时器触发（不写盘，写盘恢复仍由 doRecover 定时执行）。 */
 export function getStatus(providerId = DEFAULT_PROVIDER_ID) {
-  const tokens = _getTokens();
+  const raw = _getTokens();
+  // 瞬态恢复：仅用于展示，不写盘——消除定时器 30s 缓冲期内的「已过期却仍显 exhausted」问题
+  const { tokens } = recoverExpired(raw, nowSec());
   const a = pickActive(tokens, providerId);
   return {
     active: a ? { id: a.id, label: a.label } : null,
@@ -170,18 +174,39 @@ export function consumeNotice() {
 }
 
 /** 为所有非 healthy 且有 resetsAt 的 token 排 switch-back 定时器（幂等；跨重启在 web 入口调一次）。
- *  注：warning 若无 resetsAt 则不排定时器——它仍可用（pickActive 兜底），靠下一次 rate_limit(allowed) 事件清回 healthy。 */
+ *  注：warning 若无 resetsAt 则不排定时器——它仍可用（pickActive 兜底），靠下一次 rate_limit(allowed) 事件清回 healthy。
+ *
+ *  关键区分：
+ *  - resetsAt 已过（陈旧状态，进程重启前就该恢复）→ 批量静默恢复，不产生切换通知。
+ *    避免服务启动时因清理历史 exhausted 状态而触发「已切换到账号 X」的误导性横幅。
+ *  - resetsAt 尚未到（将来才到期）→ 排定时器，到期后 doRecover 正常产生切换通知。 */
 export function scheduleAllSwitchBacks() {
+  const now = nowSec();
+  let hasAlreadyExpired = false;
   for (const t of _getTokens()) {
     if (t.status !== 'healthy' && typeof t.resetsAt === 'number') {
       const prev = _timers.get(t.id);
       if (prev) clearTimeout(prev);
-      const delay = Math.min(Math.max(0, t.resetsAt * 1000 - Date.now() + 30000), 2 ** 31 - 1);
-      _timers.set(
-        t.id,
-        setTimeout(() => doRecover(), delay),
-      );
+      if (t.resetsAt <= now) {
+        // 已过期：不排定时器，统一在循环结束后静默恢复（不发切换通知）
+        _timers.delete(t.id);
+        hasAlreadyExpired = true;
+      } else {
+        // 未来到期：排定时器，到点由 doRecover 处理（会发切换通知，属于真实切换）
+        const delay = Math.min(t.resetsAt * 1000 - Date.now() + 30000, 2 ** 31 - 1);
+        _timers.set(
+          t.id,
+          setTimeout(() => doRecover(), delay),
+        );
+      }
     }
+  }
+  // 一次性静默写盘：清理所有已过期 token 的 exhausted/warning 状态，不触发 _notice
+  if (hasAlreadyExpired) {
+    mutateTokens((cur) => {
+      const r = recoverExpired(cur, now);
+      return r.changed ? r.tokens : false;
+    });
   }
 }
 
