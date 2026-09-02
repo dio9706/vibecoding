@@ -18,6 +18,7 @@ import { initReqView, refreshReqList, renderReqListLocal } from './js/req-view.j
 import { initReqChat } from './js/req-chat.js';
 import { initMemoryPanel, refreshMemBadge } from './js/memory-view.js';
 import { initOptimizePanel } from './js/optimize-view.js';
+import { openProjectMapPanel } from './js/project-map-panel.js';
 import toast from './js/toast.js';
 import { hydrateIcons } from './js/icons.js';
 
@@ -34,7 +35,7 @@ hydrateIcons();
 //（那个阶段还归 boot-gate 的启动罩管）。
 armNetworkGuard({ onDown: showOfflineOverlay, onUp: hideOfflineOverlay });
 
-bindTasksNav(() => showView('tasks'), () => activeView === 'tasks'); // 视图桥：跳转 + 活跃态查询（showView 已提升；activeView 惰性读取无 TDZ）
+bindTasksNav(() => showView('behavior'), () => activeView === 'behavior'); // 视图桥：跳转 + 活跃态查询
 bindChatNav(() => showView('chat'), () => activeView === 'chat'); // 视图桥：回聊天视图跳转 + 聊天视图是否激活（供顶栏审批徽标判定）
 bindTauriNav({ showView, openConv }); // 视图桥：托盘菜单 show-view 跳视图 + 点桌面通知回到对应会话（showView 提升；openConv 由 chat.js 导出）
 bindConvNotify({ applyInjected: applyInjectedItems, getCurrentConvId }); // 🔔 飞书开关 + 补充内容收件箱轮询（getCurrentConvId 传函数引用，模块内实时取，不缓存）
@@ -48,7 +49,7 @@ setOverlayHandoff(maybeStartOnboarding);
       let activeView = 'chat';
       function showView(name) {
         if (activeView === name) return;
-        if (activeView === 'tasks') stopTaskPolling(); // 离开任务视图停轮询
+        if (activeView === 'behavior') stopTaskPolling(); // 离开行为视图停轮询
         activeView = name;
         const inChat = name === 'chat';
         appEl.classList.toggle('in-panel', !inChat);
@@ -63,10 +64,11 @@ setOverlayHandoff(maybeStartOnboarding);
           .forEach((p) => (p.hidden = p.dataset.view !== name));
         if (inChat) chatOnShow(); // display:none 会丢滚动位置，返回时吸底（滚动语义在 chat.js）
         if (name === 'settings') { loadSettings(); bindConfigTransfer(); }
-        else if (name === 'tasks') {
+        else if (name === 'behavior') {
           requestNotifyPermission(); // 在用户手势内请求桌面通知授权
           startTaskPolling();
-        } else if (name === 'logs') loadLogs();
+          initBehaviorTabs(); // 初始化「需求故障 / 访问日志」内部 tab
+        }
         else if (name === 'json-tool') initJsonTool();
         else if (name === 'memory') initMemoryPanel();
         else if (name === 'optimize') initOptimizePanel();
@@ -91,9 +93,29 @@ setOverlayHandoff(maybeStartOnboarding);
       });
 
       // ---- 入口绑定 ----
-      $('#taskBtn').addEventListener('click', () => toggleView('tasks'));
-      $('#logBtn').addEventListener('click', () => toggleView('logs'));
+      $('#behaviorBtn').addEventListener('click', () => toggleView('behavior'));
+      $('#projectMapBtn').addEventListener('click', openProjectMapPanel);
       $('#settingsBtn').addEventListener('click', () => toggleView('settings'));
+
+      // ---- 行为面板内部 tab 切换（需求故障 / 访问日志） ----
+      let behaviorTabInited = false;
+      function initBehaviorTabs() {
+        if (behaviorTabInited) return;
+        behaviorTabInited = true;
+        const tabs = document.querySelectorAll('#behaviorTabs [data-behavior-tab]');
+        tabs.forEach((btn) => {
+          btn.addEventListener('click', () => {
+            // 激活点击的 tab
+            tabs.forEach((b) => b.classList.toggle('active', b === btn));
+            const target = btn.dataset.behaviorTab;
+            // 切换面板
+            document.getElementById('behaviorPane-tasks').hidden = target !== 'tasks';
+            document.getElementById('behaviorPane-logs').hidden = target !== 'logs';
+            // 切到「访问日志」时懒加载
+            if (target === 'logs') loadLogs();
+          });
+        });
+      }
 
       // ---- 侧栏「会话 / 工具」切换 ----
       (function initToolsToggle() {

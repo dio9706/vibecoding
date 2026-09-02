@@ -1,6 +1,7 @@
 // chat.js —— 聊天体（2026-07-24 壳/体反转切分自 app.js）：状态区 / UI 偏好 / 对话历史 / 消息模型与渲染 / 打字机 / 额度 / 发送与流 / 待续跑轮询
 import { toast, confirmDialog, promptDialog } from './ui.js';
 import { $, debounce, renderMarkdown, lsSet, isMarkdownPath } from './util.js';
+import { decorateUltracode, canEnableUltracode } from './ultracode.logic.js';
 import {
   getPromptText, clearPrompt, handleDrop, insertDroppedPaths,
   stashPrompt, restorePrompt, bindComposerDraft,
@@ -80,6 +81,18 @@ export function openMarkdownFile(path) {
       const sendBtn = $('#sendBtn');
       const stopBtn = $('#stopBtn');
 
+      // 分页加载控制
+      let _msgPagingOffset = 0;  // 从末尾已渲染的消息条数
+      let _msgPagingTotal = 0;   // 当前会话消息总数（用于判断是否还有更多）
+      let _msgPagingMsgs = null; // 当前已拉取的完整消息数组缓存（避免重复拉取）
+
+      // 创建"加载更早消息"按钮容器，插入在 messagesEl 之前
+      const _loadMoreMsgsEl = document.createElement('div');
+      _loadMoreMsgsEl.id = 'loadMoreMsgsEl';
+      _loadMoreMsgsEl.className = 'load-more-msgs-wrap';
+      _loadMoreMsgsEl.style.display = 'none';
+      messagesEl.parentNode.insertBefore(_loadMoreMsgsEl, messagesEl);
+
       // ---- DOM 上限控制（防长会话卡顿）----
       const MAX_DOM_MESSAGES = 300; // 单会话保留最多 300 条「完整渲染」的气泡，更早的折叠为占位
 
@@ -122,6 +135,10 @@ export function openMarkdownFile(path) {
       // 点智谱发出 model=glm-4，却配上 DeepSeek 的 apiKey/baseURL，请求打到
       // api.deepseek.com 要一个 glm-4，必然失败。model 相同的多条凭证也无从区分。
       let chatCustomCredId = localStorage.getItem('claude_custom_cred_id') || '';
+      // ultracode（多智能体编排）会话级开关。刻意不落 localStorage 全局默认：新会话永远从关开始，
+      // 否则在 A 会话开了编排做大重构、切到 B 问个小问题，B 的每条消息也会去拉工作流烧额度。
+      // 持久化与还原完全照 chatMode 的流程：recordMessage 快照 / persistPrefsToConv 写穿 / applySessionPrefs 还原。
+      let chatUltracode = false;
       let chatActiveTokenLabel = ''; // 当前激活 token 的名称，由 initUiPrefs 从服务端填充
 
       // ---- UI 偏好持久化（服务端 settings.json，跨重启/跨浏览器） ----
@@ -280,14 +297,21 @@ export function openMarkdownFile(path) {
           messagesEl.querySelectorAll('.msg').forEach((m) => m.remove());
           const msgs = session.messages || [];
           if (msgs.length) emptyEl.style.display = 'none';
+          // 分页加载：初始化状态，只渲染最后30条
+          _msgPagingMsgs = msgs;
+          _msgPagingTotal = msgs.length;
+          _msgPagingOffset = Math.min(30, msgs.length);
           // 同时展示 + 落库（照普通发送流程：addMessage 展示、recordMessage 落库）。
           // 注意字段名：recordMessage 形参是 text，需把 msg.content 传入；首条 user 消息会由 recordMessage 设出标题。
-          for (const msg of msgs) {
+          // 注意：不要往 messages 里塞无 DOM 的标记消息 —— paintJob 靠「存储索引=DOM 索引」找气泡，
+          // 任何只落库不上屏的消息都会让后续流式输出画到不存在的气泡上（曾致气泡永远空白）
+          for (const msg of msgs.slice(-_msgPagingOffset)) {
             await addMessage(msg.role, msg.content);
             recordMessage(msg.role, msg.content);
           }
-          // 注意：不要往 messages 里塞无 DOM 的标记消息 —— paintJob 靠「存储索引=DOM 索引」找气泡，
-          // 任何只落库不上屏的消息都会让后续流式输出画到不存在的气泡上（曾致气泡永远空白）
+          // 更新"加载更早消息"按钮状态
+          _updateLoadMoreMsgsBtn();
+          _applyBubbleFolding();
           historyCacheExpire = 0; // 续接后失效列表缓存，下次打开重新拉取
           updateComposerRunning();
           // 这条路径不走 openConv，漏掉就会让收件箱轮询继续盯着上一个会话（放在此处才保证 currentConvId 已切）
@@ -296,6 +320,101 @@ export function openMarkdownFile(path) {
           console.error('续接历史会话失败:', err);
           toast('续接历史会话失败');
         }
+      }
+
+      // 检测并折叠单条消息气泡（height > 240px 时显示末尾内容）
+      function _maybeFoldBubble(msgEl) {
+        const bubble = msgEl.querySelector('.bubble');
+        if (!bubble || bubble.classList.contains('msg-folded')) return;
+        if (bubble.scrollHeight <= 240) return;
+
+        // 在气泡内顶部插入渐变遮罩（sticky 定位，跟随内容顶部）
+        const overlay = document.createElement('div');
+        overlay.className = 'msg-fold-overlay';
+        bubble.prepend(overlay);
+
+        // 应用折叠样式（必须在 scrollTop 赋值之前，否则 overflow-y:scroll 未生效，无法滚动）
+        bubble.classList.add('msg-folded');
+
+        // 滚动到底部，显示末尾内容
+        bubble.scrollTop = bubble.scrollHeight;
+
+        // 展开按钮：插在 .bubble-row 之后（作为 .msg 的直接子元素）
+        const bubbleRow = bubble.closest('.bubble-row');
+        // 气泡不在标准 .bubble-row 结构中时（如折叠消息等特殊场景）直接跳过，避免 parentNode 为 null 崩溃
+        if (!bubbleRow) return;
+        const expandBtn = document.createElement('button');
+        expandBtn.className = 'msg-expand-btn';
+        expandBtn.textContent = '展开全文 ▼';
+        expandBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          bubble.classList.remove('msg-folded');
+          overlay.remove();
+          expandBtn.remove();
+        });
+        // 插在 bubbleRow 后面（作为 .msg 的直接子元素）
+        bubbleRow.parentNode.insertBefore(expandBtn, bubbleRow.nextSibling);
+      }
+
+      // 对消息区所有消息（除最后一条）检测并应用气泡折叠
+      // 用 requestAnimationFrame 确保 DOM 已完成布局，scrollHeight 有效
+      function _applyBubbleFolding() {
+        requestAnimationFrame(() => {
+          const msgs = Array.from(messagesEl.querySelectorAll('.msg:not(.collapsed)'));
+          // 最后一条消息始终完全展示，不折叠
+          for (let i = 0; i < msgs.length - 1; i++) {
+            _maybeFoldBubble(msgs[i]);
+          }
+        });
+      }
+
+      // 更新"加载更早消息"按钮（显示/隐藏及文案）
+      function _updateLoadMoreMsgsBtn() {
+        if (_msgPagingOffset >= _msgPagingTotal) {
+          _loadMoreMsgsEl.style.display = 'none';
+          return;
+        }
+        _loadMoreMsgsEl.style.display = 'flex';
+        _loadMoreMsgsEl.innerHTML = '';
+        const btn = document.createElement('button');
+        btn.className = 'load-more-msgs-btn';
+        const remaining = _msgPagingTotal - _msgPagingOffset;
+        btn.textContent = `加载更早消息（还有 ${remaining} 条）`;
+        btn.addEventListener('click', _loadEarlierMsgs);
+        _loadMoreMsgsEl.appendChild(btn);
+      }
+
+      // 向前加载30条历史消息，prepend 到消息区顶部
+      async function _loadEarlierMsgs() {
+        if (!_msgPagingMsgs || _msgPagingOffset >= _msgPagingTotal) return;
+        // 记录滚动位置，加载后恢复（避免视图跳动）
+        // 必须在循环前同时保存 scrollTop 和 scrollHeight：
+        // addMessage 内部每次调用 scrollBottom()，循环结束后 scrollTop 已被污染为底部值
+        const prevScrollTop = messagesEl.scrollTop;
+        const prevScrollHeight = messagesEl.scrollHeight;
+        const newOffset = Math.min(_msgPagingOffset + 30, _msgPagingTotal);
+        const batch = _msgPagingMsgs.slice(_msgPagingTotal - newOffset, _msgPagingTotal - _msgPagingOffset);
+        // 临时隐藏溢出，防止 addMessage 内的 scrollBottom 造成可见闪烁
+        messagesEl.style.overflow = 'hidden';
+        // 在现有第一条消息之前 prepend
+        // 注意：addMessage 会将气泡追加到 bubbleMap 末尾（bubblePush），
+        // 但 insertBefore 使 DOM 顺序与 bubbleMap 顺序相反。
+        // 这在有存活流式任务的会话中会破坏「存储索引=DOM索引=bubbleMap索引」不变量——
+        // openConv 通过 _hasPending 守卫将此类会话降级为全量渲染，保证不进入此路径。
+        // resumeHistorySession 加载的磁盘历史是完结态（无 paintJob），因此无影响。
+        const firstMsg = messagesEl.querySelector('.msg');
+        for (const m of batch) {
+          // openConv 来的消息有 .text 字段，resumeHistorySession 来的有 .content 字段
+          const text = m.text ?? m.content ?? '';
+          const msgEl = await addMessage(m.role, text, m);
+          if (firstMsg) messagesEl.insertBefore(msgEl, firstMsg);
+        }
+        messagesEl.style.overflow = ''; // 恢复 overflow
+        // 使用循环前保存的两个值恢复位置（不读循环后的 scrollTop，已被 scrollBottom 污染）
+        messagesEl.scrollTop = prevScrollTop + (messagesEl.scrollHeight - prevScrollHeight);
+        _msgPagingOffset = newOffset;
+        _updateLoadMoreMsgsBtn();
+        _applyBubbleFolding();
       }
 
       // ---- 对话历史（localStorage 持久化，展示于左侧栏）----
@@ -676,6 +795,7 @@ export function renderConvListNow() {
         c.customModel = chatCustomModel;
         c.customLabel = chatCustomLabel;
         c.customCredId = chatCustomCredId;
+        c.ultracode = chatUltracode; // 每条消息都快照（与 model/mode 同款）；首条消息建会话记录时也会写入，解决「会话还没建就先开了开关」的时序
         c.updatedAt = Date.now();
         saveConvs(list);
         renderConvListDebounced();
@@ -717,6 +837,7 @@ export function renderConvListNow() {
         c.customModel = chatCustomModel;
         c.customLabel = chatCustomLabel;
         c.customCredId = chatCustomCredId;
+        c.ultracode = chatUltracode;
         saveConvs(list); // 不动 updatedAt：纯偏好变更不改变左栏排序
       }
 
@@ -777,7 +898,26 @@ export function renderConvListNow() {
         messagesEl.querySelectorAll('.msg').forEach((m) => m.remove());
         bubbleReset(id); // 清旧缓存，下面 addMessage 会重建
         emptyEl.style.display = c.messages.length ? 'none' : '';
-        for (const m of c.messages) await addMessage(m.role, m.text, m);
+        // 有 pending 流时不分页（分页会导致 bubbleAt 越界，流式输出完全不可见）
+        const _hasPending = c.messages.some((m) => m.pending && m.runId);
+        if (_hasPending || c.messages.length <= 30) {
+          // 全量渲染（原始逻辑）
+          _msgPagingMsgs = null;
+          _msgPagingTotal = 0;
+          _msgPagingOffset = c.messages.length;
+          for (const m of c.messages) await addMessage(m.role, m.text, m);
+          _loadMoreMsgsEl.style.display = 'none';
+          _applyBubbleFolding();
+        } else {
+          // 分页加载：只渲染最后30条
+          _msgPagingMsgs = c.messages;
+          _msgPagingTotal = c.messages.length;
+          _msgPagingOffset = Math.min(30, c.messages.length);
+          for (const m of c.messages.slice(-_msgPagingOffset)) await addMessage(m.role, m.text, m);
+          // 更新"加载更早消息"按钮状态
+          _updateLoadMoreMsgsBtn();
+          _applyBubbleFolding();
+        }
         // 恢复运行态：优先接续本地后台 job；否则按 runId 重连服务端 run（关网页后仍在跑）
         const job = runningJobs[id];
         if (job) {
@@ -817,6 +957,11 @@ export function renderConvListNow() {
       }
       function newConversation() {
         _goChat();
+        // 重置分页状态
+        _msgPagingMsgs = null;
+        _msgPagingTotal = 0;
+        _msgPagingOffset = 0;
+        _loadMoreMsgsEl.style.display = 'none';
         window._setSidebarToolsMode?.(false); // 从工具态复位回会话列表
         const oldId = currentConvId;
         stashDraftForCurrentConv(); // 存旧会话草稿并清空输入框（须早于 currentConvId 置空）
@@ -825,6 +970,11 @@ export function renderConvListNow() {
         localStorage.removeItem('claude_last_conv');
         restorePrompt(localStorage.getItem(NEW_DRAFT_KEY)); // 回填上次「新对话」里没发出去的内容
         currentSession = null;
+        chatUltracode = false; // 新会话从关开始（见变量声明处）
+        syncUltracodeRow();
+        // 🔔 飞书通知是会话级偏好，新对话没有登记：同步复位勾选态并停掉旧会话的收件箱轮询
+        //（findConv(null) → refreshBtn(null) 取消勾选 + stopPolling），否则会留下「勾着但没登记」的假象
+        if (window.__convNotify) window.__convNotify.onConvOpened(null);
         messagesEl.querySelectorAll('.msg').forEach((m) => m.remove());
         emptyEl.style.display = '';
         AnimeAnimations.resetToolState();
@@ -1715,7 +1865,7 @@ export function renderConvListNow() {
 
       // ---- 打字机 + 运行状态（spinner / 工具活动）----
       function shortModel(m, e) {
-        const name = /opus/.test(m) ? 'Opus' : /haiku/.test(m) ? 'Haiku' : 'Sonnet';
+        const name = /fable/.test(m) ? 'Fable' : /opus/.test(m) ? 'Opus' : /haiku/.test(m) ? 'Haiku' : 'Sonnet';
         return e ? name + '·' + e : name;
       }
       function jobStatusText(job) {
@@ -2019,6 +2169,8 @@ export function renderConvListNow() {
           // 同步更新 localStorage
           saveConvs(list); // 直接用已获取的列表引用，无需重读
         }
+        // ultracode 前缀只进 prompt：气泡（上面 addMessage）与记忆库（launchRun 的 typedText）都是原文
+        finalText = decorateUltracode(finalText, { on: chatUltracode, provider: chatProvider });
 
         // 先建占位 job（es 待填），立即显示”运行中…”，避免 start 往返期间无反馈
         const job = {
@@ -2776,6 +2928,7 @@ export function renderConvListNow() {
         { id: 'WebSearch', label: '网页搜索', desc: '搜索互联网' },
         { id: 'WebFetch',  label: '网页抓取', desc: '获取网页内容' },
         { id: 'Task',      label: '子代理',  desc: '启动子任务代理（含 Agent）' },
+        { id: 'Workflow',  label: '工作流',  desc: '多智能体编排（ultracode 触发，可拉起多个子代理）' },
         { id: 'TodoWrite', label: '任务清单', desc: '管理待办清单' },
       ];
 
@@ -2823,6 +2976,12 @@ export function renderConvListNow() {
               chatDisabledTools = chatDisabledTools.filter((t) => t !== id);
             } else {
               if (!chatDisabledTools.includes(id)) chatDisabledTools.push(id);
+              // 关掉工作流工具时同步熄掉 ⚡ ultracode：两行并排在同一弹层，不允许「开关亮着但工具已禁」的矛盾
+              if (id === 'Workflow' && chatUltracode) {
+                chatUltracode = false;
+                persistPrefsToConv();
+                syncUltracodeRow();
+              }
             }
             lsSet('claude_disabled_tools', JSON.stringify(chatDisabledTools));
             saveUiPrefs();
@@ -2869,6 +3028,7 @@ export function renderConvListNow() {
       }
       const MODEL_LABELS = {
         auto: 'Auto',
+        'claude-fable-5-1': 'Fable 5.1',
         'claude-opus-5': 'Opus 5',
         'claude-sonnet-5': 'Sonnet 5',
         'claude-haiku-5': 'Haiku 5',
@@ -2889,10 +3049,21 @@ export function renderConvListNow() {
       const customModelPills = $('#customModelPills');
       const effortRow = $('#effortRow');
       const effortSlider = $('#effortSlider');
+      const ultracodeToggle = $('#ultracodeToggle');
+      const ultracodeRow = $('#ultracodeRow');
+      /** ⚡ ultracode 行：勾选态跟会话级状态；openai-compat 下整行灰掉（别家模型没有 Workflow 工具） */
+      function syncUltracodeRow() {
+        if (!ultracodeToggle || !ultracodeRow) return;
+        ultracodeToggle.checked = chatUltracode;
+        ultracodeRow.classList.toggle('disabled', chatProvider !== 'claude-agent');
+        ultracodeToggle.disabled = chatProvider !== 'claude-agent'; // pointer-events 挡不住键盘，禁用控件本体
+        ultracodeRow.querySelector('.tool-row-name')?.classList.toggle('off', !chatUltracode);
+      }
       if (!MODEL_LABELS[chatModel]) chatModel = 'auto';
       if (!EFFORTS.includes(chatEffort)) chatEffort = 'medium';
       if (!MODES.includes(chatMode)) chatMode = 'default';
       function syncModelUI() {
+        syncUltracodeRow(); // 放在 provider 分支之前：openai-compat 分支会提前 return
         if (chatProvider === 'openai-compat') {
           modelFabLabel.textContent = chatCustomLabel || chatCustomModel || '自定义模型';
           [...modelPills.children].forEach((b) => b.classList.remove('active'));
@@ -3014,6 +3185,12 @@ export function renderConvListNow() {
           lsSet('claude_mode', chatMode);
           changed = true;
         }
+        // ultracode 是会话级开关：缺字段视为关（老会话、CLI 历史会话天然为关），不参与 changed 的 toast
+        const nextUltracode = !!prefs.ultracode && canEnableUltracode(chatDisabledTools); // 工具已全局禁用时不还原亮灯，与点击时的守卫对称
+        if (nextUltracode !== chatUltracode) {
+          chatUltracode = nextUltracode;
+          syncUltracodeRow();
+        }
         if (changed) {
           syncModelUI();
           const lbl =
@@ -3032,6 +3209,18 @@ export function renderConvListNow() {
           refreshCustomModelPills();
           refreshToolsSection();
         }
+      });
+      ultracodeToggle?.addEventListener('change', () => {
+        if (ultracodeToggle.checked && !canEnableUltracode(chatDisabledTools)) {
+          toast('工作流工具已关闭，请先在下方工具列表开启');
+          ultracodeToggle.checked = false; // 浏览器已先打勾，按真值回写
+          return;
+        }
+        chatUltracode = ultracodeToggle.checked;
+        persistPrefsToConv(); // 无会话时 no-op，首条消息由 recordMessage 快照带入
+        syncUltracodeRow();
+        // 不调 saveUiPrefs：ultracode 是会话级偏好，不进服务端全局默认（理由见变量声明处）
+        if (chatUltracode && currentConvId && runningJobs[currentConvId]) toast('编排将从下一条新消息生效，插话不带 ultracode');
       });
       document.addEventListener('click', (e) => {
         if (!modelPop.hidden && !modelFab.contains(e.target)) modelPop.hidden = true;

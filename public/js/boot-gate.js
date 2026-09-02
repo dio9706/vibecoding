@@ -76,6 +76,10 @@ async function _run() {
     if (elapsed > SLOW_HINT_MS && stage === 0) {
       stage = 1;
       if (textEl) textEl.textContent = '后端启动较慢，正在重试连接…';
+      // 开屏默认只展示 PRINCIPAL，启动文案与「仍然进入」都被 boot-screen.css 藏着。
+      // 这个类是让它们登场的唯一开关——不加，用户在后端不通时会一直干看着，
+      // 直到 90s 兜底放行都无处可点。
+      if (overlay) overlay.classList.add('boot-slow');
     }
     if (elapsed > SKIP_BTN_MS && skipEl && skipEl.hidden) skipEl.hidden = false;
     await sleep(RETRY_GAP_MS);

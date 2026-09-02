@@ -1,5 +1,28 @@
 /** web 入口共享：工具调用摘要 / 只读工具集 / dialog 解析（纯函数，无副作用） */
 
+/**
+ * 从 Workflow 脚本开头的 `export const meta = {...}` 里正则取字段。
+ * 不 eval：meta 按工具契约必须是纯字面量（无变量/调用/插值），正则足够，也不给脚本任何执行机会。
+ * 必须锚到 meta 段：脚本正文的对象字面量（DIMENSIONS、JSON Schema）也常带 name:/description:，
+ * 不锚定就会在脚本漏写 meta 时抓到它们，审批弹窗上显示的工作流身份是假的。
+ * 契约保证 meta 是首条语句，从它起 2000 字的窗口足够覆盖。
+ */
+function workflowMetaField(script, key) {
+  const src = String(script || '');
+  const at = src.search(/export\s+const\s+meta\s*=\s*\{/);
+  if (at < 0) return '';
+  const re = new RegExp('\\b' + key + '\\s*:\\s*([\'"`])((?:\\\\.|[^\\\\])*?)\\1');
+  const m = re.exec(src.slice(at, at + 2000));
+  // 反转义 + 折叠空白：描述里的 \' 与多行 backtick 都要收成一行摘要
+  return m
+    ? m[2]
+        .replace(/\\[nrt]/g, ' ') // 转义换行/制表先降成空格，交给下面折叠；否则通用反转义会把 \n 吃成裸字母 n
+        .replace(/\\(.)/g, '$1') // 其余转义（\' \" \\）反转义
+        .replace(/\s+/g, ' ')
+        .trim()
+    : '';
+}
+
 /** 工具调用 → 简短中文状态（用于 activity 事件展示，让前端能看到 Claude 在干嘛） */
 export function summarizeTool(a) {
   const name = a.name || '工具';
@@ -29,6 +52,20 @@ export function summarizeTool(a) {
       return `抓取 ${clip(inp.url)}`;
     case 'WebSearch':
       return `搜网 “${clip(inp.query, 32)}”`;
+    case 'Workflow': {
+      // 名字优先级：脚本 meta.name → 预定义工作流 input.name → scriptPath 文件名 → 兜底。
+      // 名字由模型自拟、长度无约束，与其它分支一样必须过 clip；不叫 name 是为了不遮蔽外层的工具名
+      const wfName = clip(
+        workflowMetaField(inp.script, 'name') ||
+          inp.name ||
+          (inp.scriptPath ? String(inp.scriptPath).split(/[\\/]/).pop() : '') ||
+          '未命名',
+        24,
+      );
+      const desc = workflowMetaField(inp.script, 'description');
+      // 与转录行（claude.logic.js 的「工作流(名)启动：…」）同形：同一实体在相邻两行里只用一种写法
+      return desc ? `工作流(${wfName})：${clip(desc, 40)}` : `工作流(${wfName})`;
+    }
     case 'TodoWrite':
       return '更新任务清单';
     default:
@@ -48,6 +85,7 @@ export const READONLY_TOOLS = new Set([
   'WebFetch',
   'Task',
   'Agent', // SDK 0.3.210+ 子代理工具改名 Agent；子代理内部的改动类工具仍会逐个走审批
+  // Workflow 刻意不放行：它一次能拉起十几个子代理，风险不在改文件而在烧额度；询问模式下必须让用户点头
 ]);
 
 /** 尽力从 dialog payload 解析出可渲染的问题/选项；结构不认识返回 null（→ cancelled） */

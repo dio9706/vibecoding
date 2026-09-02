@@ -1,0 +1,221 @@
+/**
+ * 吉祥物组件样式：描边圆环 + 两颗光点眼。
+ *
+ * 三条约束，改动前先读：
+ * 1. 全部类名以 pm- 前缀命名空间隔离，避免和 app.css 的全局选择器互相污染；
+ * 2. 状态是单一轴 —— 同一时刻只有一个 .pm-is-* 类，不存在状态叠加，
+ *    因为吉祥物在视觉上不可能既「点头庆祝」又「抖动报错」；
+ * 3. 颜色一律走 --pm-color，状态类只需覆盖这一个变量即可整体换色，
+ *    不要在 ring/eye/arc 上分别写死颜色。
+ */
+
+.pm {
+  --pm-color: var(--accent, #d97757);
+  width: var(--pm-size, 120px);
+  height: var(--pm-size, 120px);
+  display: inline-block;
+  line-height: 0;
+}
+
+.pm-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible; /* 呼吸/弹跳会略微超出 viewBox，禁止裁切 */
+}
+
+.pm-ring {
+  fill: none;
+  stroke: var(--pm-color);
+  stroke-width: 7;
+  stroke-linecap: round;
+  transition: stroke 0.25s ease;
+}
+
+/*
+ * 轨道环：只在执行中出现。跑马灯把 pm-ring 切成一小段高光，剩下 80% 轮廓会整个消失，
+ * 吉祥物看起来像缺了一块；垫一圈暗色轨道才能既保住脸型又读出进度。
+ */
+.pm-track {
+  fill: none;
+  stroke: var(--pm-color);
+  stroke-width: 7;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+/* 常态眼：实心椭圆。fill-box 让缩放绕自身中心，否则眨眼会飞走 */
+.pm-eye {
+  fill: var(--pm-color);
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: fill 0.25s ease;
+}
+
+/* 弯月眼：仅在 happy / done / sad 出现。sad 直接把它翻转复用，不另画一套 */
+.pm-arc {
+  display: none;
+  fill: none;
+  stroke: var(--pm-color);
+  stroke-width: 6.5;
+  stroke-linecap: round;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/* ============ 待命 ============ */
+.pm-is-idle .pm-svg { animation: pmBreathe 3.6s ease-in-out infinite; }
+.pm-is-idle .pm-eye { animation: pmBlink 4.4s infinite; }
+
+/* ============ 执行中 ============ */
+/* 高光沿轮廓跑而非整环旋转：换成任意轮廓时这套机制依然成立 */
+.pm-is-loading .pm-svg   { animation: pmBreathe 1.5s ease-in-out infinite; }
+.pm-is-loading .pm-face  { animation: pmScan 1.9s ease-in-out infinite; }
+.pm-is-loading .pm-track { opacity: 0.24; }
+/*
+ * dash 数值直接用 26/74 而非 calc(var(--pm-len) * .26)：keyframe 里含自定义属性的值
+ * 不可插值，浏览器会退化成离散动画 —— 表现为高光每周期瞬移一次而不是滑动，
+ * 肉眼看就是「没转起来」。SVG 上的 pathLength="100" 已把周长归一化，直接写字面量即可。
+ */
+.pm-is-loading .pm-ring {
+  stroke-dasharray: 26 74;
+  animation: pmTrace 1.5s linear infinite;
+}
+
+/* ============ 等待（在等你，不是在干活） ============ */
+/* 与执行中刻意区分：这里没有任何"推进感"，只有悬停的歪头和呼吸式明暗 */
+.pm-is-waiting .pm-svg  { animation: pmTilt 2.6s ease-in-out infinite; }
+.pm-is-waiting .pm-face { transform: translateY(-5px); }
+.pm-is-waiting .pm-ring { animation: pmDim 1.8s ease-in-out infinite; }
+.pm-is-waiting .pm-eye  { animation: pmBlink 3.2s infinite; }
+
+/* ============ 完成 ============ */
+/* 只点 3 次头就收住：完成是一个事件，不是一个可以无限循环的状态 */
+.pm-is-done { --pm-color: var(--green, #6cc38a); }
+.pm-is-done .pm-svg { animation: pmNod 0.9s ease-in-out 3; }
+.pm-is-done .pm-eye { display: none; }
+.pm-is-done .pm-arc { display: block; }
+
+/* ============ 异常 ============ */
+.pm-is-error { --pm-color: var(--red, #e5687a); }
+.pm-is-error .pm-svg { animation: pmShake 0.5s ease-in-out infinite; }
+/* 两眼反向倾斜成「皱眉」，比单纯压扁更能读出「出事了」 */
+.pm-is-error .pm-eye:nth-of-type(1) { transform: scaleY(0.34) rotate(14deg); }
+.pm-is-error .pm-eye:nth-of-type(2) { transform: scaleY(0.34) rotate(-14deg); }
+
+/* ============ 开心 ============ */
+/* 不换色：开心是情绪，不是结果。换成绿色会被误读成「任务完成」 */
+.pm-is-happy .pm-svg { animation: pmBounce 0.75s cubic-bezier(0.3, 1.4, 0.5, 1) infinite; }
+.pm-is-happy .pm-eye { display: none; }
+.pm-is-happy .pm-arc { display: block; }
+
+/* ============ 难过 ============ */
+.pm-is-sad { --pm-color: #7b86a8; }
+.pm-is-sad .pm-svg { animation: pmSag 3.2s ease-in-out infinite; }
+.pm-is-sad .pm-eye { display: none; }
+.pm-is-sad .pm-arc { display: block; transform: scaleY(-1); } /* 弯月翻转即垂眼 */
+
+/* ============ 眨眼（俏皮） ============ */
+.pm-is-wink .pm-svg { animation: pmTiltOnce 1.6s ease-in-out infinite; }
+.pm-is-wink .pm-eye:nth-of-type(2) { animation: pmWink 1.6s ease-in-out infinite; }
+
+/* ============ 惊讶 ============ */
+.pm-is-surprised .pm-eye  { animation: pmPop 0.9s cubic-bezier(0.2, 1.6, 0.4, 1) infinite; }
+.pm-is-surprised .pm-ring { animation: pmRingPop 0.9s ease-out infinite; }
+
+/* ============ 休眠 ============ */
+.pm-is-sleep { --pm-color: var(--faint, #5a5b68); }
+.pm-is-sleep .pm-svg { animation: pmBreathe 5.5s ease-in-out infinite; }
+.pm-is-sleep .pm-eye { transform: scaleY(0.12); }
+
+/* ============ keyframes ============ */
+@keyframes pmBreathe {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.04); }
+}
+@keyframes pmBlink {
+  0%, 93%, 100% { transform: scaleY(1); }
+  96%           { transform: scaleY(0.08); }
+}
+@keyframes pmScan {
+  0%, 100% { transform: translateX(-8px); }
+  50%      { transform: translateX(8px); }
+}
+@keyframes pmTrace {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: -100; } /* 归一化周长，走满一圈即无缝衔接 */
+}
+@keyframes pmTilt {
+  0%, 100% { transform: rotate(-9deg); }
+  50%      { transform: rotate(9deg); }
+}
+@keyframes pmTiltOnce {
+  0%, 60%, 100% { transform: rotate(0deg); }
+  25%           { transform: rotate(-8deg); }
+}
+@keyframes pmDim {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
+@keyframes pmNod {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(8px); }
+}
+@keyframes pmShake {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-6px); }
+  75%      { transform: translateX(6px); }
+}
+@keyframes pmBounce {
+  0%, 100% { transform: translateY(0) scale(1); }
+  40%      { transform: translateY(-11px) scale(1.03); }
+  70%      { transform: translateY(2px) scale(0.985); }
+}
+@keyframes pmSag {
+  0%, 100% { transform: translateY(3px) scale(0.97); }
+  50%      { transform: translateY(7px) scale(0.955); }
+}
+@keyframes pmWink {
+  0%, 55%, 100% { transform: scaleY(1); }
+  70%, 85%      { transform: scaleY(0.08); }
+}
+@keyframes pmPop {
+  0%, 100% { transform: scale(1); }
+  35%      { transform: scale(1.38); }
+}
+@keyframes pmRingPop {
+  0%, 100% { transform: scale(1); }
+  35%      { transform: scale(1.06); }
+}
+
+/* ============ 开机粒子动画画布 ============ */
+.pm-boot {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+}
+/* 画布绝对定位盖在吉祥物上，粒子汇聚完成后交叉淡出，露出真正的 SVG */
+.pm-boot-canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.pm-boot-target {
+  opacity: 0;
+  transition: opacity 0.55s ease;
+}
+.pm-boot-target.pm-boot-revealed {
+  opacity: 1;
+}
+
+/* 无障碍：用户要求减少动效时只保留静态姿态 */
+@media (prefers-reduced-motion: reduce) {
+  .pm-svg,
+  .pm-face,
+  .pm-eye,
+  .pm-arc,
+  .pm-ring {
+    animation: none !important;
+  }
+  .pm-boot-target { transition: none; }
+}

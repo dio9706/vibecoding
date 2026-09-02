@@ -67,6 +67,7 @@ import {
 import { handleRequirementRoutes } from './routes-requirements.js';
 import { handleMemoryRoutes } from './routes-memory.js';
 import { handleOptimizeRoutes } from './routes-optimize.js';
+import { handleProjectMapRoutes } from './routes-project-map.js';
 import { handleConvNotifyRoutes } from './routes-conv-notify.js';
 import { startConvNotify } from './conv-notify.js';
 import {
@@ -151,6 +152,7 @@ const ROUTES = [
   { prefix: '/api/req/', h: (req, res, url) => handleRequirementRoutes(req, res, url) },
   { prefix: '/api/memory/', h: (req, res, url) => handleMemoryRoutes(req, res, url) },
   { prefix: '/api/optimize/', h: (req, res, url) => handleOptimizeRoutes(req, res, url) },
+  { prefix: '/api/project-map/', h: (req, res, url) => handleProjectMapRoutes(req, res, url) },
   { path: '/api/settings', h: (req, res) => handleSettings(req, res) },
   { path: '/api/settings/export', h: (req, res) => handleSettingsExport(req, res) },
   { path: '/api/settings/import', h: (req, res) => handleSettingsImport(req, res) },

@@ -2,16 +2,17 @@
 
 **定位**：全项目对外部系统的适配层。每个外部依赖（Claude Agent SDK、飞书、子进程、docx）都由**单一文件收口成唯一入口**，上层一律只 import 这里，绝不直接引第三方 SDK。本层处于分层链 `entrypoints → app → features/plugins → capabilities → integrations/store → shared` 的下游，只依赖 `src/shared/`（`config.js` / `logger.js` / `app-paths.js`），不反向依赖任何上层。
 
-**一句话判断**：这四个源文件之间**互不调用、无编排关系**——它们是并列的适配器，不是一条流水线。所谓「流程」指的是每个文件内部如何把一次调用翻译成对外部系统的交互，而非文件间的数据传递。要找编排逻辑，应上溯到 `entrypoints` / `features` 层。
+**一句话判断**：适配器文件（`claude.js` / `lark.js` / `shell.js` / `notify.js` / `docx.js`）之间**互不调用、无编排关系**——它们是并列的适配器，不是一条流水线；`claude.logic.js` 是 `claude.js` 的纯逻辑层，只被它 import。所谓「流程」指的是每个文件内部如何把一次调用翻译成对外部系统的交互，而非文件间的数据传递。要找编排逻辑，应上溯到 `entrypoints` / `features` 层。
 
 ## 文件清单
 
 - `claude.js` — Claude Agent SDK 封装，全项目唯一的 Claude 调用入口。导出 `runClaude`（流式执行 + 重试）、`createInputQueue`（插话/steering 输入队列）。**本模块唯一有复杂控制流的文件**。
+- `claude.logic.js` — `claude.js` 的纯逻辑层（零 IO、零 import）：`describeTaskEvent` 把 SDK task_* 系统事件翻成活动转录文案，按 task_id 在 per-attempt 的 Map 里记住「工作流 / 子代理 / 后台任务」类型与 skip 标记（只有 task_started 带 workflow_name，progress 只带 subagent_type，notification 两者都不带，所以只能查表）；`isTaskEvent` 供 `claude.js` 判断分派。
 - `lark.js` — 飞书（Lark）API 封装，全项目唯一的飞书调用入口。导出 client/WSClient 工厂、发消息（文本/Markdown/卡片/图片/文件）、表情、资源下载、docx/wiki/bitable 读取、凭证热切换。文件最长、API 面最广。
 - `shell.js` — 本地脚本/CLI 执行封装，全项目唯一的子进程入口。导出 `runScript`、`DEFAULT_TIMEOUT_MS`。
 - `notify.js` — 系统级通知（Windows 气泡/Toast），fire-and-forget。导出 `systemNotify`。
 - `docx.js` — docx → 纯文本（mammoth.extractRawText）。导出 `docxToMdFile`。
-- `claude.test.js` / `claude-retry.test.js` — `createInputQueue` 队列语义、`runClaude` 重试逻辑单测。
+- `claude.test.js` / `claude-retry.test.js` / `claude.logic.test.js` — `createInputQueue` 队列语义、`runClaude` 重试逻辑、task_* 事件标签（含常驻任务压制、回落、变异守护）单测。
 - `lark.file.test.js` / `lark.username.test.js` — 飞书文件上传约束、用户姓名解析缓存单测。
 - `shell.test.js` — `runScript` 子进程行为单测。
 
@@ -21,7 +22,7 @@
 `runClaude(prompt, opts)`：
 1. 若传了 `opts.onInputHandle` → `createInputQueue(prompt)` 建流式输入队列（首条为初始 prompt，运行中可 `push` 插话）；否则 prompt 按字符串直传。
 2. `query({ prompt, options })` 创建 SDK 查询；随即把 `{ push, close, interrupt }` 句柄回交调用方（`interrupt` 直接绑 `q.interrupt()`，做到轮内打断而 run 不死）。
-3. `for await (message of q)` 消费 SDK 消息流，按 `message.type`/`subtype` 分派到回调：`init→onInit`、`task_*→onActivity`（子代理进度）、`rate_limit_event→onRateLimit`、`stream_event→onText`（token 级增量）、`assistant→onText/onActivity`、`result→onResult`；每条消息都先调 `onPulse` 喂看门狗（子代理静默期也算存活）。
+3. `for await (message of q)` 消费 SDK 消息流，按 `message.type`/`subtype` 分派到回调：`init→onInit`、`task_*→isTaskEvent→describeTaskEvent→onActivity`（子代理 / 工作流 / 后台任务进度，类型按 task_id 查表，见 claude.logic.js）、`rate_limit_event→onRateLimit`、`stream_event→onText`（token 级增量）、`assistant→onText/onActivity`、`result→onResult`；每条消息都先调 `onPulse` 喂看门狗（子代理静默期也算存活）。
 4. `result` 到达 → `inputQueue.autoClose()`：无积压则关流收尾，有刚插入的插话则继续同一 run 的下一轮。
 5. `catch`：仅 `stalled`/`mid-stream` 类网络错误才重试，指数退避（1s→2s→4s，上限 10s），重试前重建 `inputQueue`；权限/请求非法等其他错误直接抛。
 
@@ -41,7 +42,7 @@
 
 ## 常见改动入口
 
-- 要给 `runClaude` 加参数 / 改消息类型分派 / 调重试策略，就改 `claude.js` 的 `runClaude`（新 opts 在解构处加、透传在 `query({ options })` 处加）。
+- 要给 `runClaude` 加参数 / 改消息类型分派 / 调重试策略，就改 `claude.js` 的 `runClaude`（新 opts 在解构处加、透传在 `query({ options })` 处加）；要改 task_* 事件的文案或类型判定，改 `claude.logic.js`（有单测，先改测试）。
 - 要改插话（steering）队列语义（何时关流、如何续轮），就改 `claude.js` 的 `createInputQueue` 与 `runClaude` 里的 `autoClose` 调用点。
 - 要给飞书加一类新 API（发某种消息、读某类文档/表格），就在 `lark.js` 新增导出函数，复用 `getClient()`，业务码校验照抄 `if (r?.code) throw`。
 - 要改多账号轮换 / 凭证失效逻辑，就改 `lark.js` 的 `resetApiClient`（决定清哪些缓存）。

@@ -1,5 +1,5 @@
 /**
- * 会话级飞书通知开关（输入框上方的 🔔 按钮）+ 补充内容收件箱轮询。
+ * 会话级飞书通知开关（模型选择器弹层「会话」区的 🔔 行）+ 补充内容收件箱轮询。
  *
  * 链路全貌：run 终结 → 服务端推飞书卡片 → 用户点[补充内容]回一句 → 飞书进程 HTTP 打
  * /api/conv-notify/inject → 服务端起 run（或插话）并把这条消息写进该会话的收件箱 →
@@ -22,7 +22,10 @@ const POLL_MS = 5000;
  *           getCurrentConvId: () => (string|null) }} deps
  */
 export function bindConvNotify(deps) {
-  const btn = document.getElementById('notifyFabBtn');
+  const input = document.getElementById('notifyToggle');
+  // 同行的名字 span：勾选态之外再切 .off 灰字，与下方工具列表行的视觉一致；
+  // 行结构缺失时（本模块被加载在没有这一行的页面上）降级为只切勾选态
+  const rowName = input?.closest('.tool-row')?.querySelector('.tool-row-name') || null;
   const applyInjected = deps?.applyInjected;
   const getConvId = deps?.getCurrentConvId || (() => null);
   let timer = null; // 单一轮询定时器：全局只应存在一个，切会话时换目标而不是叠加
@@ -42,17 +45,15 @@ export function bindConvNotify(deps) {
   }
 
   /**
-   * 按会话偏好刷新按钮外观。
+   * 按会话偏好刷新开关行外观（勾选态 + 名字灰字）。
    * 形参未必是 conv：applySessionPrefs 的 CLI 历史分支传的是合成对象 {model, mode}，
    * 此时可选链天然落到「未激活」，正合语义（磁盘历史会话从没登记过通知）。
    */
   function refreshBtn(conv) {
-    if (!btn) return;
+    if (!input) return;
     const on = !!conv?.meta?.notifyFeishu;
-    btn.classList.toggle('on', on);
-    btn.title = on
-      ? '已开启：任务结束/失败后发飞书通知（点击关闭）'
-      : '任务结束/失败后发飞书通知';
+    input.checked = on;
+    rowName?.classList.toggle('off', !on);
   }
 
   /** 服务端登记表存的是会话快照（飞书侧靠它 resume 回原会话），缺字段一律给可用默认值。 */
@@ -114,8 +115,8 @@ export function bindConvNotify(deps) {
     convSetMeta(convId, { notifyFeishu: true });
     toast('已开启：任务结束/失败会发飞书通知');
     // 等待往返期间用户可能已切走：按钮与轮询都只服务「当前会话」，切走了就交给 onConvOpened
+    // （refreshBtn 不必在此重复调用：change 监听的 finally 收尾已按 conv.meta 真值回写过一次）
     if (getConvId() === convId) {
-      refreshBtn(findConv(convId));
       startPolling();
     }
   }
@@ -175,7 +176,25 @@ export function bindConvNotify(deps) {
     }
   }
 
-  btn?.addEventListener('click', () => toggle());
+  // change 而非 click：checkbox 在事件到达前已被浏览器改了勾选态；toggle() 有多条拒绝路径
+  //（无会话 / 网络失败 / 服务端配置缺失），所以无论成败收尾都按 conv.meta 真值回写一次，
+  // 否则拒绝路径会留下「勾着但没登记」的假象。
+  // busy：/on 往返期间再点一次会让第二个 toggle() 读到未写入的 meta、重复登记，且在途窗口里视觉是「已开」而服务端未登记；
+  // 在途期间禁用控件、点击直接回弹。
+  let busy = false;
+  input?.addEventListener('change', () => {
+    if (busy) {
+      refreshBtn(findConv(getConvId()));
+      return;
+    }
+    busy = true;
+    input.disabled = true;
+    toggle().finally(() => {
+      busy = false;
+      input.disabled = false;
+      refreshBtn(findConv(getConvId()));
+    });
+  });
 
   // 全局桥：chat.js 里三处调用点（openConv / SSE 拿到 session / applySessionPrefs）
   // 都以 `if (window.__convNotify)` 守卫，本模块未加载时静默跳过，故不需要反向依赖。

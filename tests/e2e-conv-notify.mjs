@@ -6,10 +6,10 @@
  *    此后不再下发。所以只有 applyInjectedItems 返回的「**真正上了屏**的 id」才允许拿去 claim；
  *    对空数组（或没上屏的 id）调 claim，等于把用户在飞书里敲进来的那句补充内容永久蒸发 ——
  *    既没进对话、也无处可查，且不可逆。本门禁因此专门断言「空 items 轮次不得调 /claim」。
- * ② **ok:false 不得点亮按钮**。/on 在「缺 myFeishuOpenId」「没有启用中的机器人」时回的是
+ * ② **ok:false 不得勾选开关**。/on 在「缺 myFeishuOpenId」「没有启用中的机器人」时回的是
  *    200 + {ok:false, error}（故意不用 4xx，好让前端弹出可执行的下一步）。这是配置缺失而非
- *    请求失败，此时若把按钮点亮，用户会以为通知已生效、实际一条也发不出去，任务跑完只剩沉默 ——
- *    这种「假成功」比直接报错更难被发现，所以断言必须同时覆盖「不加 .on」和「不写 meta」。
+ *    请求失败，此时若把开关勾选上，用户会以为通知已生效、实际一条也发不出去，任务跑完只剩沉默 ——
+ *    这种「假成功」比直接报错更难被发现，所以断言必须同时覆盖「不勾选」和「不写 meta」。
  *
  * 与 tests/e2e-req-review.mjs 同范式：自起独立 web 服务器（mkdtemp 临时 APP_DATA_DIR +
  * 内核分配的空闲端口），**绝不触碰 pm2 的 principal-web** —— 3000 端口与仓库根数据目录是用户
@@ -19,12 +19,12 @@
  * 需要固定端口时用 E2E_PORT 覆盖。
  *
  * 三阶段共用一个服务端进程，各开独立 browser context 拿干净的 localStorage：
- *  ① 未配飞书 —— 结构断言（按钮在 composer 上方、排在 #modelFab 之前）+ 点击只弹 toast，
- *                不点亮、不写 meta
- *  ② 配好飞书 —— 点亮 + 写 meta + 服务端登记表收到完整快照；切走变灰、切回仍亮；
+ *  ① 未配飞书 —— 结构断言（开关行 #notifyRow 位于模型选择器弹层的 #convPrefsSection 内）+
+ *                点击只弹 toast，不勾选、不写 meta
+ *  ② 配好飞书 —— 勾选 + 写 meta + 服务端登记表收到完整快照；切走取消勾选、切回仍勾选；
  *                桩掉 /inbox 投一条 → 用户气泡上屏 + /claim 被调用；空 items 轮次不调 claim
  *  ③ 真链路   —— 全程不打桩：直接往服务端 conv-notify.json 的收件箱塞一条，断言它上屏、
- *                且 /claim 真把服务端那条清空；再点一次按钮验证 /off 注销登记
+ *                且 /claim 真把服务端那条清空；再点一次开关验证 /off 注销登记
  *
  * 阶段②③各需等一个 5s 轮询周期，整轮约 25s，属预期耗时。
  * 运行：node tests/e2e-conv-notify.mjs
@@ -157,7 +157,7 @@ try {
   }
 
   const isOn = (page) =>
-    page.evaluate(() => document.querySelector('#notifyFabBtn')?.classList.contains('on'));
+    page.evaluate(() => document.querySelector('#notifyToggle')?.checked === true);
   const toastText = (page) =>
     page.evaluate(() =>
       [...document.querySelectorAll('#toast-container .toast-msg')].map((e) => e.textContent).join(' | '),
@@ -170,6 +170,15 @@ try {
       id,
     );
   const clickConv = (page, id) => page.click(`#convList .conv-item[data-conv-id="${id}"]`);
+  /** 开关现收在默认 hidden 的 #modelPop 弹层里：先探测是否已开，未开则点 #modelFabBtn 打开
+   *（点弹层内部不会把它带关——#modelPop 嵌在 #modelFab 内，外部点击才触发那份收起逻辑）。
+   *  #notifyToggle 本体是 opacity:0/0×0（纯语义承载，视觉由同 label 内的 .toggle-slider 顶替），
+   *  Playwright 拒绝点 0×0 元素，故点同一行里可见的 .tool-toggle。 */
+  async function clickNotifyToggle(page) {
+    const hidden = await page.evaluate(() => document.querySelector('#modelPop')?.hidden);
+    if (hidden) await page.click('#modelFabBtn');
+    await page.click('#notifyRow .tool-toggle');
+  }
   /** 轮询等待某段文字出现在**用户气泡**里（注入项必须是 user 角色，画进助手气泡即为 bug） */
   async function waitUserBubble(page, text, timeoutMs) {
     const t0 = Date.now();
@@ -190,36 +199,24 @@ try {
     const { ctx, page } = await openPage();
     page.assertNoErrors('启动');
 
-    if (!(await page.evaluate(() => !!document.querySelector('#fabRow #notifyFabBtn')))) {
-      fail('#notifyFabBtn 不在 #fabRow 内');
+    if (!(await page.evaluate(() => !!document.querySelector('#modelPop #convPrefsSection #notifyRow')))) {
+      fail('#notifyRow 不在 #modelPop 的 #convPrefsSection 内');
     } else {
-      step('#notifyFabBtn 位于 #fabRow 内');
+      step('#notifyRow 位于 #modelPop 的 #convPrefsSection 内');
     }
     if (!(await page.evaluate(() => !!window.__convNotify))) fail('window.__convNotify 桥未挂载');
     else step('window.__convNotify 桥已挂载');
 
-    const geo = await page.evaluate(() => {
-      const b = document.querySelector('#notifyFabBtn').getBoundingClientRect();
-      const c = document.querySelector('footer.composer').getBoundingClientRect();
-      const m = document.querySelector('#modelFab').getBoundingClientRect();
-      return { btnBottom: b.bottom, composerTop: c.top, btnLeft: b.left, modelLeft: m.left, w: b.width, h: b.height };
-    });
-    if (!(geo.w > 0 && geo.h > 0)) fail('按钮不可见：' + JSON.stringify(geo));
-    if (!(geo.btnBottom <= geo.composerTop + 1)) fail('按钮未位于输入框上方：' + JSON.stringify(geo));
-    else step(`按钮在输入框上方（btnBottom=${geo.btnBottom.toFixed(1)} ≤ composerTop=${geo.composerTop.toFixed(1)}）`);
-    if (!(geo.btnLeft < geo.modelLeft)) fail('按钮未排在 #modelFab 之前：' + JSON.stringify(geo));
-    else step('按钮排在 #modelFab 之前');
-
-    // 不变量②：缺 myFeishuOpenId → 200 + ok:false → 只弹 toast，不点亮、不写 meta
+    // 不变量②：缺 myFeishuOpenId → 200 + ok:false → 只弹 toast，不勾选、不写 meta
     await clearToasts(page);
-    await page.click('#notifyFabBtn');
+    await clickNotifyToggle(page);
     await page.waitForTimeout(900);
     const t = await toastText(page);
-    if (!t) fail('未配飞书时点按钮没有弹 toast');
+    if (!t) fail('未配飞书时点开关没有弹 toast');
     else if (!t.includes('open_id') && !t.includes('机器人')) fail('toast 未指出配置缺失原因：' + t);
     else step('弹出指路 toast：' + t);
-    if (await isOn(page)) fail('【不变量②破坏】ok:false 时按钮被点亮');
-    else step('按钮未点亮（无 .on）');
+    if (await isOn(page)) fail('【不变量②破坏】ok:false 时开关被勾选');
+    else step('开关未被勾选（checked=false）');
     const meta = await convMeta(page, 'cA');
     if (meta?.notifyFeishu) fail('【不变量②破坏】ok:false 时误写了 meta.notifyFeishu');
     else step('未写 meta.notifyFeishu：' + JSON.stringify(meta));
@@ -241,10 +238,10 @@ try {
     page.assertNoErrors('启动');
 
     await clearToasts(page);
-    await page.click('#notifyFabBtn');
+    await clickNotifyToggle(page);
     await page.waitForTimeout(900);
-    if (!(await isOn(page))) fail('配好飞书后点击按钮未点亮');
-    else step('按钮已点亮（.on），toast：' + (await toastText(page)));
+    if (!(await isOn(page))) fail('配好飞书后点击开关未勾选');
+    else step('开关已勾选（checked），toast：' + (await toastText(page)));
     const metaA = await convMeta(page, 'cA');
     if (!metaA?.notifyFeishu) fail('meta.notifyFeishu 未写入：' + JSON.stringify(metaA));
     else step('meta 已写入：' + JSON.stringify(metaA));
@@ -259,8 +256,8 @@ try {
 
     await clickConv(page, 'cB');
     await page.waitForTimeout(600);
-    if (await isOn(page)) fail('切到会话B 后按钮仍亮');
-    else step('切到会话B → 按钮变灰');
+    if (await isOn(page)) fail('切到会话B 后开关仍勾选');
+    else step('切到会话B → 开关取消勾选');
 
     // 桩 /inbox：runId 留空以免触发 SSE 接流（本门禁不起真实 run）。三轮各打一个点 ——
     //  第 1 轮：一条正常项，验证上屏 + claim 走通；
@@ -292,8 +289,8 @@ try {
 
     await clickConv(page, 'cA');
     await page.waitForTimeout(600);
-    if (!(await isOn(page))) fail('切回会话A 后按钮未复亮（会话级 meta 未还原）');
-    else step('切回会话A → 按钮仍亮');
+    if (!(await isOn(page))) fail('切回会话A 后开关未复勾（会话级 meta 未还原）');
+    else step('切回会话A → 开关仍勾选');
 
     const ms = await waitUserBubble(page, INJECT_TEXT_STUB, 5500);
     if (ms < 0) fail('5.5s 内注入内容未出现在用户气泡');
@@ -342,8 +339,8 @@ try {
   {
     const { ctx, page } = await openPage({ preOn: true });
     page.assertNoErrors('启动');
-    if (!(await isOn(page))) fail('预置 meta.notifyFeishu 的会话开屏未点亮');
-    else step('开屏按钮已亮（会话级 meta 还原）');
+    if (!(await isOn(page))) fail('预置 meta.notifyFeishu 的会话开屏未勾选');
+    else step('开屏开关已勾选（会话级 meta 还原）');
 
     const ms = await waitUserBubble(page, INJECT_TEXT_REAL, 5500);
     if (ms < 0) fail('5.5s 内真实收件箱内容未上屏');
@@ -355,10 +352,10 @@ try {
     else step('服务端收件箱已被真 /claim 清空：' + JSON.stringify(after));
 
     await clearToasts(page);
-    await page.click('#notifyFabBtn');
+    await clickNotifyToggle(page);
     await page.waitForTimeout(900);
-    if (await isOn(page)) fail('关闭后按钮仍亮');
-    else step('再次点击 → 按钮变灰，toast：' + (await toastText(page)));
+    if (await isOn(page)) fail('关闭后开关仍勾选');
+    else step('再次点击 → 开关取消勾选，toast：' + (await toastText(page)));
     const off = await (await fetch(BASE + '/api/conv-notify/inbox?convId=cA')).json();
     if (off.active) fail('/off 后服务端仍登记：' + JSON.stringify(off));
     else step('服务端登记已注销：' + JSON.stringify(off));

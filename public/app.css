@@ -128,21 +128,35 @@
       .conv-rm:hover {
         color: var(--red);
       }
-      /* 任务运行中：呼吸 loading 边框 */
-      .conv-item.running {
-        border-color: var(--accent);
-        animation: pulseBorder 1.3s ease-in-out infinite;
+      /* 任务运行中：旋转光晕边框（inspira-ui glow-border 风格） */
+      /* @property 让 conic-gradient 的角度可以被插值动画 */
+      @property --glow-angle {
+        syntax: '<angle>';
+        initial-value: 0deg;
+        inherits: false;
       }
-      @keyframes pulseBorder {
-        0%,
-        100% {
-          border-color: var(--accent);
-          box-shadow: 0 0 0 0 rgba(217, 119, 87, 0.35);
-        }
-        50% {
-          border-color: var(--amber);
-          box-shadow: 0 0 0 3px rgba(217, 119, 87, 0.04);
-        }
+      .conv-item.running {
+        border: 1px solid transparent;
+        background-image:
+          linear-gradient(var(--bg), var(--bg)),
+          conic-gradient(
+            from var(--glow-angle),
+            transparent 0%,
+            var(--accent) 15%,
+            var(--amber) 35%,
+            var(--accent-hi) 50%,
+            transparent 65%
+          );
+        background-origin: border-box;
+        background-clip: padding-box, border-box;
+        animation: glowSpin 3s linear infinite, glowPulse 2s ease-in-out infinite;
+      }
+      @keyframes glowSpin {
+        to { --glow-angle: 360deg; }
+      }
+      @keyframes glowPulse {
+        0%, 100% { box-shadow: 0 0 8px rgba(217, 119, 87, 0.2), 0 0 18px rgba(217, 119, 87, 0.08); }
+        50%       { box-shadow: 0 0 14px rgba(217, 119, 87, 0.4), 0 0 28px rgba(217, 119, 87, 0.15); }
       }
       /* 侧边栏收起状态 */
       .sidebar.collapsed {
@@ -158,7 +172,7 @@
         height: 100vh;
         position: relative;
       }
-      /* ---- 右下角 fab 行（Lottie 图标 + 模型控件并列）---- */
+      /* ---- 右下角模型控件容器（曾与 Lottie 图标 / 飞书按钮并列，现仅此一颗）---- */
       .fab-row {
         position: absolute;
         right: 22px;
@@ -195,17 +209,6 @@
       .model-fab-btn .caret {
         color: var(--faint);
         font-size: 10px;
-      }
-      /* 会话级飞书通知开关的激活态。复用 .model-pills button.active 的同一套主色变量
-         （--accent / --accent-soft），不写死色值：主题换肤时这颗按钮才不会掉队。
-         规则放在 :hover 之后：两者特异性相同，靠源序保证开启态在 hover 时不被灰回去。 */
-      .model-fab-btn.on {
-        color: var(--accent);
-        border-color: var(--accent);
-        background: var(--accent-soft);
-      }
-      .notify-fab {
-        position: relative;
       }
       .model-pop {
         position: absolute;
@@ -2604,6 +2607,15 @@
 .tool-row-name.off {
   color: var(--muted);
 }
+/* 工具/会话行的禁用态（当前只有 openai-compat 下的 ⚡ ultracode 行在用）：整行灰掉、不可点，
+   但名字上的 title 要留着，那是用户能看到「为什么灰」的唯一地方 */
+.tool-row.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.tool-row.disabled .tool-row-name {
+  pointer-events: auto;
+}
 /* Toggle 开关 */
 .tool-toggle {
   position: relative;
@@ -3708,6 +3720,25 @@
   display: none !important;
 }
 
+/* ---- 项目地图弹框 ---- */
+.pm-modal { width: 680px; max-width: 90vw; max-height: 82vh; display: flex; flex-direction: column; }
+.pm-body { flex: 1; overflow-y: auto; padding: 0 4px 8px; }
+.pm-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 48px 24px; text-align: center; }
+.pm-empty-icon { font-size: 36px; }
+.pm-empty-text { color: var(--text); font-size: 14px; }
+.pm-empty-sub { color: var(--faint); font-size: 12px; font-family: var(--mono); word-break: break-all; }
+.pm-summary { padding: 16px 0 8px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.pm-summary-line { display: flex; gap: 12px; align-items: baseline; font-size: 13px; }
+.pm-summary-label { color: var(--faint); min-width: 72px; }
+.pm-summary-value { color: var(--text); }
+.pm-summary-path { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.pm-regen-bar { margin-bottom: 16px; }
+.pm-module-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.pm-module-item { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; background: var(--surface); border-radius: 6px; }
+.pm-mod-name { font-weight: 600; font-size: 13px; color: var(--text); }
+.pm-mod-path { font-size: 11px; font-family: var(--mono); color: var(--faint); }
+.pm-mod-desc { font-size: 12px; color: var(--muted); }
+
 /* ---- textareaDialog 多行输入框样式 ---- */
 .prompt-input.textarea-dialog {
   min-height: 150px;
@@ -4034,3 +4065,76 @@
 
 .opt-res-note { color: var(--amber); font-size: 12px; line-height: 1.7; }
 .opt-res-foot { display: flex; gap: 10px; margin-top: 4px; }
+
+/* ---- 消息分页加载 ---- */
+.load-more-msgs-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0 6px;
+}
+
+.load-more-msgs-btn {
+  padding: 6px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.load-more-msgs-btn:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+/* ---- 消息气泡折叠（高度截断显示末尾内容）---- */
+.bubble.msg-folded {
+  max-height: 240px;
+  overflow-y: scroll;
+  scrollbar-width: none;      /* Firefox */
+  position: relative;
+}
+
+.bubble.msg-folded::-webkit-scrollbar {
+  display: none;              /* Chrome/Safari */
+}
+
+.msg-fold-overlay {
+  position: sticky;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  pointer-events: none;
+  margin-bottom: -28px;       /* 不占空间，叠在内容上 */
+  z-index: 1;
+  /* background 由下面按气泡类型分别设置 */
+}
+
+.msg.user .msg-fold-overlay {
+  background: linear-gradient(to bottom, var(--accent-soft) 0%, transparent 100%);
+}
+
+.msg.assistant .msg-fold-overlay {
+  background: linear-gradient(to bottom, var(--panel) 0%, transparent 100%);
+}
+
+.msg-expand-btn {
+  display: block;
+  margin: 6px 0 0;
+  padding: 5px 12px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.msg-expand-btn:hover {
+  background: var(--panel-2);
+}

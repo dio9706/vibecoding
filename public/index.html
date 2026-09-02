@@ -11,12 +11,26 @@
     <link rel="stylesheet" href="/css/req-workbench.css" />
     <!-- 新用户引导态：只在首次打开（无任何模型）时生效，放最后便于覆盖启动罩的居中布局 -->
     <link rel="stylesheet" href="/css/onboarding.css" />
+    <!-- 开屏视觉：必须排在 onboarding.css 之后 —— 它靠 :not(.ob-arm):not(.ob-open)
+         把自己限定在纯启动态，引导态一到就整体让位，顺序反了就压不住 -->
+    <link rel="stylesheet" href="/css/boot-screen.css" />
   </head>
   <body>
     <!-- 启动罩：后端冷启动期间盖住整个 UI（boot-gate.js 探到 /api/ping 通即撤）。
          写在静态 HTML 里而非 JS 生成，保证页面第一帧就是罩子，不会闪出一个点不动的界面。
          新用户（无任何模型）时不撤罩，由 onboarding.js 原地转成配置引导。 -->
     <div class="boot-overlay" id="bootOverlay">
+      <!-- 开屏图案：绝对定位、z-index:0，垫在标题栏/品牌区/引导面板之下。
+           引导态（.ob-arm/.ob-open）由 boot-screen.css 整块隐藏，届时罩子回到
+           app.css 里那两道径向渐变的原貌。 -->
+      <div class="boot-bg" aria-hidden="true">
+        <div class="boot-bg-mask"></div>
+      </div>
+      <!-- 大号品牌字。刻意不复用下面的 #bootTitle：onboarding.css 的 --ob-logo-x
+           是按「.ob-brand 盒宽由 22px 的 #bootTitle 撑开」推导的，放大那行会让引导
+           面板与 LOGO 错位。两块各管一态，互不干扰。 -->
+      <div class="boot-splash">PRINCIPAL</div>
+
       <!-- 罩内标题栏：窗口是无边框的（src-tauri/src/main.rs 的 decorations(false)），拖拽区与
            窗口按钮全在 header.topbar 里，被这个 inset:0 的罩子盖住之后，整个等待/引导期间
            窗口拖不动也关不掉（只剩托盘和 Alt+F4）。所以罩子自己配一条。
@@ -232,8 +246,8 @@
         <div class="ratelimit" id="ratelimit" data-tauri-drag-region hidden></div>
         <span class="pending-chip" id="pendingChip" data-tauri-drag-region hidden></span>
         <span class="ask-chip" id="askChip" role="button" aria-label="待确认审批" data-tauri-drag-region hidden></span>
-        <button class="btn" id="taskBtn">需求/故障<span class="badge-dot" id="taskBadge" hidden></span></button>
-        <button class="btn" id="logBtn">访问日志</button>
+        <button class="btn" id="behaviorBtn">行为<span class="badge-dot" id="taskBadge" hidden></span></button>
+        <button class="btn" id="projectMapBtn">项目地图</button>
         <!-- 图标由 js/icons.js 的 hydrateIcons 按 data-icon 注水，素材不在 HTML 里留副本 -->
         <button class="btn" id="settingsBtn" title="设置"><span class="inline-ic" data-icon="settings"></span><span class="badge-dot" id="settingsBadge" hidden></span></button>
         <!-- 自定义窗口控制按钮（仅 Tauri 桌面环境显示） -->
@@ -312,6 +326,7 @@
       <select id="basicDefaultModel" class="set-select">
         <option value="">沿用当前</option>
         <option value="auto">Auto</option>
+        <option value="claude-fable-5-1">Fable 5.1</option>
         <option value="claude-opus-5">Opus 5</option>
         <option value="claude-opus-4-8">Opus 4.8</option>
         <option value="claude-sonnet-4-6">Sonnet 4.6</option>
@@ -542,12 +557,22 @@
           </div>
         </div>
 
-        <div class="panel-page" data-view="tasks" hidden>
+        <!-- 「行为」面板：整合「需求故障」和「访问日志」两个 tab -->
+        <div class="panel-page" data-view="behavior" hidden>
           <div class="panel-head">
-            <h3>需求 / 故障</h3>
+            <h3>行为</h3>
             <button class="panel-close" title="返回对话">✕</button>
           </div>
-          <div id="taskBody"></div>
+          <div class="panel-tabs" id="behaviorTabs">
+            <button class="active" data-behavior-tab="tasks">需求故障</button>
+            <button data-behavior-tab="logs">访问日志</button>
+          </div>
+          <div id="behaviorPane-tasks">
+            <div id="taskBody"></div>
+          </div>
+          <div id="behaviorPane-logs" hidden>
+            <div id="logBody"></div>
+          </div>
         </div>
 
         <div class="panel-page" data-view="req" hidden>
@@ -556,14 +581,6 @@
             <button class="panel-close" title="返回对话">✕</button>
           </div>
           <div id="reqPage"></div>
-        </div>
-
-        <div class="panel-page" data-view="logs" hidden>
-          <div class="panel-head">
-            <h3>访问日志</h3>
-            <button class="panel-close" title="返回对话">✕</button>
-          </div>
-          <div id="logBody"></div>
         </div>
 
         <div class="panel-page" data-view="markdown" hidden>
@@ -699,15 +716,11 @@
       </div>
 
       <div class="fab-row" id="fabRow">
-        <div class="notify-fab" id="notifyFab">
-          <button class="model-fab-btn" id="notifyFabBtn" title="任务结束/失败后发飞书通知">
-            <span id="notifyFabLabel">🔔 飞书</span>
-          </button>
-        </div>
         <div class="model-fab" id="modelFab">
           <div class="model-pop" id="modelPop" hidden>
             <div class="model-pills" id="modelPills">
               <button data-m="auto">Auto</button>
+              <button data-m="claude-fable-5-1" title="最强模型 · 独立限流桶（撞墙仍会切号）· 单价高于 Opus">Fable 5.1</button>
               <button data-m="claude-opus-5">Opus 5</button>
               <button data-m="claude-sonnet-5">Sonnet 5</button>
               <button data-m="claude-haiku-5">Haiku 5</button>
@@ -724,6 +737,19 @@
               <button data-mode="acceptEdits">接受编辑</button>
               <button data-mode="plan">计划</button>
               <button data-mode="bypassPermissions">自动</button>
+            </div>
+            <div class="pop-divider"></div>
+            <!-- 会话级行为偏好（与「哪些工具可用」是两个维度，故不并入下方工具列表） -->
+            <div class="tools-section" id="convPrefsSection">
+              <div class="tools-section-hdr">会话</div>
+              <div class="tool-row" id="notifyRow">
+                <span class="tool-row-name off" title="任务结束/失败后发飞书私聊卡片">🔔 飞书通知</span>
+                <label class="tool-toggle"><input type="checkbox" id="notifyToggle" /><span class="toggle-slider"></span></label>
+              </div>
+              <div class="tool-row" id="ultracodeRow">
+                <span class="tool-row-name off" title="多智能体编排：开着时本会话发送的新消息带 ultracode 关键字（插话不带）">⚡ ultracode</span>
+                <label class="tool-toggle"><input type="checkbox" id="ultracodeToggle" /><span class="toggle-slider"></span></label>
+              </div>
             </div>
             <div class="pop-divider"></div>
             <div class="tools-section" id="toolsSection">
@@ -781,6 +807,17 @@
           <button class="btn" id="starBtn">＋常用</button>
           <button class="btn primary" id="pickBtn">选择此目录</button>
         </div>
+      </div>
+    </div>
+
+    <!-- 项目地图弹框 -->
+    <div class="mask" id="projectMapMask" hidden>
+      <div class="modal pm-modal">
+        <div class="head">
+          <h3>项目地图</h3>
+          <button class="close" id="projectMapClose">✕</button>
+        </div>
+        <div class="body pm-body" id="projectMapBody"></div>
       </div>
     </div>
 

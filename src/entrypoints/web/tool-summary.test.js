@@ -12,7 +12,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDialog } from './tool-summary.js';
+import { parseDialog, summarizeTool, READONLY_TOOLS } from './tool-summary.js';
 
 /** 造一条最简 AskUserQuestion payload */
 const askPayload = (over = {}) => ({
@@ -102,4 +102,72 @@ test('questions 非数组 / payload 空 / 无 payload → null，不抛', () => 
   assert.equal(parseDialog({ payload: { questions: 'nope' } }), null);
   assert.equal(parseDialog({ payload: {} }), null);
   assert.equal(parseDialog({}), null);
+});
+
+// ---- summarizeTool：Workflow（多智能体编排）----
+// 为什么单独测：Workflow 是最烧额度的工具，询问模式下审批弹窗正文就是这一行摘要，
+// 用户得看到「哪个工作流、干什么」才知道自己在批什么；default 分支的「调用 Workflow」等于没说。
+
+test('Workflow：script 含 meta → 「工作流(名字)：描述」', () => {
+  const script = `export const meta = {
+  name: 'review-changes',
+  description: '审查变更并逐条核实',
+  phases: [{ title: 'Review' }, { title: 'Verify' }],
+}
+const results = await pipeline([])`;
+  assert.equal(summarizeTool({ name: 'Workflow', input: { script } }), '工作流(review-changes)：审查变更并逐条核实');
+});
+
+test('Workflow：描述超 40 字被截断并加省略号', () => {
+  const desc = 'x'.repeat(60);
+  const script = `export const meta = { name: 'spec', description: '${desc}' }`;
+  const out = summarizeTool({ name: 'Workflow', input: { script } });
+  assert.ok(out.startsWith('工作流(spec)：'));
+  assert.ok(out.endsWith('…'));
+  assert.equal(out.length, '工作流(spec)：'.length + 40 + 1);
+});
+
+test('Workflow：名字超 24 字被截断（meta.name 由模型自拟，长度无约束）', () => {
+  const script = `export const meta = { name: '${'n'.repeat(60)}' }`;
+  assert.equal(summarizeTool({ name: 'Workflow', input: { script } }), `工作流(${'n'.repeat(24)}…)`);
+});
+
+test('Workflow：脚本漏写 meta 时，正文里的 name:/description: 不得被当成工作流身份，回落到 input.name', () => {
+  const script = `const DIMENSIONS = [{ name: 'reviewer-sub', description: '审子代理的活' }]
+const r = await parallel(DIMENSIONS.map((d) => () => agent(d.description)))`;
+  assert.equal(summarizeTool({ name: 'Workflow', input: { name: '预定义-真名', script } }), '工作流(预定义-真名)');
+});
+
+test('Workflow：描述含转义引号 → 反转义后完整保留，不截成残片', () => {
+  const script = `export const meta = { name: 'wf', description: 'don\\'t panic, 后面还有' }`;
+  assert.equal(summarizeTool({ name: 'Workflow', input: { script } }), "工作流(wf)：don't panic, 后面还有");
+});
+
+test('Workflow：多行 backtick 描述 → 折叠成一行', () => {
+  const script = 'export const meta = { name: `wf`, description: `第一行\n   第二行` }';
+  assert.equal(summarizeTool({ name: 'Workflow', input: { script } }), '工作流(wf)：第一行 第二行');
+});
+
+test('Workflow：描述含 \\n 转义序列 → 视为空白折叠，不吞成字母 n', () => {
+  const script = "export const meta = { name: 'wf', description: '前半\\n后半' }";
+  assert.equal(summarizeTool({ name: 'Workflow', input: { script } }), '工作流(wf)：前半 后半');
+});
+
+test('Workflow：无 script 用 input.name（预定义工作流），无描述不带冒号', () => {
+  assert.equal(summarizeTool({ name: 'Workflow', input: { name: 'spec' } }), '工作流(spec)');
+});
+
+test('Workflow：只有 scriptPath → 取文件名（兼容 Windows 反斜杠）', () => {
+  assert.equal(summarizeTool({ name: 'Workflow', input: { scriptPath: 'C:\\Users\\x\\.claude\\wf-abc.js' } }), '工作流(wf-abc.js)');
+  assert.equal(summarizeTool({ name: 'Workflow', input: { scriptPath: '/tmp/session/wf-def.js' } }), '工作流(wf-def.js)');
+});
+
+test('Workflow：什么都没有 → 「工作流(未命名)」，不抛', () => {
+  assert.equal(summarizeTool({ name: 'Workflow', input: {} }), '工作流(未命名)');
+  assert.equal(summarizeTool({ name: 'Workflow' }), '工作流(未命名)');
+});
+
+test('Workflow 不在只读放行集内（额度安全回归保护）', () => {
+  assert.ok(!READONLY_TOOLS.has('Workflow'), '放行等于让编排绕过审批，一轮能拉起十几个子代理');
+  assert.ok(READONLY_TOOLS.has('Agent'), 'Agent 仍放行：其内部改动类工具会逐个走审批，与 Workflow 的风险性质不同');
 });

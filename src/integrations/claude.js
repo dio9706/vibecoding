@@ -5,6 +5,7 @@
  */
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { logger, preview } from '../shared/logger.js';
+import { describeTaskEvent, isTaskEvent } from './claude.logic.js';
 
 /**
  * 插话（steering）输入队列 —— SDK 流式输入模式的 prompt 源。
@@ -129,11 +130,6 @@ export async function runClaude(prompt, opts = {}) {
   // 插话（steering）：调用方要 handle 时启用流式输入——prompt 变为可持续注入的消息流
   const inputQueue = onInputHandle ? createInputQueue(prompt) : null;
 
-  const clipText = (s, n) => {
-    const str = String(s ?? '').replace(/\s+/g, ' ').trim();
-    return str.length > n ? str.slice(0, n) + '…' : str;
-  };
-
   // 重试逻辑：处理 Response stalled mid-stream 等网络错误
   let lastError = null;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -166,6 +162,7 @@ export async function runClaude(prompt, opts = {}) {
       // 句柄在 query 创建后交给调用方：interrupt 直接绑定 q（轮内打断，run 存活，队列消息继续跑）
       if (inputQueue) onInputHandle({ push: inputQueue.push, close: inputQueue.close, interrupt: () => q.interrupt() });
 
+      const taskKinds = new Map(); // task_id → { name, label, skip }，progress/notification 查表打标签；每个 attempt 一份（重试 = 新流）
       for await (const message of q) {
         onPulse?.(); // 任何消息到达都算存活：子代理并行探索期间主代理静默，靠这里喂看门狗
         if (message.type === 'system' && message.subtype === 'init') {
@@ -173,28 +170,11 @@ export async function runClaude(prompt, opts = {}) {
           onInit?.({ session_id: message.session_id });
           continue;
         }
-        // 子代理/后台任务进度（SDK 0.3.210+：子代理不再透流内消息，进度经 system task_* 事件给出）。
-        // 经 onActivity 的 text 字段透出预格式化行；skip_transcript=true 的常驻任务不进转录。
-        if (message.type === 'system' && message.subtype === 'task_started' && !message.skip_transcript) {
-          const kind = message.subagent_type ? `子代理(${message.subagent_type})` : '后台任务';
-          onActivity?.({ name: 'Agent', input: {}, sub: true, text: `${kind}启动：${clipText(message.description, 40)}` });
-          continue;
-        }
-        if (message.type === 'system' && message.subtype === 'task_progress') {
-          const u = message.usage || {};
-          const tool = message.last_tool_name ? `正在 ${message.last_tool_name}` : '执行中';
-          const secs = u.duration_ms ? `${Math.round(u.duration_ms / 1000)}s` : '';
-          onActivity?.({
-            name: 'Agent',
-            input: {},
-            sub: true,
-            text: `子代理${tool} · 已 ${u.tool_uses ?? '?'} 次工具 ${secs}：${clipText(message.description, 30)}`,
-          });
-          continue;
-        }
-        if (message.type === 'system' && message.subtype === 'task_notification' && !message.skip_transcript) {
-          const label = { completed: '完成', failed: '失败', stopped: '已停止' }[message.status] || message.status;
-          onActivity?.({ name: 'Agent', input: {}, sub: true, text: `子代理${label}：${clipText(message.summary || '', 60)}` });
+        // 子代理 / 工作流 / 后台任务进度（SDK 0.3.210+：子代理不再透流内消息，进度经 system task_* 事件给出）。
+        // 文案与类型判定在 claude.logic.js；skip_transcript=true 的常驻任务不进转录（返回 null）。
+        if (isTaskEvent(message)) {
+          const activity = describeTaskEvent(message, taskKinds);
+          if (activity) onActivity?.(activity);
           continue;
         }
         if (message.type === 'rate_limit_event') {

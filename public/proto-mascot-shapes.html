@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>吉祥物轮廓延伸 · Principal 原型</title>
+<style>
+  /* 取自 app.css 的设计变量，保证原型和真实界面同色系 */
+  :root {
+    --bg: #0e0f13;
+    --panel: #16171f;
+    --panel-2: #1d1e28;
+    --border: #2a2b37;
+    --border-soft: #22232e;
+    --text: #e9e7e3;
+    --muted: #8b8b9a;
+    --faint: #5a5b68;
+    --accent: #d97757;
+    --green: #6cc38a;
+    --red: #e5687a;
+    --mono: 'Cascadia Code', 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    background-image:
+      radial-gradient(1200px 600px at 80% -10%, rgba(217,119,87,.08), transparent 60%),
+      radial-gradient(900px 500px at 0% 110%, rgba(108,120,195,.06), transparent 55%);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.6;
+    padding: 32px 28px 80px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 20px; letter-spacing: .14em; color: var(--accent); font-weight: 700; }
+  .lede { color: var(--muted); font-size: 13px; margin-top: 6px; max-width: 860px; }
+  h2 {
+    font-size: 12px; letter-spacing: .16em; color: var(--faint);
+    font-weight: 600; text-transform: uppercase;
+    margin: 44px 0 14px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  code { color: var(--accent); font-size: 12.5px; }
+
+  /* ---------- 状态切换 ---------- */
+  .controls {
+    display: flex; gap: 8px; flex-wrap: wrap; margin-top: 20px;
+    position: sticky; top: 0; z-index: 5;
+    background: var(--bg); padding: 10px 0;
+  }
+  .ctl {
+    font: inherit; font-size: 12.5px; cursor: pointer;
+    padding: 7px 14px; border-radius: 7px;
+    background: var(--panel-2); color: var(--muted);
+    border: 1px solid var(--border);
+    transition: .15s;
+  }
+  .ctl:hover { color: var(--text); border-color: var(--accent); }
+  .ctl[aria-pressed="true"] {
+    background: rgba(217,119,87,.14); color: var(--accent); border-color: var(--accent);
+  }
+
+  /* ---------- 布局 ---------- */
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .col {
+    background: var(--panel); border: 1px solid var(--border-soft);
+    border-radius: 12px; overflow: hidden;
+  }
+  .stage {
+    background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .grid .stage { height: 190px; }
+  .grid .mwrap { width: 140px; height: 140px; }
+  .meta { padding: 14px 16px 16px; }
+  .meta h3 { font-size: 14px; color: var(--text); font-weight: 600; }
+  .meta .why { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+  .meta .risk { font-size: 12px; color: var(--faint); margin-top: 6px; }
+  .meta .risk b { color: #b08a6a; font-weight: 600; }
+
+  /* 状态矩阵 */
+  .matrix { display: grid; grid-template-columns: 92px repeat(5, 1fr); gap: 8px; align-items: center; }
+  .mhead { font-size: 11.5px; color: var(--faint); letter-spacing: .08em; text-align: center; }
+  .mside { font-size: 12px; color: var(--muted); }
+  .matrix .stage { height: 92px; border: 1px solid var(--border-soft); border-radius: 9px; }
+  .matrix .mwrap { width: 56px; height: 56px; }
+
+  /* 小尺寸可读性 */
+  .sizes { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
+  .sizecell {
+    background: var(--bg); border: 1px solid var(--border-soft); border-radius: 9px;
+    padding: 14px 8px; display: flex; flex-direction: column; align-items: center; gap: 8px;
+  }
+  .sizecell .cap { font-size: 11px; color: var(--faint); }
+  .sizecell .stage { border: 0; background: transparent; height: auto; }
+
+  /* ================= 吉祥物本体（统一沿用 B：描边主体 + 光点眼） ================= */
+  .mwrap { display: block; }
+  .m { width: 100%; height: 100%; display: block; overflow: visible; }
+  .m .ring {
+    fill: none; stroke: var(--accent); stroke-width: 7;
+    stroke-linejoin: round; stroke-linecap: round;
+  }
+  .m .eye { fill: var(--accent); transform-box: fill-box; transform-origin: center; }
+
+  /* ---- 待命：呼吸 + 偶尔眨眼 ---- */
+  .st-idle .m   { animation: mBreathe 3.6s ease-in-out infinite; }
+  .st-idle .eye { animation: mBlink 4.4s infinite; }
+  @keyframes mBreathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+  @keyframes mBlink   { 0%,93%,100% { transform: scaleY(1); } 96% { transform: scaleY(.08); } }
+
+  /* ---- 执行中：高光沿轮廓跑（--len = 运行时测得的周长，故任意形状通用） ---- */
+  .st-think .m    { animation: mBreathe 1.5s ease-in-out infinite; }
+  .st-think .eyes { animation: mScan 1.9s ease-in-out infinite; }
+  @keyframes mScan { 0%,100% { transform: translateX(-8px); } 50% { transform: translateX(8px); } }
+  .st-think .ring {
+    stroke-dasharray: calc(var(--len) * .2) calc(var(--len) * .8);
+    animation: mTrace 1.5s linear infinite;
+  }
+  @keyframes mTrace {
+    from { stroke-dashoffset: 0; }
+    to   { stroke-dashoffset: calc(var(--len) * -1); }
+  }
+
+  /* ---- 问询：歪头 + 眼睛上瞟 ---- */
+  .st-ask .m    { animation: mTilt 1.7s ease-in-out infinite; }
+  .st-ask .eyes { transform: translateY(-5px); }
+  @keyframes mTilt { 0%,100% { transform: rotate(-10deg); } 50% { transform: rotate(10deg); } }
+
+  /* ---- 完成：点头 + 眯眼 + 转绿 ---- */
+  .st-ok .m   { animation: mNod .9s ease-in-out infinite; }
+  .st-ok .eye { transform: scaleY(.28); }
+  @keyframes mNod { 0%,100% { transform: translateY(0); } 50% { transform: translateY(8px); } }
+  .st-ok .ring { stroke: var(--green); }
+  .st-ok .eye  { fill: var(--green); }
+
+  /* ---- 异常：抖动 + 皱眉 + 转红 ---- */
+  .st-err .m { animation: mShake .5s ease-in-out infinite; }
+  @keyframes mShake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+  /* 两眼反向倾斜形成「皱眉」，比单纯压扁更能读出「出事了」 */
+  .st-err .eye:nth-of-type(1) { transform: scaleY(.34) rotate(14deg); }
+  .st-err .eye:nth-of-type(2) { transform: scaleY(.34) rotate(-14deg); }
+  .st-err .ring { stroke: var(--red); }
+  .st-err .eye  { fill: var(--red); }
+
+  /* 无障碍：用户要求减少动效时只保留静态姿态 */
+  @media (prefers-reduced-motion: reduce) {
+    .m, .m *, .eyes, .eye, .ring { animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>吉祥物轮廓延伸 · 沿用 B 的处理</h1>
+  <p class="lede">
+    六个轮廓，统一是「描边主体 + 两颗光点眼」。
+    「执行中」不再是整环旋转（那招只对正圆成立），改为一段高光沿轮廓跑：
+    运行时用 <code>getTotalLength()</code> 测周长写进 <code>--len</code>，再驱动 <code>stroke-dashoffset</code>，任意形状通用。
+  </p>
+
+  <div class="controls" id="controls">
+    <button class="ctl" data-state="idle"  aria-pressed="true">待命</button>
+    <button class="ctl" data-state="think" aria-pressed="false">执行中</button>
+    <button class="ctl" data-state="ask"   aria-pressed="false">问询</button>
+    <button class="ctl" data-state="ok"    aria-pressed="false">完成</button>
+    <button class="ctl" data-state="err"   aria-pressed="false">异常</button>
+  </div>
+
+  <h2>六个轮廓 · 当前状态</h2>
+  <div class="grid" id="grid"></div>
+
+  <h2>状态矩阵 · 全部同时播放</h2>
+  <div class="matrix" id="matrix"></div>
+
+  <h2>小尺寸可读性 · 待命态</h2>
+  <div class="sizes" id="sizes"></div>
+
+</div>
+
+<script>
+(function () {
+  // ---------- 几何工具 ----------
+  function pt(x, y) { return { x: x, y: y }; }
+
+  // 从 a 指向 b 的单位向量
+  function dir(a, b) {
+    var dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy) || 1;
+    return { x: dx / L, y: dy / L };
+  }
+
+  // 多边形圆角化：每个顶点沿两边各退 r，再用二次贝塞尔以顶点为控制点连接
+  function roundedPath(pts, r) {
+    var d = '';
+    for (var i = 0; i < pts.length; i++) {
+      var prev = pts[(i - 1 + pts.length) % pts.length];
+      var cur  = pts[i];
+      var next = pts[(i + 1) % pts.length];
+      // 退让距离不得超过相邻边的一半，否则相邻圆角会互相吃掉
+      var rr = Math.min(r,
+        Math.hypot(cur.x - prev.x, cur.y - prev.y) / 2,
+        Math.hypot(cur.x - next.x, cur.y - next.y) / 2);
+      var v1 = dir(cur, prev), v2 = dir(cur, next);
+      var p1 = pt(cur.x + v1.x * rr, cur.y + v1.y * rr);
+      var p2 = pt(cur.x + v2.x * rr, cur.y + v2.y * rr);
+      d += (i === 0 ? 'M' : 'L') + p1.x.toFixed(1) + ' ' + p1.y.toFixed(1);
+      d += 'Q' + cur.x.toFixed(1) + ' ' + cur.y.toFixed(1) + ' ' + p2.x.toFixed(1) + ' ' + p2.y.toFixed(1);
+    }
+    return d + 'Z';
+  }
+
+  function polygon(n, radius, startDeg) {
+    var out = [];
+    for (var i = 0; i < n; i++) {
+      var a = (startDeg + i * 360 / n) * Math.PI / 180;
+      out.push(pt(100 + radius * Math.cos(a), 100 + radius * Math.sin(a)));
+    }
+    return out;
+  }
+
+  // ---------- 六个轮廓 ----------
+  // eyes: [左眼x, 右眼x, 眼y, rx, ry]
+  var SHAPES = [
+    {
+      id: 'circle', name: '① 正圆',
+      body: '<circle class="ring" cx="100" cy="100" r="63"/>',
+      eyes: [79, 121, 96, 9, 11],
+      why: '最中性、最无攻击性，没有指向性，气质是「陪伴」。作为基准项保留。',
+      risk: '辨识度最低 —— 圆形吉祥物满地都是，做出来不像你的。'
+    },
+    {
+      id: 'square', name: '② 圆角方',
+      body: '<rect class="ring" x="38" y="38" width="124" height="124" rx="42"/>',
+      eyes: [80, 120, 96, 9, 11],
+      why: '设备感 / 终端感，呼应 Principal 是常驻在你机器上的进程。小尺寸下轮廓最稳。',
+      risk: '和你满屏的圆角面板同质，容易在界面里「隐形」。'
+    },
+    {
+      id: 'hex', name: '③ 六边形',
+      path: function () { return roundedPath(polygon(6, 70, 0), 18); },
+      eyes: [80, 120, 100, 9, 11],
+      why: '传承你现在六芒星的几何基因；六边形在工程语境里直接读作「节点 / 模块」，成熟不幼稚。',
+      risk: '偏冷，personality 需要靠眼睛动画补。'
+    },
+    {
+      id: 'flame', name: '④ 火苗',
+      body: '<path class="ring" d="M100 26 C126 60 158 78 158 112 A58 58 0 0 1 42 112 C42 78 74 60 100 26 Z"/>',
+      eyes: [80, 120, 114, 9, 11],
+      why: '顶部的尖既像终端光标，也像一撮呆毛。六个里唯一自带「方向感 / 活着」暗示的形状。',
+      risk: '重心不对称，16px 下容易读成一滴水而不是一张脸。'
+    },
+    {
+      id: 'shield', name: '⑤ 盾形',
+      body: '<path class="ring" d="M100 30 L150 48 Q158 51 157 61 Q154 122 100 170 Q46 122 43 61 Q42 51 50 48 Z"/>',
+      eyes: [82, 118, 92, 8.5, 10.5],
+      why: 'Principal = 主理人 / 受托人。盾牌直给「托付、担保、把关」，和「你只审计，它替你扛」的定位语义最贴。',
+      risk: '最严肃的一个，卡通感最弱，可能显得像安全软件。'
+    },
+    {
+      id: 'triangle', name: '⑥ 圆角三角',
+      path: function () { return roundedPath([pt(100, 36), pt(166, 156), pt(34, 156)], 26); },
+      eyes: [84, 116, 118, 8.5, 10.5],
+      why: '播放 / 推进的意味，六个里行动感最强。',
+      risk: '三角天然带攻击性；上窄下宽逼得眼睛只能压在下半部，脸显挤。'
+    }
+  ];
+
+  var STATES = [
+    { id: 'idle',  label: '待命'   },
+    { id: 'think', label: '执行中' },
+    { id: 'ask',   label: '问询'   },
+    { id: 'ok',    label: '完成'   },
+    { id: 'err',   label: '异常'   }
+  ];
+
+  function build(shape) {
+    var e = shape.eyes;
+    var body = shape.body || '<path class="ring" d="' + shape.path() + '"/>';
+    return '<svg viewBox="0 0 200 200" class="m" aria-hidden="true">'
+      + body
+      + '<g class="eyes">'
+      +   '<ellipse class="eye" cx="' + e[0] + '" cy="' + e[2] + '" rx="' + e[3] + '" ry="' + e[4] + '"/>'
+      +   '<ellipse class="eye" cx="' + e[1] + '" cy="' + e[2] + '" rx="' + e[3] + '" ry="' + e[4] + '"/>'
+      + '</g>'
+      + '</svg>';
+  }
+
+  // 描边跑马灯需要知道轮廓周长；写进 --len 供 CSS 的 dasharray / dashoffset 使用
+  function measure(root) {
+    root.querySelectorAll('.ring').forEach(function (ring) {
+      var len = 400;
+      try { if (ring.getTotalLength) len = ring.getTotalLength(); } catch (err) { /* 老浏览器降级到估值 */ }
+      ring.style.setProperty('--len', len.toFixed(1));
+    });
+  }
+
+  function stage(shape, state, px) {
+    var d = document.createElement('div');
+    d.className = 'stage st-' + state;
+    var s = document.createElement('span');
+    s.className = 'mwrap';
+    if (px) { s.style.width = px + 'px'; s.style.height = px + 'px'; }
+    s.innerHTML = build(shape);
+    d.appendChild(s);
+    return d;
+  }
+
+  // --- 六宫格 ---
+  var grid = document.getElementById('grid');
+  SHAPES.forEach(function (sh) {
+    var col = document.createElement('div');
+    col.className = 'col';
+    var st = stage(sh, 'idle');
+    st.setAttribute('data-live', '');
+    col.appendChild(st);
+    var meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.innerHTML = '<h3></h3><p class="why"></p><p class="risk"><b>代价：</b><span></span></p>';
+    meta.querySelector('h3').textContent = sh.name;
+    meta.querySelector('.why').textContent = sh.why;
+    meta.querySelector('.risk span').textContent = sh.risk;
+    col.appendChild(meta);
+    grid.appendChild(col);
+  });
+
+  // --- 状态矩阵 ---
+  var matrix = document.getElementById('matrix');
+  matrix.appendChild(document.createElement('div'));
+  STATES.forEach(function (st) {
+    var h = document.createElement('div');
+    h.className = 'mhead';
+    h.textContent = st.label;
+    matrix.appendChild(h);
+  });
+  SHAPES.forEach(function (sh) {
+    var side = document.createElement('div');
+    side.className = 'mside';
+    side.textContent = sh.name;
+    matrix.appendChild(side);
+    STATES.forEach(function (st) { matrix.appendChild(stage(sh, st.id)); });
+  });
+
+  // --- 小尺寸检查 ---
+  var sizes = document.getElementById('sizes');
+  [96, 40, 24, 16].forEach(function (px) {
+    SHAPES.forEach(function (sh) {
+      var cell = document.createElement('div');
+      cell.className = 'sizecell';
+      cell.appendChild(stage(sh, 'idle', px));
+      var cap = document.createElement('div');
+      cap.className = 'cap';
+      cap.textContent = px + 'px';
+      cell.appendChild(cap);
+      sizes.appendChild(cell);
+    });
+  });
+
+  measure(document);
+
+  // --- 状态切换（只影响六宫格） ---
+  document.getElementById('controls').addEventListener('click', function (e) {
+    var btn = e.target.closest('.ctl');
+    if (!btn) return;
+    this.querySelectorAll('.ctl').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
+    document.querySelectorAll('[data-live]').forEach(function (el) {
+      el.className = 'stage st-' + btn.dataset.state;
+    });
+  });
+})();
+</script>
+</body>
+</html>

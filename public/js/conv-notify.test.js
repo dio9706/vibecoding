@@ -24,9 +24,10 @@ let inboxItems; // /inbox 要返回的条目
 let appliedResult; // applyInjected 的返回值（真身 async，这里也必须 async）
 
 before(async () => {
-  dom = new JSDOM('<!doctype html><html><body><button id="notifyFabBtn"></button></body></html>', {
-    url: 'http://localhost/',
-  });
+  dom = new JSDOM(
+    '<!doctype html><html><body><div class="tool-row" id="notifyRow"><span class="tool-row-name">🔔 飞书通知</span><label class="tool-toggle"><input type="checkbox" id="notifyToggle" /><span class="toggle-slider"></span></label></div></body></html>',
+    { url: 'http://localhost/' },
+  );
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
   globalThis.localStorage = dom.window.localStorage;

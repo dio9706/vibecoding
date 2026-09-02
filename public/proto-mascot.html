@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>吉祥物方向对比 · Principal 原型</title>
+<style>
+  /* 取自 app.css 的设计变量，保证原型和真实界面同色系 */
+  :root {
+    --bg: #0e0f13;
+    --panel: #16171f;
+    --panel-2: #1d1e28;
+    --border: #2a2b37;
+    --border-soft: #22232e;
+    --text: #e9e7e3;
+    --muted: #8b8b9a;
+    --faint: #5a5b68;
+    --accent: #d97757;
+    --green: #6cc38a;
+    --red: #e5687a;
+    --mono: 'Cascadia Code', 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    background-image:
+      radial-gradient(1200px 600px at 80% -10%, rgba(217,119,87,.08), transparent 60%),
+      radial-gradient(900px 500px at 0% 110%, rgba(108,120,195,.06), transparent 55%);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.6;
+    padding: 32px 28px 80px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; letter-spacing: .14em; color: var(--accent); font-weight: 700; }
+  .lede { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  h2 {
+    font-size: 12px; letter-spacing: .16em; color: var(--faint);
+    font-weight: 600; text-transform: uppercase;
+    margin: 44px 0 14px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  /* ---------- 状态切换 ---------- */
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 20px; }
+  .ctl {
+    font: inherit; font-size: 12.5px; cursor: pointer;
+    padding: 7px 14px; border-radius: 7px;
+    background: var(--panel-2); color: var(--muted);
+    border: 1px solid var(--border);
+    transition: .15s;
+  }
+  .ctl:hover { color: var(--text); border-color: var(--accent); }
+  .ctl[aria-pressed="true"] {
+    background: rgba(217,119,87,.14); color: var(--accent); border-color: var(--accent);
+  }
+
+  /* ---------- 布局 ---------- */
+  .hero { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .col {
+    background: var(--panel); border: 1px solid var(--border-soft);
+    border-radius: 12px; overflow: hidden;
+  }
+  .stage {
+    background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .hero .stage { height: 210px; }
+  .hero .mwrap { width: 150px; height: 150px; }
+  .meta { padding: 14px 16px 16px; }
+  .meta h3 { font-size: 14px; color: var(--text); font-weight: 600; }
+  .meta p { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+
+  /* 状态矩阵：3 个方向 × 5 个状态 */
+  .matrix { display: grid; grid-template-columns: 92px repeat(5, 1fr); gap: 8px; align-items: center; }
+  .mhead { font-size: 11.5px; color: var(--faint); letter-spacing: .08em; text-align: center; }
+  .mside { font-size: 12px; color: var(--muted); }
+  .matrix .stage { height: 96px; border: 1px solid var(--border-soft); border-radius: 9px; }
+  .matrix .mwrap { width: 58px; height: 58px; }
+
+  /* 小尺寸可读性检查 */
+  .sizes { display: flex; gap: 12px; flex-wrap: wrap; }
+  .sizecell {
+    background: var(--bg); border: 1px solid var(--border-soft); border-radius: 9px;
+    padding: 14px 18px; display: flex; flex-direction: column; align-items: center; gap: 8px;
+  }
+  .sizecell .cap { font-size: 11px; color: var(--faint); }
+  .sizecell .stage { border: 0; background: transparent; height: auto; }
+
+  /* ================= 吉祥物本体 ================= */
+  .mwrap { display: block; }
+  .m { width: 100%; height: 100%; display: block; overflow: visible; }
+
+  .mA .body, .mC .body { fill: var(--accent); }
+  .mB .ring { fill: none; stroke: var(--accent); stroke-width: 7; }
+  .mB .eye  { fill: var(--accent); }
+  .m mask .eye { fill: #000; }   /* 挖洞眼：mask 内黑色 = 透明，眼睛直接透出背景 */
+
+  /* 变换基准：眼睛组按 viewBox 坐标平移，单只眼睛按自身中心缩放 */
+  .m .eyes  { transform-box: view-box; transform-origin: 100px 96px; }
+  .m .eye   { transform-box: fill-box;  transform-origin: center; }
+  .mB .ring { transform-box: view-box; transform-origin: 100px 100px; }
+
+  /* ---- 待命 ---- */
+  .st-idle .m   { animation: mBreathe 3.6s ease-in-out infinite; }
+  .st-idle .eye { animation: mBlink 4.4s infinite; }
+  @keyframes mBreathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+  @keyframes mBlink   { 0%,93%,100% { transform: scaleY(1); } 96% { transform: scaleY(.08); } }
+
+  /* ---- 执行中：心跳变快 + 眼睛扫视；B 的环兼作进度条 ---- */
+  .st-think .m    { animation: mBreathe 1.5s ease-in-out infinite; }
+  .st-think .eyes { animation: mScan 1.9s ease-in-out infinite; }
+  @keyframes mScan { 0%,100% { transform: translateX(-8px); } 50% { transform: translateX(8px); } }
+  .st-think .mB .ring { stroke-dasharray: 66 336; animation: mSpin 1.1s linear infinite; }
+  @keyframes mSpin { to { transform: rotate(360deg); } }
+
+  /* ---- 问询：歪头 + 眼睛上瞟 ---- */
+  .st-ask .m    { animation: mTilt 1.7s ease-in-out infinite; }
+  .st-ask .eyes { transform: translateY(-5px); }
+  @keyframes mTilt { 0%,100% { transform: rotate(-10deg); } 50% { transform: rotate(10deg); } }
+
+  /* ---- 完成：点头 + 眯眼 + 转绿 ---- */
+  .st-ok .m   { animation: mNod .9s ease-in-out infinite; }
+  .st-ok .eye { transform: scaleY(.28); }
+  @keyframes mNod { 0%,100% { transform: translateY(0); } 50% { transform: translateY(8px); } }
+  .st-ok .mA .body, .st-ok .mC .body { fill: var(--green); }
+  .st-ok .mB .ring { stroke: var(--green); }
+  .st-ok .mB .eye  { fill: var(--green); }
+
+  /* ---- 异常：抖动 + 眉眼内压 + 转红 ---- */
+  .st-err .m { animation: mShake .5s ease-in-out infinite; }
+  @keyframes mShake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+  /* 两眼反向倾斜形成「皱眉」，比单纯压扁更能读出「出事了」 */
+  .st-err .eye:nth-of-type(1) { transform: scaleY(.34) rotate(14deg); }
+  .st-err .eye:nth-of-type(2) { transform: scaleY(.34) rotate(-14deg); }
+  .st-err .mA .body, .st-err .mC .body { fill: var(--red); }
+  .st-err .mB .ring { stroke: var(--red); }
+  .st-err .mB .eye  { fill: var(--red); }
+
+  /* 无障碍：用户要求减少动效时只保留静态姿态 */
+  @media (prefers-reduced-motion: reduce) {
+    .m, .m *, .eyes, .eye, .ring { animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>吉祥物方向对比</h1>
+  <p class="lede">
+    三个方向都遵守「一个形状 + 两只眼睛」的极简约束，配色取自 <code>app.css</code>。
+    纯 CSS + SVG，无动画库依赖。切换下面的状态按钮看同一状态下三者的差别。
+  </p>
+
+  <div class="controls" id="controls">
+    <button class="ctl" data-state="idle"  aria-pressed="true">待命</button>
+    <button class="ctl" data-state="think" aria-pressed="false">执行中</button>
+    <button class="ctl" data-state="ask"   aria-pressed="false">问询</button>
+    <button class="ctl" data-state="ok"    aria-pressed="false">完成</button>
+    <button class="ctl" data-state="err"   aria-pressed="false">异常</button>
+  </div>
+
+  <h2>并排对比 · 当前状态</h2>
+  <div class="hero">
+    <div class="col">
+      <div class="stage st-idle" data-live><span class="mwrap" data-mascot="A"></span></div>
+      <div class="meta">
+        <h3>A · 实心圆 · 挖洞眼</h3>
+        <p>最贴近 bloub。眼睛是 mask 打的洞而非白色图层，主体换色/形变时眼睛自动跟随，不用维护两套坐标。</p>
+      </div>
+    </div>
+    <div class="col">
+      <div class="stage st-idle" data-live><span class="mwrap" data-mascot="B"></span></div>
+      <div class="meta">
+        <h3>B · 描边环 · 光点眼</h3>
+        <p>和项目等宽字体、线框风 UI 同源。环本身就是 loading 条，「执行中」直接转起来，省掉一套独立 spinner。</p>
+      </div>
+    </div>
+    <div class="col">
+      <div class="stage st-idle" data-live><span class="mwrap" data-mascot="C"></span></div>
+      <div class="meta">
+        <h3>C · 方圆体 · 胶囊眼</h3>
+        <p>更「设备感」，呼应 Principal 是常驻进程而非聊天玩具。小尺寸下轮廓比正圆更稳，适合做托盘图标。</p>
+      </div>
+    </div>
+  </div>
+
+  <h2>状态矩阵 · 全部同时播放</h2>
+  <div class="matrix" id="matrix"></div>
+
+  <h2>小尺寸可读性 · 待命态</h2>
+  <div class="sizes" id="sizes"></div>
+
+</div>
+
+<script>
+(function () {
+  var STATES = [
+    { id: 'idle',  label: '待命'   },
+    { id: 'think', label: '执行中' },
+    { id: 'ask',   label: '问询'   },
+    { id: 'ok',    label: '完成'   },
+    { id: 'err',   label: '异常'   }
+  ];
+  var KINDS = [
+    { id: 'A', label: 'A 实心圆' },
+    { id: 'B', label: 'B 描边环' },
+    { id: 'C', label: 'C 方圆体' }
+  ];
+  var uid = 0;
+
+  // 挖洞眼依赖 mask，同页多实例要求 id 唯一，故运行时生成而非写死
+  function build(kind) {
+    var id = 'mk' + (++uid);
+    if (kind === 'A') return ''
+      + '<svg viewBox="0 0 200 200" class="m mA" aria-hidden="true">'
+      +   '<defs><mask id="' + id + '">'
+      +     '<circle cx="100" cy="100" r="66" fill="#fff"/>'
+      +     '<g class="eyes">'
+      +       '<ellipse class="eye" cx="76" cy="96" rx="11" ry="15"/>'
+      +       '<ellipse class="eye" cx="124" cy="96" rx="11" ry="15"/>'
+      +     '</g>'
+      +   '</mask></defs>'
+      +   '<circle class="body" cx="100" cy="100" r="66" mask="url(#' + id + ')"/>'
+      + '</svg>';
+    if (kind === 'B') return ''
+      + '<svg viewBox="0 0 200 200" class="m mB" aria-hidden="true">'
+      +   '<circle class="ring" cx="100" cy="100" r="63"/>'
+      +   '<g class="eyes">'
+      +     '<ellipse class="eye" cx="79" cy="96" rx="9" ry="11"/>'
+      +     '<ellipse class="eye" cx="121" cy="96" rx="9" ry="11"/>'
+      +   '</g>'
+      + '</svg>';
+    return ''
+      + '<svg viewBox="0 0 200 200" class="m mC" aria-hidden="true">'
+      +   '<defs><mask id="' + id + '">'
+      +     '<rect x="34" y="34" width="132" height="132" rx="46" fill="#fff"/>'
+      +     '<g class="eyes">'
+      +       '<rect class="eye" x="68" y="82" width="18" height="30" rx="9"/>'
+      +       '<rect class="eye" x="114" y="82" width="18" height="30" rx="9"/>'
+      +     '</g>'
+      +   '</mask></defs>'
+      +   '<rect class="body" x="34" y="34" width="132" height="132" rx="46" mask="url(#' + id + ')"/>'
+      + '</svg>';
+  }
+
+  function stage(kind, state, px) {
+    var d = document.createElement('div');
+    d.className = 'stage st-' + state;
+    var s = document.createElement('span');
+    s.className = 'mwrap';
+    if (px) { s.style.width = px + 'px'; s.style.height = px + 'px'; }
+    s.innerHTML = build(kind);
+    d.appendChild(s);
+    return d;
+  }
+
+  // --- 状态矩阵：表头 + 每个方向一行 ---
+  var matrix = document.getElementById('matrix');
+  matrix.appendChild(document.createElement('div'));
+  STATES.forEach(function (st) {
+    var h = document.createElement('div');
+    h.className = 'mhead';
+    h.textContent = st.label;
+    matrix.appendChild(h);
+  });
+  KINDS.forEach(function (k) {
+    var side = document.createElement('div');
+    side.className = 'mside';
+    side.textContent = k.label;
+    matrix.appendChild(side);
+    STATES.forEach(function (st) { matrix.appendChild(stage(k.id, st.id)); });
+  });
+
+  // --- 小尺寸检查 ---
+  var sizes = document.getElementById('sizes');
+  [120, 48, 28, 16].forEach(function (px) {
+    KINDS.forEach(function (k) {
+      var cell = document.createElement('div');
+      cell.className = 'sizecell';
+      cell.appendChild(stage(k.id, 'idle', px));
+      var cap = document.createElement('div');
+      cap.className = 'cap';
+      cap.textContent = k.id + ' · ' + px + 'px';
+      cell.appendChild(cap);
+      sizes.appendChild(cell);
+    });
+  });
+
+  // --- 并排对比区：填充 + 状态切换 ---
+  document.querySelectorAll('[data-mascot]').forEach(function (el) {
+    if (!el.innerHTML) el.innerHTML = build(el.dataset.mascot);
+  });
+
+  document.getElementById('controls').addEventListener('click', function (e) {
+    var btn = e.target.closest('.ctl');
+    if (!btn) return;
+    this.querySelectorAll('.ctl').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
+    document.querySelectorAll('[data-live]').forEach(function (el) {
+      el.className = 'stage st-' + btn.dataset.state;
+    });
+  });
+})();
+</script>
+</body>
+</html>

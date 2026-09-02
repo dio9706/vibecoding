@@ -1,35 +1,33 @@
 /**
- * 需求地图视图 —— 页面为节点、逻辑点挂节点内、连线为页面跳转的流程画布。
+ * 需求地图视图 —— 需求地图业务适配层：页面为节点、逻辑点挂节点内、连线为页面跳转。
  *
  * 一个挂载函数两处复用：评审期内嵌进 #reqPage 的报告页签，开发期从右栏以浮层打开。
  * 坐标不来自后端也不来自 LLM，由 req-map-layout.logic.js 现算（见 spec §3.1）。
+ * 缩放/平移/minimap/连线绘制这些与需求业务无关的通用画布能力，都下沉到
+ * map-canvas.js（Task 8 提炼），本文件只负责：把 pages 铺成 node、渲染页面卡片/
+ * 逻辑点徽章、绑定点击打开详情抽屉、以及「版本选择」「重新生成」「提交标注」
+ * 这类需求地图特有的业务逻辑。
  *
  * 安全纪律：pages/points 的文案全部来自 LLM 输出，一律走 textContent 落地，
  * 不用 innerHTML 拼接——骨架用 innerHTML，数据用 DOM API。
  */
 import { layoutMap } from './req-map-layout.logic.js';
-import { viewportBox, panFromViewport } from './req-map-minimap.logic.js';
+import { createMapCanvas } from './map-canvas.js';
 import { confirmDialog } from './ui.js';
 
 const SYM = { add: '＋', mod: '~', del: '－' };
 const TYPE_CN = { add: '新增逻辑点', mod: '修改逻辑点', del: '删除逻辑点' };
-const ZOOM_MIN = 0.35;
-const ZOOM_MAX = 1.8;
+
+// 工具条与标注汇总条都是浮在画布上的，「适应」时要把它们的高度让出来，
+// 否则第一层节点会被工具条压住（缩得越小压得越狠）。交给 map-canvas 的 fitInsets。
+const TOP_INSET = 52;
+const BOT_INSET = 70;
 
 function el(tag, cls, text) {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
   if (text != null) n.textContent = text;
   return n;
-}
-
-/** 三次贝塞尔在 t 处的点。只有连线标签定位这一个消费者，所以不单独开 logic 文件。 */
-function bezierAt(p0, p1, p2, p3, t) {
-  const u = 1 - t;
-  return {
-    x: u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
-    y: u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y,
-  };
 }
 
 /**
@@ -50,16 +48,19 @@ export function mountMap(container, opts) {
   const { reqId, phase, map, versions = [], version = null, busy = null, onReload, onRestore, onRegen } = opts;
   const canAnnotate = phase === 'review';
 
+  // 容器复用挂载（版本切换会对同一个 container 再调一次 mountMap）：
+  // 旧实例的 window/document 级监听不会因为 innerHTML 被覆盖而自动解绑，必须先手动清掉，
+  // 否则每切一次版本就多攒一份指向旧 DOM/旧 map 数据的监听，越切越漏。
+  container.__reqMapCanvas?.destroy?.();
+  container.__reqMapCanvas = null;
+  document.removeEventListener('keydown', container.__reqMapEsc || (() => {}));
+  container.__reqMapEsc = null;
+
   const state = {
     filters: { add: true, mod: true, del: true, flag: false },
     sel: null, // { kind:'point'|'page', id }
-    zoom: 1,
-    panX: 0,
-    panY: 0,
     annots: { ...(map.annots || {}) },
     saveTimer: null,
-    minimapScale: 1,                    // 鸟瞰图缩略比，由 viewportBox 算出后缓存给拖拽用
-    minimapInteractionsAttached: false, // window 级监听只绑一次
   };
 
   container.innerHTML =
@@ -72,19 +73,10 @@ export function mountMap(container, opts) {
     '<span class="rq-sep"></span>' +
     '<button class="rq-fchip rq-f-flag" data-f="flag">⚑ 仅看已标注</button>' +
     '<span class="rq-sep"></span>' +
-    '<span class="rq-zoom"><button class="rq-z-out">−</button><i class="rq-z-val">100%</i>' +
-    '<button class="rq-z-in">＋</button><button class="rq-z-fit">适应</button></span>' +
-    '<span class="rq-sep"></span>' +
     '<button class="rq-regen" title="以当前代码实现为准，重新扫一遍出新版地图">↻ 重新生成</button>' +
     '<span class="rq-ver"></span>' +
     '</div>' +
-    '<div class="rq-minimap">' +
-    '<div class="rq-minimap-content"></div>' +
-    '<div class="rq-minimap-viewport"></div>' +
-    '</div>' +
-    '<div class="rq-canvas-host">' +
-    '<div class="rq-canvas"><svg class="rq-edges"></svg><div class="rq-nodes"></div></div>' +
-    '</div>' +
+    '<div class="rq-canvas-mount"></div>' +
     '<div class="rq-foot" hidden><span class="rq-annot-sum"></span>' +
     '<button class="btn primary rq-submit" disabled>提交标注，AI 修订</button></div>' +
     '<div class="rq-drawer" hidden><div class="rq-dhead"><div class="rq-dt">' +
@@ -93,124 +85,131 @@ export function mountMap(container, opts) {
     '</div>';
 
   const root = container.querySelector('.rq-map');
-  const host = root.querySelector('.rq-canvas-host');
-  const canvas = root.querySelector('.rq-canvas');
-  const svg = root.querySelector('.rq-edges');
-  const nodesBox = root.querySelector('.rq-nodes');
   const drawer = root.querySelector('.rq-drawer');
   const dBody = root.querySelector('.rq-dbody');
   const foot = root.querySelector('.rq-foot');
 
-  let layout = layoutMap(map);
+  const layout = layoutMap(map);
 
-  // ---------- Minimap ----------
-  let mmDrag = null; // Minimap 拖拽状态
+  // ---------- 画布 ----------
+  const mapCanvas = createMapCanvas(root.querySelector('.rq-canvas-mount'), {
+    nodes: [],
+    edges: [],
+    renderNode: renderPageNode,
+    onNodeClick: (id) => openPage(id),
+    onNodeHover: (id, isHover) => onNodeHover(id, isHover),
+    fitInsets: { top: TOP_INSET, bottom: BOT_INSET },
+  });
+  container.__reqMapCanvas = mapCanvas;
 
-  /** 当前视口在鸟瞰图坐标系里的框（含缩略比）。三处消费者共用，避免尺寸常量到处硬编码。 */
-  function mmBox() {
-    return viewportBox({
-      panX: state.panX,
-      panY: state.panY,
-      zoom: state.zoom,
-      hostW: host.clientWidth,
-      hostH: host.clientHeight,
-      contentW: layout.size.w,
-      contentH: layout.size.h,
+  function visiblePoints(page) {
+    return (page.points || []).filter((pt) => {
+      if (state.filters.flag && !state.annots[pt.id]) return false;
+      return state.filters[pt.type];
     });
   }
 
-  function initMinimap() {
-    const mmContent = root.querySelector('.rq-minimap-content');
-    mmContent.innerHTML = '';
+  /** pages → map-canvas 认识的 node 结构，坐标全部来自 layoutMap，本层不再自己算。 */
+  function buildNodes() {
+    const entrySet = new Set(layout.entries || []);
+    return map.pages.map((page) => {
+      const pos = layout.positions[page.id] || { x: 0, y: 0, h: 0 };
+      return {
+        id: page.id,
+        x: pos.x,
+        y: pos.y,
+        width: layout.nodeW,
+        height: pos.h,
+        data: { page, isEntry: entrySet.has(page.id) },
+      };
+    });
+  }
 
-    // 克隆体必须中和 transform：cloneNode 会把主画布的内联 translate/scale 一起带过来，
-    // 外层再叠一次缩略比，缩略图就跟着主画布跑了（原 bug：鸟瞰图里内容被推出可视区）。
-    const canvasClone = canvas.cloneNode(true);
-    canvasClone.style.transform = 'none';
-    // 连 <defs> 一起克隆会让 marker id 在文档里重复一份；删掉后克隆体的 marker-end
-    // 自然引用主画布那份（内容一模一样），少一处 id 撞车。
-    canvasClone.querySelector('defs')?.remove();
-    mmContent.appendChild(canvasClone);
+  /** 以某页为中心：它相连的边高亮、其余淡出。pageId 为空时不给任何 state（边恢复常态）。 */
+  function edgesHighlightedAround(pageId) {
+    return (map.edges || []).map((e) => {
+      if (!pageId) return { from: e.from, to: e.to, label: e.label };
+      const hit = e.from === pageId || e.to === pageId;
+      return { from: e.from, to: e.to, label: e.label, state: hit ? 'hl' : 'dim' };
+    });
+  }
 
-    // 以左上角为基准缩放，避免默认居中缩放把内容顶出可视区
-    mmContent.style.transformOrigin = '0 0';
-    const b = mmBox();
-    state.minimapScale = b.scale;
-    mmContent.style.transform = 'scale(' + b.scale + ')';
+  /** 选中某页时，它相连的边高亮、其余淡出；未选页面（含选中逻辑点）时边不带任何状态。 */
+  function buildEdges() {
+    const selPage = state.sel?.kind === 'page' ? state.sel.id : null;
+    return edgesHighlightedAround(selPage);
+  }
 
-    updateMinimapViewport();
+  function renderNodes() {
+    mapCanvas.setNodes(buildNodes());
+    mapCanvas.setEdges(buildEdges());
 
-    // 只在首次绑定，避免浮层反复开关后堆积 window 级监听
-    if (!state.minimapInteractionsAttached) {
-      attachMinimapInteractions();
-      state.minimapInteractionsAttached = true;
+    const all = { add: 0, mod: 0, del: 0 };
+    for (const p of map.pages) for (const pt of p.points || []) all[pt.type]++;
+    const chips = root.querySelectorAll('.rq-fchip b');
+    if (chips[0]) chips[0].textContent = all.add;
+    if (chips[1]) chips[1].textContent = all.mod;
+    if (chips[2]) chips[2].textContent = all.del;
+  }
+
+  /** 页面卡片的内容与样式——map-canvas 只给了个空 .rq-node，这里往里填页面/逻辑点信息。 */
+  function renderPageNode(node, nodeEl) {
+    const { page, isEntry } = node.data;
+    const pts = visiblePoints(page);
+    const counts = { add: 0, mod: 0, del: 0 };
+    for (const pt of page.points || []) counts[pt.type]++;
+    const untouched = page.state === 'untouched';
+    const dimmed = !untouched && (page.points || []).length && !pts.length;
+
+    if (page.state === 'new') nodeEl.classList.add('rq-newpage');
+    if (untouched || dimmed) nodeEl.classList.add('rq-untouched');
+    if (state.sel?.kind === 'page' && state.sel.id === page.id) nodeEl.classList.add('sel');
+
+    const head = el('div', 'rq-nhead');
+    const top = el('div', 'rq-ntop');
+    top.appendChild(el('span', 'rq-nname', page.name));
+    // 「入口」放在最前：先告诉用户从哪进来，再说这页是新增还是有稿
+    if (isEntry) top.appendChild(el('span', 'rq-nflag rq-entry', '入口'));
+    if (page.state === 'new') top.appendChild(el('span', 'rq-nflag', '新页面'));
+    if (page.figma) top.appendChild(el('span', 'rq-nflag rq-figma', page.restoredAt ? '🎨 已还原' : '🎨 已挂稿'));
+    head.appendChild(top);
+    head.appendChild(el('div', 'rq-nfile', page.file || '—'));
+    const cnt = el('div', 'rq-ncount');
+    if (counts.add) cnt.appendChild(el('i', 'rq-add', '＋' + counts.add));
+    if (counts.mod) cnt.appendChild(el('i', 'rq-mod', '~' + counts.mod));
+    if (counts.del) cnt.appendChild(el('i', 'rq-del', '－' + counts.del));
+    if (!(page.points || []).length) cnt.appendChild(el('i', 'rq-none', '未变更'));
+    head.appendChild(cnt);
+    nodeEl.appendChild(head);
+
+    if ((page.points || []).length) {
+      const box = el('div', 'rq-npts');
+      if (!pts.length) box.appendChild(el('div', 'rq-nempty', '当前筛选下无逻辑点'));
+      for (const pt of pts) {
+        const row = el('div', 'rq-pt rq-' + pt.type);
+        if (state.sel?.kind === 'point' && state.sel.id === pt.id) row.classList.add('sel');
+        if (pt.fresh) row.classList.add('fresh');
+        row.appendChild(el('span', 'rq-sym rq-' + pt.type, SYM[pt.type]));
+        row.appendChild(el('span', 'rq-t', pt.title));
+        const a = state.annots[pt.id];
+        if (a) row.appendChild(el('span', 'rq-mk rq-' + (a.verdict === 'wrong' ? 'wrong' : 'ok'), a.verdict === 'wrong' ? '⚑' : '✓'));
+        // 逻辑点行要单独打开逻辑点详情，不能让点击冒泡到卡片触发「打开页面」
+        row.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openPoint(pt.id);
+        });
+        box.appendChild(row);
+      }
+      nodeEl.appendChild(box);
+    } else {
+      nodeEl.appendChild(el('div', 'rq-nempty', '本次需求不涉及改动，仅作跳转参考'));
     }
   }
 
-  function updateMinimapViewport() {
-    const vp = root.querySelector('.rq-minimap-viewport');
-    const b = mmBox();
-    state.minimapScale = b.scale;
-    vp.style.left = b.x + 'px';
-    vp.style.top = b.y + 'px';
-    vp.style.width = Math.max(0, b.w) + 'px';
-    vp.style.height = Math.max(0, b.h) + 'px';
-  }
-
-  function attachMinimapInteractions() {
-    const minimap = root.querySelector('.rq-minimap');
-    const mmViewport = root.querySelector('.rq-minimap-viewport');
-
-    // ---- 拖拽视口框 ----
-    mmViewport.addEventListener('mousedown', (e) => {
-      e.stopPropagation();
-      mmDrag = {
-        x: e.clientX,
-        y: e.clientY,
-        vx: parseFloat(mmViewport.style.left) || 0,
-        vy: parseFloat(mmViewport.style.top) || 0,
-      };
-      mmViewport.classList.add('dragging');
-    });
-
-    const onMinimapMove = (e) => {
-      if (!mmDrag) return;
-      // 反推 pan 走 panFromViewport：这里原先是 panX = vx / scale（正相关且漏了 zoom），
-      // 所以「视口框往右拖，画面往左滚」。互逆关系由 req-map-minimap.logic 的单测兜着。
-      const p = panFromViewport({
-        vx: mmDrag.vx + (e.clientX - mmDrag.x),
-        vy: mmDrag.vy + (e.clientY - mmDrag.y),
-        zoom: state.zoom,
-        scale: state.minimapScale,
-      });
-      state.panX = p.panX;
-      state.panY = p.panY;
-      applyTransform(); // 内部会调 updateMinimapViewport()
-    };
-
-    const onMinimapUp = () => {
-      mmDrag = null;
-      mmViewport.classList.remove('dragging');
-    };
-
-    window.addEventListener('mousemove', onMinimapMove);
-    window.addEventListener('mouseup', onMinimapUp);
-
-    // ---- 点击鸟瞰图空白处：把该点作为视口中心 ----
-    minimap.addEventListener('click', (e) => {
-      if (e.target === mmViewport || mmViewport.contains(e.target)) return; // 框上的点击交给拖拽
-      const rect = minimap.getBoundingClientRect();
-      const b = mmBox();
-      const p = panFromViewport({
-        vx: e.clientX - rect.left - b.w / 2,
-        vy: e.clientY - rect.top - b.h / 2,
-        zoom: state.zoom,
-        scale: b.scale,
-      });
-      state.panX = p.panX;
-      state.panY = p.panY;
-      applyTransform();
-    });
+  /** 悬停预览依赖链路：仅在没有页面被选中时生效，避免和点击选中的高亮互相打架。 */
+  function onNodeHover(id, isHover) {
+    if (state.sel?.kind === 'page') return;
+    mapCanvas.setEdges(edgesHighlightedAround(isHover ? id : null));
   }
 
   // ---------- 重新生成 ----------
@@ -282,226 +281,6 @@ export function mountMap(container, opts) {
       renderNodes();
     }),
   );
-
-  function visiblePoints(page) {
-    return (page.points || []).filter((pt) => {
-      if (state.filters.flag && !state.annots[pt.id]) return false;
-      return state.filters[pt.type];
-    });
-  }
-
-  // ---------- 画布 ----------
-  function applyTransform() {
-    canvas.style.transform =
-      'translate(' + state.panX + 'px,' + state.panY + 'px) scale(' + state.zoom + ')';
-    root.querySelector('.rq-z-val').textContent = Math.round(state.zoom * 100) + '%';
-    updateMinimapViewport();
-  }
-  // 工具条与标注汇总条都是浮在画布上的，「适应」时要把它们的高度让出来，
-  // 否则第一层节点会被工具条压住（缩得越小压得越狠）
-  const TOP_INSET = 52;
-  const BOT_INSET = 70;
-  function fitView() {
-    const w = host.clientWidth || 1000;
-    const h = host.clientHeight || 600;
-    const usableH = Math.max(200, h - TOP_INSET - BOT_INSET);
-    state.zoom = Math.max(ZOOM_MIN, Math.min(1, Math.min((w - 40) / layout.size.w, usableH / layout.size.h)));
-    state.panX = Math.max(0, (w - layout.size.w * state.zoom) / 2);
-    state.panY = TOP_INSET;
-    applyTransform(); // 内部已含 updateMinimapViewport()
-  }
-  root.querySelector('.rq-z-in').addEventListener('click', () => {
-    state.zoom = Math.min(ZOOM_MAX, state.zoom + 0.1);
-    applyTransform();
-  });
-  root.querySelector('.rq-z-out').addEventListener('click', () => {
-    state.zoom = Math.max(ZOOM_MIN, state.zoom - 0.1);
-    applyTransform();
-  });
-  root.querySelector('.rq-z-fit').addEventListener('click', fitView);
-
-  let drag = null;
-  // 监听在 host 而非 canvas：缩放后 canvas 视觉尺寸缩小，
-  // host 背景（点网格）区域应同样可拖拽，不能只绑在 canvas 上
-  host.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.rq-node')) return; // 节点内不触发平移，否则点不中逻辑点
-    drag = { x: e.clientX, y: e.clientY, px: state.panX, py: state.panY };
-    host.classList.add('grabbing');
-  });
-  const onMove = (e) => {
-    if (!drag) return;
-    state.panX = drag.px + (e.clientX - drag.x);
-    state.panY = drag.py + (e.clientY - drag.y);
-    applyTransform();
-  };
-  const onUp = () => {
-    drag = null;
-    host.classList.remove('grabbing');
-  };
-  window.addEventListener('mousemove', onMove);
-  window.addEventListener('mouseup', onUp);
-  host.addEventListener(
-    'wheel',
-    (e) => {
-      e.preventDefault();
-      state.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, state.zoom - Math.sign(e.deltaY) * 0.08));
-      applyTransform();
-      // applyTransform() 内部已包含 updateMinimapViewport() 调用
-    },
-    { passive: false },
-  );
-  // 容器被移除时收掉 window 级监听，避免浮层反复开关后堆积
-  const cleanup = new MutationObserver(() => {
-    if (!document.body.contains(container)) {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      cleanup.disconnect();
-    }
-  });
-  cleanup.observe(document.body, { childList: true, subtree: true });
-
-  // ---------- 节点 ----------
-  function renderNodes() {
-    nodesBox.innerHTML = '';
-    const entrySet = new Set(layout.entries || []);
-    for (const page of map.pages) {
-      const pts = visiblePoints(page);
-      const counts = { add: 0, mod: 0, del: 0 };
-      for (const pt of page.points || []) counts[pt.type]++;
-      const untouched = page.state === 'untouched';
-      const dimmed = !untouched && (page.points || []).length && !pts.length;
-
-      const node = el('div', 'rq-node');
-      if (page.state === 'new') node.classList.add('rq-newpage');
-      if (untouched || dimmed) node.classList.add('rq-untouched');
-      if (state.sel?.kind === 'page' && state.sel.id === page.id) node.classList.add('sel');
-      const pos = layout.positions[page.id] || { x: 0, y: 0 };
-      node.style.left = pos.x + 'px';
-      node.style.top = pos.y + 'px';
-
-      const head = el('div', 'rq-nhead');
-      const top = el('div', 'rq-ntop');
-      top.appendChild(el('span', 'rq-nname', page.name));
-      // 「入口」放在最前：先告诉用户从哪进来，再说这页是新增还是有稿
-      if (entrySet.has(page.id)) top.appendChild(el('span', 'rq-nflag rq-entry', '入口'));
-      if (page.state === 'new') top.appendChild(el('span', 'rq-nflag', '新页面'));
-      if (page.figma) top.appendChild(el('span', 'rq-nflag rq-figma', page.restoredAt ? '🎨 已还原' : '🎨 已挂稿'));
-      head.appendChild(top);
-      head.appendChild(el('div', 'rq-nfile', page.file || '—'));
-      const cnt = el('div', 'rq-ncount');
-      if (counts.add) cnt.appendChild(el('i', 'rq-add', '＋' + counts.add));
-      if (counts.mod) cnt.appendChild(el('i', 'rq-mod', '~' + counts.mod));
-      if (counts.del) cnt.appendChild(el('i', 'rq-del', '－' + counts.del));
-      if (!(page.points || []).length) cnt.appendChild(el('i', 'rq-none', '未变更'));
-      head.appendChild(cnt);
-      head.addEventListener('click', () => openPage(page.id));
-      node.appendChild(head);
-
-      if ((page.points || []).length) {
-        const box = el('div', 'rq-npts');
-        if (!pts.length) box.appendChild(el('div', 'rq-nempty', '当前筛选下无逻辑点'));
-        for (const pt of pts) {
-          const row = el('div', 'rq-pt rq-' + pt.type);
-          if (state.sel?.kind === 'point' && state.sel.id === pt.id) row.classList.add('sel');
-          if (pt.fresh) row.classList.add('fresh');
-          row.appendChild(el('span', 'rq-sym rq-' + pt.type, SYM[pt.type]));
-          row.appendChild(el('span', 'rq-t', pt.title));
-          const a = state.annots[pt.id];
-          if (a) row.appendChild(el('span', 'rq-mk rq-' + (a.verdict === 'wrong' ? 'wrong' : 'ok'), a.verdict === 'wrong' ? '⚑' : '✓'));
-          row.addEventListener('click', () => openPoint(pt.id));
-          box.appendChild(row);
-        }
-        node.appendChild(box);
-      } else {
-        node.appendChild(el('div', 'rq-nempty', '本次需求不涉及改动，仅作跳转参考'));
-      }
-      nodesBox.appendChild(node);
-    }
-
-    const all = { add: 0, mod: 0, del: 0 };
-    for (const p of map.pages) for (const pt of p.points || []) all[pt.type]++;
-    const chips = root.querySelectorAll('.rq-fchip b');
-    if (chips[0]) chips[0].textContent = all.add;
-    if (chips[1]) chips[1].textContent = all.mod;
-    if (chips[2]) chips[2].textContent = all.del;
-
-    canvas.style.width = layout.size.w + 'px';
-    canvas.style.height = layout.size.h + 'px';
-    drawEdges();
-    initMinimap(); // 每次节点重绘后同步 Minimap
-  }
-
-  function drawEdges() {
-    svg.setAttribute('width', layout.size.w);
-    svg.setAttribute('height', layout.size.h);
-    // 两个 marker：常态 / 高亮。marker 内的 path 不能被 `.rq-edges > path` 的 fill:none 命中，
-    // 所以边线样式用直接子选择器，见 req-v2.css。
-    svg.innerHTML =
-      '<defs>' +
-      '<marker id="rq-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">' +
-      '<path d="M0 0 L8 4 L0 8 z" class="rq-ahead"></path></marker>' +
-      '<marker id="rq-arrow-hl" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto">' +
-      '<path d="M0 0 L8 4 L0 8 z" class="rq-ahead-hl"></path></marker>' +
-      '</defs>';
-
-    const NS = 'http://www.w3.org/2000/svg';
-    const layerOf = layout.layerOf || new Map();
-    const selPage = state.sel?.kind === 'page' ? state.sel.id : null;
-
-    for (const e of map.edges || []) {
-      const a = layout.positions[e.from];
-      const b = layout.positions[e.to];
-      if (!a || !b) continue;
-      const w = layout.nodeW;
-
-      // 走向按**层级关系**判，不按 |dx| vs |dy|：hub 连最左侧子页时 |dx| 会大于 |dy|，
-      // 按大小判会误判成横向，画出一条绕到侧面的怪线。
-      let p1;
-      let p2;
-      let c1;
-      let c2;
-      if ((layerOf.get(e.to) ?? 0) > (layerOf.get(e.from) ?? 0)) {
-        // 纵向：下沿 → 上沿
-        p1 = { x: a.x + w / 2, y: a.y + a.h };
-        p2 = { x: b.x + w / 2, y: b.y };
-        const m = Math.max(30, Math.abs(p2.y - p1.y) / 2);
-        c1 = { x: p1.x, y: p1.y + m };
-        c2 = { x: p2.x, y: p2.y - m };
-      } else {
-        // 同层横向。目标在左时要从左沿出、右沿进，否则线会从节点内部穿出去。
-        const rightward = b.x >= a.x;
-        p1 = { x: rightward ? a.x + w : a.x, y: a.y + 34 };
-        p2 = { x: rightward ? b.x : b.x + w, y: b.y + 34 };
-        const m = Math.max(40, Math.abs(p2.x - p1.x) / 2) * (rightward ? 1 : -1);
-        c1 = { x: p1.x + m, y: p1.y };
-        c2 = { x: p2.x - m, y: p2.y };
-      }
-
-      const hit = !!selPage && (e.from === selPage || e.to === selPage);
-      const path = document.createElementNS(NS, 'path');
-      path.setAttribute(
-        'd',
-        'M' + p1.x + ' ' + p1.y + ' C' + c1.x + ' ' + c1.y + ' ' + c2.x + ' ' + c2.y + ' ' + p2.x + ' ' + p2.y,
-      );
-      path.setAttribute('data-from', e.from);
-      path.setAttribute('data-to', e.to);
-      if (selPage) path.setAttribute('class', hit ? 'hl' : 'dim');
-      path.setAttribute('marker-end', hit ? 'url(#rq-arrow-hl)' : 'url(#rq-arrow)');
-      svg.appendChild(path);
-
-      if (e.label) {
-        // 标签从中点挪到贴近目标端（t≈0.75）：hub 有多条出边时，中点会全挤在同一处
-        const q = bezierAt(p1, c1, c2, p2, 0.75);
-        const t = document.createElementNS(NS, 'text');
-        t.setAttribute('x', q.x);
-        t.setAttribute('y', q.y - 5);
-        t.setAttribute('text-anchor', 'middle');
-        t.setAttribute('class', 'rq-elabel' + (selPage ? (hit ? ' hl' : ' dim') : ''));
-        t.textContent = e.label;
-        svg.appendChild(t);
-      }
-    }
-  }
 
   // ---------- 抽屉 ----------
   /** 抽屉开合要同步给根节点：底部标注汇总条是居中定位的，抽屉一开就会被压住，靠 CSS 左移让开 */
@@ -795,15 +574,21 @@ export function mountMap(container, opts) {
     });
   }
 
-  document.addEventListener('keydown', function onEsc(e) {
+  // 存到 container 上以便下次 mountMap（版本切换）时能精确摘掉这一个，而不是靠
+  // 「容器还在不在文档里」这个自愈检查——那个检查只在容器整个被移除时才生效，
+  // 版本切换是同一个容器反复复用，永远走不到那个分支。
+  function onEsc(e) {
     if (!document.body.contains(container)) {
       document.removeEventListener('keydown', onEsc);
+      container.__reqMapEsc = null;
       return;
     }
     if (e.key === 'Escape' && !drawer.hidden) closeDrawer();
-  });
+  }
+  container.__reqMapEsc = onEsc;
+  document.addEventListener('keydown', onEsc);
 
   renderNodes();
   updateFoot();
-  requestAnimationFrame(fitView);
+  requestAnimationFrame(() => mapCanvas.fitView());
 }

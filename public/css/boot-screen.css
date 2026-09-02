@@ -1,0 +1,129 @@
+/**
+ * 开屏页视觉：图案背景 + 大号 PRINCIPAL。
+ * 图案移植自 Inspira UI 的 PatternBackground（MIT），源码取自
+ * https://inspira-ui.com/r/pattern-background.json —— 原组件是 Vue + Tailwind
+ * （cva 变体 + v-bind 注入时长），这里改写成原生 CSS，结构保持一致：
+ *   .boot-bg        图案本体，整块做 background-position 位移
+ *   .boot-bg-mask   纯背景色的覆盖层，用 radial 遮罩在中心挖空
+ *                   —— 官方是「盖住四周」而非「让图案自己渐隐」，两者在半透明
+ *                      图案上的结果不同，故照搬其做法
+ * 相对官方的定制（均为需求指定）：黑底、方块（官方只有 grid 线 / dot 圆点）、品牌橙。
+ *
+ * ⚠️ 与引导态的边界（改动前必读）
+ * 启动罩 #bootOverlay 有两副面孔：纯启动态，和 onboarding.js 接管后的引导态
+ * （.ob-arm / .ob-open）。本文件只接管**纯启动态**，引导态一律原样放行 ——
+ * onboarding.css:64 的 --ob-logo-x 位移量是按「.ob-brand 盒宽由 22px 的
+ * #bootTitle 撑开」推导的，把那行标题放大到 66px 会让盒宽从约 155px 变成 455px，
+ * 引导面板与 LOGO 的相对位置随即错位。所以这里另起 .boot-splash 承载大标题，
+ * 绝不改 #bootTitle 本身的字号。
+ */
+
+/* ---------------- 图案背景 ---------------- */
+
+.boot-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0; /* 压在 .ob-titlebar / .ob-brand / .ob-panel 之下 */
+  overflow: clip;
+  background-color: var(--bg, #0e0f13);
+  /* 官方 dot 用 radial-gradient；方块只能靠 SVG data-URI ——
+   * linear-gradient 画出来是网格线，交叉点才是方块，线本身藏不掉。
+   * fill-opacity 控制深浅，改这一个数即可整体调浓淡 */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Crect width='3' height='3' fill='%23d97757' fill-opacity='0.4'/%3E%3C/svg%3E");
+  background-size: 24px 24px; /* 对齐官方 size=md */
+  animation: bootPatternToBottom 8s linear infinite;
+}
+
+/*
+ * 官方是 background-position: 0 0 → 0 100%，配 speed 预设（Default 10000 / Slow 25000）。
+ * 但 100% 对平铺背景等于「容器高 - 瓦片高」，几乎不可能是瓦片的整数倍，
+ * 循环重启那一帧会整体跳几个像素。改成位移 10 个瓦片（240px），循环点完全无缝。
+ * 周期 8s = 30px/s，对齐官方 Slow 档（25000ms 走完一屏 ≈ 31px/s）；
+ * 开屏只停留几秒、图案是背景而非主角，Default 档（≈78px/s）在这里显得躁。
+ */
+@keyframes bootPatternToBottom {
+  from { background-position: 0 0; }
+  to   { background-position: 0 240px; }
+}
+
+/* 官方 mask=ellipse：radial-gradient(ellipse at center, transparent 20%, black)。
+ * 覆盖层本身是背景色，中心透明处露出图案，越往外越被背景色盖死。 */
+.boot-bg-mask {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background: var(--bg, #0e0f13);
+  -webkit-mask-image: radial-gradient(ellipse at center, transparent 20%, #000 100%);
+  mask-image: radial-gradient(ellipse at center, transparent 20%, #000 100%);
+}
+
+/* ---------------- 大号品牌字 ---------------- */
+
+/*
+ * 绝对居中而不是进 flex 流：罩子是 flex 居中容器，插进流里会顶下 .ob-brand、
+ * 改掉它的居中基准（.ob-titlebar 出于同样原因也是 absolute，见 app.css:2816）。
+ *
+ * 字族 / 字重 / 字距 / 颜色与 app.css 的 .vibe-title 一致，只有字号放大到 3 倍
+ * （22px → 66px）—— 开屏整屏只有这一个词，按空态的尺寸会显得空。
+ * clamp 兜窄窗口：66px 配 0.18em 字距时「PRINCIPAL」约 455px 宽，窗口缩到
+ * 手机宽度会横向溢出。
+ */
+.boot-splash {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-family: var(--mono, monospace);
+  font-size: clamp(30px, 8vw, 66px);
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: var(--accent, #d97757);
+  white-space: nowrap;
+}
+
+/* ---------------- 纯启动态 vs 引导态 ---------------- */
+
+/* 纯启动态：藏掉六芒星与小标题，画面只剩图案和大号 PRINCIPAL */
+.boot-overlay:not(.ob-arm):not(.ob-open) #bootStar,
+.boot-overlay:not(.ob-arm):not(.ob-open) #bootTitle {
+  display: none;
+}
+
+/*
+ * 启动文案与「仍然进入」默认不出现 —— 需求是开屏只展示 PRINCIPAL。
+ * 但不能连节点一起删：boot-gate.js 靠 #bootText 提示「启动较慢」、靠 #bootSkip
+ * 给 20 秒逃生口，兜底放行要等到 90s。后端迟迟不通时把用户干晾着且无处可点，
+ * 是比「多一行字」严重得多的问题。故改为按需浮现：boot-gate 判定较慢时给罩子
+ * 加 .boot-slow，这一组才登场。
+ */
+.boot-overlay:not(.ob-arm):not(.ob-open):not(.boot-slow) .ob-status {
+  display: none;
+}
+
+/* 较慢态：.ob-brand 此时只剩 .ob-status，若仍按原点居中会和大标题重叠，下移让位 */
+.boot-overlay.boot-slow:not(.ob-arm):not(.ob-open) .ob-brand {
+  transform: translate(-50%, calc(-50% + 78px));
+}
+.boot-overlay.boot-slow:not(.ob-arm):not(.ob-open) .ob-status {
+  animation: bootSlowIn 0.32s ease both;
+}
+@keyframes bootSlowIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* 引导态：图案与大标题一并退场，罩子回到 onboarding.css 设计的原貌 */
+.boot-overlay.ob-arm .boot-bg,
+.boot-overlay.ob-open .boot-bg,
+.boot-overlay.ob-arm .boot-splash,
+.boot-overlay.ob-open .boot-splash {
+  display: none;
+}
+
+/* 无障碍：用户要求减少动效时保留静态图案 */
+@media (prefers-reduced-motion: reduce) {
+  .boot-bg,
+  .boot-overlay.boot-slow .ob-status {
+    animation: none !important;
+  }
+}

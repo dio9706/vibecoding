@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>吉祥物组件实验室 · Principal 原型</title>
+<link rel="stylesheet" href="/css/mascot.css">
+<style>
+  /* 取自 app.css 的设计变量，保证原型和真实界面同色系 */
+  :root {
+    --bg: #0e0f13;
+    --panel: #16171f;
+    --panel-2: #1d1e28;
+    --border: #2a2b37;
+    --border-soft: #22232e;
+    --text: #e9e7e3;
+    --muted: #8b8b9a;
+    --faint: #5a5b68;
+    --accent: #d97757;
+    --green: #6cc38a;
+    --red: #e5687a;
+    --mono: 'Cascadia Code', 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    background-image:
+      radial-gradient(1200px 600px at 80% -10%, rgba(217,119,87,.08), transparent 60%),
+      radial-gradient(900px 500px at 0% 110%, rgba(108,120,195,.06), transparent 55%);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.6;
+    padding: 32px 28px 80px;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; }
+  h1 { font-size: 20px; letter-spacing: .14em; color: var(--accent); font-weight: 700; }
+  .lede { color: var(--muted); font-size: 13px; margin-top: 6px; max-width: 880px; }
+  h2 {
+    font-size: 12px; letter-spacing: .16em; color: var(--faint);
+    font-weight: 600; text-transform: uppercase;
+    margin: 42px 0 14px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  code { color: var(--accent); font-size: 12.5px; }
+
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  button {
+    font: inherit; font-size: 12.5px; cursor: pointer;
+    padding: 7px 14px; border-radius: 7px;
+    background: var(--panel-2); color: var(--muted);
+    border: 1px solid var(--border); transition: .15s;
+  }
+  button:hover { color: var(--text); border-color: var(--accent); }
+  button[aria-pressed="true"] {
+    background: rgba(217,119,87,.14); color: var(--accent); border-color: var(--accent);
+  }
+  button.primary { background: rgba(217,119,87,.16); color: var(--accent); border-color: var(--accent); }
+  .grp { font-size: 11px; color: var(--faint); letter-spacing: .1em; margin-right: 2px; }
+
+  .slider { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  input[type=range] { accent-color: var(--accent); width: 130px; }
+
+  .stage {
+    background: var(--bg);
+    border: 1px solid var(--border-soft); border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .boot-stage { height: 320px; margin-bottom: 14px; }
+  .play-stage { height: 280px; }
+
+  .play { display: grid; grid-template-columns: 1fr 300px; gap: 16px; align-items: start; }
+  .side {
+    background: var(--panel); border: 1px solid var(--border-soft);
+    border-radius: 12px; padding: 16px;
+  }
+  .side .grp { display: block; margin: 14px 0 8px; }
+  .side .grp:first-child { margin-top: 0; }
+  .readout {
+    margin-top: 16px; padding: 10px 12px;
+    background: var(--bg); border: 1px solid var(--border-soft); border-radius: 8px;
+    font-size: 12px; color: var(--muted); word-break: break-all;
+  }
+  .readout b { color: var(--accent); font-weight: 600; }
+
+  .gallery { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+  .cell {
+    background: var(--panel); border: 1px solid var(--border-soft);
+    border-radius: 10px; padding: 16px 8px 12px;
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+  }
+  .cell .name { font-size: 12px; color: var(--text); }
+  .cell .api { font-size: 11px; color: var(--faint); }
+
+  .sizes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>吉祥物组件实验室</h1>
+  <p class="lede">
+    这不再是原型稿，是真组件：<code>/js/mascot.js</code> + <code>/css/mascot.css</code> +
+    <code>/js/mascot-particles.js</code>，零第三方依赖。
+    本页只是它的宿主 —— 组件本身还没有接进 <code>index.html</code> 任何一处。
+  </p>
+
+  <h2>① 开机粒子动画</h2>
+  <div class="boot-stage stage" id="bootStage"></div>
+  <div class="row">
+    <button class="primary" id="replay">重放</button>
+    <div class="slider">粒子 <input type="range" id="pCount" min="40" max="420" step="10" value="170"><span id="pCountVal">170</span></div>
+    <div class="slider">时长 <input type="range" id="pDur" min="800" max="4000" step="100" value="1900"><span id="pDurVal">1900ms</span></div>
+  </div>
+
+  <h2>② 交互试玩</h2>
+  <div class="play">
+    <div class="play-stage stage" id="playStage"></div>
+    <div class="side">
+      <span class="grp">工作状态 · setState()</span>
+      <div class="row" id="workBtns"></div>
+      <span class="grp">情绪表情 · setState()</span>
+      <div class="row" id="moodBtns"></div>
+      <span class="grp">瞬时反馈 · flash()</span>
+      <div class="row">
+        <button data-flash="done">完成 1.8s</button>
+        <button data-flash="surprised">惊讶 1.2s</button>
+        <button data-flash="error">异常 2s</button>
+      </div>
+      <span class="grp">尺寸</span>
+      <div class="slider"><input type="range" id="size" min="24" max="220" step="4" value="150"><span id="sizeVal">150px</span></div>
+      <div class="readout" id="readout"></div>
+    </div>
+  </div>
+
+  <h2>③ 全部状态 · 同时播放</h2>
+  <div class="gallery" id="gallery"></div>
+
+  <h2>④ 小尺寸可读性 · 待命态</h2>
+  <div class="sizes" id="sizes"></div>
+
+</div>
+
+<script type="module">
+import { createMascot, MASCOT_STATES } from '/js/mascot.js';
+import { playMascotBoot } from '/js/mascot-particles.js';
+
+const WORK = ['idle', 'loading', 'waiting', 'done', 'error'];
+const MOOD = ['happy', 'sad', 'wink', 'surprised', 'sleep'];
+
+// ---------- ① 开机粒子动画 ----------
+const bootStage = document.getElementById('bootStage');
+const pCount = document.getElementById('pCount');
+const pDur = document.getElementById('pDur');
+let bootMascot = null;
+let bootHandle = null;
+
+function playBoot() {
+  bootHandle?.cancel();
+  bootMascot?.destroy();
+  bootMascot = createMascot({ mount: bootStage, size: 190, state: 'idle' });
+  bootHandle = playMascotBoot(bootMascot, {
+    count: Number(pCount.value),
+    duration: Number(pDur.value),
+    color: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim(),
+  });
+}
+
+document.getElementById('replay').addEventListener('click', playBoot);
+pCount.addEventListener('input', () => { document.getElementById('pCountVal').textContent = pCount.value; });
+pDur.addEventListener('input', () => { document.getElementById('pDurVal').textContent = pDur.value + 'ms'; });
+playBoot();
+
+// ---------- ② 交互试玩 ----------
+const play = createMascot({ mount: document.getElementById('playStage'), size: 150, state: 'idle' });
+const readout = document.getElementById('readout');
+
+function syncReadout(call) {
+  readout.innerHTML = '';
+  const line = document.createElement('div');
+  line.innerHTML = '<b>' + call + '</b>';
+  const now = document.createElement('div');
+  now.textContent = '当前：' + play.getState() + ' · aria-label「' + play.el.getAttribute('aria-label') + '」';
+  readout.append(line, now);
+}
+
+function mkButtons(host, list) {
+  list.forEach((id) => {
+    const b = document.createElement('button');
+    b.textContent = MASCOT_STATES[id];
+    b.dataset.state = id;
+    host.appendChild(b);
+  });
+}
+mkButtons(document.getElementById('workBtns'), WORK);
+mkButtons(document.getElementById('moodBtns'), MOOD);
+
+document.querySelector('.side').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.state) {
+    play.setState(b.dataset.state);
+    document.querySelectorAll('.side button[data-state]').forEach((x) => {
+      x.setAttribute('aria-pressed', String(x === b));
+    });
+    syncReadout("setState('" + b.dataset.state + "')");
+  } else if (b.dataset.flash) {
+    const ms = { done: 1800, surprised: 1200, error: 2000 }[b.dataset.flash];
+    play.flash(b.dataset.flash, ms);
+    syncReadout("flash('" + b.dataset.flash + "', " + ms + ")");
+    setTimeout(() => syncReadout('（已回落到常驻状态）'), ms + 60);
+  }
+});
+
+const size = document.getElementById('size');
+size.addEventListener('input', () => {
+  play.setSize(Number(size.value));
+  document.getElementById('sizeVal').textContent = size.value + 'px';
+});
+syncReadout("createMascot({ size: 150, state: 'idle' })");
+
+// ---------- ③ 全部状态 ----------
+const gallery = document.getElementById('gallery');
+[...WORK, ...MOOD].forEach((id) => {
+  const cell = document.createElement('div');
+  cell.className = 'cell';
+  const slot = document.createElement('div');
+  cell.appendChild(slot);
+  const name = document.createElement('div');
+  name.className = 'name';
+  name.textContent = MASCOT_STATES[id];
+  const api = document.createElement('div');
+  api.className = 'api';
+  api.textContent = id;
+  cell.append(name, api);
+  gallery.appendChild(cell);
+  createMascot({ mount: slot, size: 76, state: id });
+});
+
+// ---------- ④ 小尺寸 ----------
+const sizes = document.getElementById('sizes');
+[96, 40, 24, 16].forEach((px) => {
+  const cell = document.createElement('div');
+  cell.className = 'cell';
+  const slot = document.createElement('div');
+  cell.appendChild(slot);
+  const api = document.createElement('div');
+  api.className = 'api';
+  api.textContent = px + 'px';
+  cell.appendChild(api);
+  sizes.appendChild(cell);
+  createMascot({ mount: slot, size: px, state: 'idle' });
+});
+</script>
+</body>
+</html>
