@@ -105,3 +105,57 @@ test('collectProjectFacts: 检测模块间依赖关系', async () => {
   const authToUserEdge = result.edges.find(e => e.from === 'auth' && e.to === 'user')
   assert(authToUserEdge, `Expected edge from 'auth' to 'user', got edges: ${JSON.stringify(result.edges)}`)
 })
+
+test('persist: 保存和加载地图 - round-trip 测试', async () => {
+  const { saveProjectMap, loadProjectMap } = await import('../../src/features/project-map/persist.js')
+
+  const projectId = 'test-project-' + Date.now()
+  const mapData = {
+    projectId,
+    scanAt: '2026-09-02T10:00:00Z',
+    modules: [
+      { id: 'auth', name: 'auth', path: 'src/features/auth', exports: ['login', 'logout'] },
+      { id: 'user', name: 'user', path: 'src/features/user', exports: ['User'] }
+    ],
+    edges: [
+      { from: 'auth', to: 'user', type: 'import' }
+    ]
+  }
+
+  // 保存地图
+  await saveProjectMap(projectId, mapData)
+
+  // 加载地图
+  const loaded = await loadProjectMap(projectId)
+
+  // 验证内容完全相同
+  assert.deepEqual(loaded, mapData)
+})
+
+test('persist: 验证文件存于正确路径', async () => {
+  const { saveProjectMap } = await import('../../src/features/project-map/persist.js')
+  const { appDataPath } = await import('../../src/shared/app-paths.js')
+  const fs = await import('node:fs/promises')
+  const path = await import('node:path')
+
+  const projectId = 'test-project-' + Date.now()
+  const mapData = {
+    projectId,
+    scanAt: '2026-09-02T10:00:00Z',
+    modules: [],
+    edges: []
+  }
+
+  // 保存地图
+  await saveProjectMap(projectId, mapData)
+
+  // 验证文件存在于正确的路径
+  const expectedPath = appDataPath('project-maps', `${projectId}.json`)
+  const exists = await fs.access(expectedPath).then(() => true).catch(() => false)
+  assert(exists, `Expected file at ${expectedPath}`)
+
+  // 验证文件内容
+  const content = await fs.readFile(expectedPath, 'utf-8')
+  const fileData = JSON.parse(content)
+  assert.deepEqual(fileData, mapData)
+})
