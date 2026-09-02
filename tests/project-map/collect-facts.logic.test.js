@@ -69,3 +69,39 @@ test('extractImports: 去重导入', () => {
   const result = extractImports(code)
   assert.deepEqual(result, ['../auth'])
 })
+
+test('collectProjectFacts: 识别 src/features/* 作为模块', async () => {
+  const { collectProjectFacts } = await import('../../src/features/project-map/collect-facts.js')
+  const projectPath = new URL('../../tests/fixtures/sample-project', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')
+
+  const result = await collectProjectFacts(projectPath)
+
+  // 应该有 2 个模块：auth 和 user
+  assert.equal(result.modules.length, 2, `Expected 2 modules, got ${result.modules.length}`)
+
+  const moduleNames = result.modules.map(m => m.name).sort()
+  assert.deepEqual(moduleNames, ['auth', 'user'])
+
+  // 验证模块路径格式
+  const authModule = result.modules.find(m => m.name === 'auth')
+  assert(authModule.path.includes('src/features/auth') || authModule.path.includes('src\\features\\auth'), `Expected path to contain 'src/features/auth', got ${authModule.path}`)
+})
+
+test('collectProjectFacts: 检测模块间依赖关系', async () => {
+  const { collectProjectFacts } = await import('../../src/features/project-map/collect-facts.js')
+  const projectPath = new URL('../../tests/fixtures/sample-project', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')
+
+  const result = await collectProjectFacts(projectPath)
+
+  // auth 导入 user，所以 auth.dependsOn 包含 'user'
+  const authModule = result.modules.find(m => m.name === 'auth')
+  assert(authModule.dependsOn.includes('user'), `Expected auth.dependsOn to include 'user', got ${JSON.stringify(authModule.dependsOn)}`)
+
+  // user 不导入 auth
+  const userModule = result.modules.find(m => m.name === 'user')
+  assert(!userModule.dependsOn.includes('auth'), `Expected user.dependsOn NOT to include 'auth', got ${JSON.stringify(userModule.dependsOn)}`)
+
+  // 验证 edges：应该有一条 auth -> user 的边
+  const authToUserEdge = result.edges.find(e => e.from === 'auth' && e.to === 'user')
+  assert(authToUserEdge, `Expected edge from 'auth' to 'user', got edges: ${JSON.stringify(result.edges)}`)
+})
