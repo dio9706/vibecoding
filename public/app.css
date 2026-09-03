@@ -3991,8 +3991,10 @@
 .mem-session-path { flex: 1; font-size: 12px; color: #555; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .mem-session-status { font-size: 11px; padding: 1px 6px; border-radius: 10px; white-space: nowrap; margin-left: 8px; }
-.mem-session-status--analyzed { background: #e6f4e6; color: #2a7a2a; }
-.mem-session-status--pending  { background: #fff3cd; color: #856404; }
+.mem-session-status--analyzed  { background: #e6f4e6; color: #2a7a2a; }
+.mem-session-status--analyzing { background: #e8f0fd; color: #1a4fa8; animation: mem-pulse 1.2s ease-in-out infinite; }
+.mem-session-status--pending   { background: #fff3cd; color: #856404; }
+@keyframes mem-pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
 .mem-session-status--outdated { background: #fde8e8; color: #9b2335; }
 .mem-session-findings { padding: 4px 0 4px 20px; }
 .mem-finding-item { display: flex; align-items: flex-start; gap: 6px; padding: 3px 0; font-size: 12px; }
@@ -4278,14 +4280,15 @@
   display: none;              /* Chrome/Safari */
 }
 
-/* 遮罩容器：sticky 贴顶，高度约 1.5 行，margin-bottom 负值不占空间 */
+/* 遮罩容器：sticky 贴顶，用负 margin 突破气泡 padding (11px top / 15px sides) */
 .msg-blur-overlay {
   position: sticky;
-  top: 0;
-  left: 0;
-  right: 0;
+  top: -11px;           /* 与 margin-top 配合，让 sticky 锚点对齐气泡顶边 */
+  margin-top: -11px;    /* 突破 bubble padding-top */
+  margin-left: -15px;   /* 突破 bubble padding-left */
+  margin-right: -15px;  /* 突破 bubble padding-right */
   height: 40px;
-  margin-bottom: -40px;
+  margin-bottom: -29px; /* 净流体高度 = 40 - 11 - 29 = 0，后续内容不被挤动 */
   z-index: 1;
   cursor: pointer;
   user-select: none;

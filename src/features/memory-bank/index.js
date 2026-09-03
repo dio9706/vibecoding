@@ -97,23 +97,35 @@ export async function runOnce(opts = {}) {
         continue;
       }
 
+      // 分析前先标记为「分析中」，供 UI 实时展示进度
+      const preBank = readBank();
+      const preExisting = preBank.sessions.find((s) => s.path === sessionPath);
+      if (preExisting) {
+        patchSession(preExisting.id, { status: 'analyzing' });
+      } else {
+        const preId = `ses_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        addSession({ id: preId, path: sessionPath, mtime, analyzedAt: 0, findings: [], status: 'analyzing' });
+      }
+
       const findings = await analyzeSession(content, { model, _runner });
 
       if (findings === null) {
-        // LLM 调用失败：不更新 bank，让下轮重试（游标不推进的精神对等）
+        // LLM 调用失败：重置为 pending，让下轮重试
+        const failBank = readBank();
+        const failSes = failBank.sessions.find((s) => s.path === sessionPath);
+        if (failSes) patchSession(failSes.id, { status: 'pending' });
         logger.warn('memory-bank', '会话分析失败，跳过本条等下轮重试', { sessionPath });
         continue;
       }
 
-      // findings 为 [] 或 [...]：成功（含「确实没发现」），记录分析结果
-      // 按路径查找已有会话（不要求 mtime 完全匹配，以便处理文件被修改后重分析的情形）
+      // findings 为 [] 或 [...]：成功，写入结果并标记 analyzed
       const freshBank = readBank();
       const existing = freshBank.sessions.find((s) => s.path === sessionPath);
       if (existing) {
-        patchSession(existing.id, { mtime, analyzedAt: now, findings });
+        patchSession(existing.id, { mtime, analyzedAt: now, findings, status: 'analyzed' });
       } else {
         const id = `ses_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-        addSession({ id, path: sessionPath, mtime, analyzedAt: now, findings });
+        addSession({ id, path: sessionPath, mtime, analyzedAt: now, findings, status: 'analyzed' });
       }
       analyzedCount++;
     }

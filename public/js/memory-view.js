@@ -17,6 +17,7 @@ let _unanalyzedPaths = [];   // 扫描到但尚未登记的路径
 let _enabled = false;        // settings.enabled（闲时提炼开关）
 let _lastExtractAt = 0;      // 上次提炼时间戳
 let _extracting = false;     // 立即提炼进行中标记
+let _pollTimer = null;       // 提炼中的轮询定时器
 let _expandedIds = new Set();// 展开 findings 的 session id 集合
 
 const CATEGORY_LABEL = {
@@ -29,6 +30,7 @@ const CATEGORY_LABEL = {
 
 const STATUS_LABEL = {
   analyzed: '已分析',
+  analyzing: '分析中',
   pending: '待分析',
   outdated: '已过期',
 };
@@ -357,14 +359,24 @@ export function initMemoryPanel() {
       extractBtn.textContent = '提炼中…';
       try {
         await api('/api/memory/extract', {});
-        window.toast?.info('已开始提炼，稍后自动刷新');
-        // 后台异步；等待约 15s 后刷新
-        setTimeout(async () => {
-          _extracting = false;
-          extractBtn.disabled = false;
-          extractBtn.textContent = '立即提炼';
+        window.toast?.info('已开始提炼，实时更新中…');
+        // 每 3s 轮询一次，直到没有「分析中」的会话为止（最多 5 分钟）
+        let pollCount = 0;
+        const MAX_POLLS = 100; // 100 × 3s = 5min
+        const poll = async () => {
           await refresh();
-        }, 15000);
+          pollCount++;
+          const hasAnalyzing = _sessions.some((s) => s.status === 'analyzing');
+          if (hasAnalyzing && pollCount < MAX_POLLS) {
+            _pollTimer = setTimeout(poll, 3000);
+          } else {
+            _pollTimer = null;
+            _extracting = false;
+            extractBtn.disabled = false;
+            extractBtn.textContent = '立即提炼';
+          }
+        };
+        _pollTimer = setTimeout(poll, 3000);
       } catch (e) {
         window.toast?.error(e.message);
         _extracting = false;

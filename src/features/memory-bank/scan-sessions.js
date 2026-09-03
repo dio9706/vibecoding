@@ -21,6 +21,8 @@ export function shouldReanalyzePath(session, now) {
  * @param {object} bank readBank() 的返回值（含 sessions[]）
  * @returns {Array<{path:string, mtime:number}>}
  */
+const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
+
 export function scanForUnanalyzedSessions(bank) {
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
 
@@ -29,6 +31,7 @@ export function scanForUnanalyzedSessions(bank) {
   }
 
   const now = Date.now();
+  const cutoff = now - MONTH_MS; // 只处理近 30 天的会话
   const unanalyzed = [];
 
   function walk(dir) {
@@ -51,14 +54,15 @@ export function scanForUnanalyzedSessions(bank) {
           continue; // 文件已删除，跳过
         }
 
-        // 检查是否已分析且文件未变更
-        const existing = (bank.sessions || []).find(
-          (s) => s.path === fullPath && !shouldReanalyzePath({ mtime, analyzedAt: s.analyzedAt }, now)
-        );
+        // 只处理近 30 天内有活动的会话
+        if (mtime < cutoff) continue;
 
-        if (!existing) {
-          unanalyzed.push({ path: fullPath, mtime });
-        }
+        // 跳过正在分析中或已分析且未变更的
+        const existing = (bank.sessions || []).find((s) => s.path === fullPath);
+        if (existing && existing.status === 'analyzing') continue;
+        if (existing && !shouldReanalyzePath({ mtime, analyzedAt: existing.analyzedAt }, now)) continue;
+
+        unanalyzed.push({ path: fullPath, mtime });
       }
     }
   }

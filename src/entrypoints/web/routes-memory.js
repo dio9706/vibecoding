@@ -94,18 +94,24 @@ function handleSessions(res) {
   try {
     const bank = readBank();
     const settings = getMemoryBankSettings();
-    const sessions = bank.sessions.map((s) => {
-      let status;
-      if (!s.analyzedAt || s.analyzedAt === 0) {
-        status = 'pending';
-      } else if (s.mtime > s.analyzedAt) {
-        status = 'outdated';
-      } else {
-        status = 'analyzed';
-      }
-      return { ...s, status };
-    });
-    const unanalyzedPaths = scanForUnanalyzedSessions(bank);
+    const now = Date.now();
+    const cutoff = now - 30 * 24 * 60 * 60 * 1000; // 近 30 天
+    const sessions = bank.sessions
+      .filter((s) => !s.mtime || s.mtime >= cutoff) // 过滤超过 30 天的
+      .map((s) => {
+        let status = s.status; // 优先使用 bank 里的 status（如 analyzing）
+        if (status !== 'analyzing') {
+          if (!s.analyzedAt || s.analyzedAt === 0) {
+            status = 'pending';
+          } else if (s.mtime > s.analyzedAt) {
+            status = 'outdated';
+          } else {
+            status = 'analyzed';
+          }
+        }
+        return { ...s, status };
+      });
+    const unanalyzedPaths = scanForUnanalyzedSessions(bank); // 内部已过滤 30 天
     const analyzedCount = sessions.filter((s) => s.status === 'analyzed').length;
     sendJson(res, 200, {
       ok: true,
