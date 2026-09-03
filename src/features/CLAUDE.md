@@ -20,11 +20,13 @@
 ### memory-bank/（后台偏好提炼流水线，不走 dispatch）
 - `memory-bank/index.js` — 胶水层：`runOnce` 跑一轮提炼、`startMemoryBankTicker` 定时 tick、`writeRenders` 渲染落盘并挂接 CLAUDE.md。全模块唯一的 IO 编排点。
 - `memory-bank/schedule.js` — `shouldRun`：双窗口（额度重置前 30 分钟 / 凌晨保底）+ busy / cooldown / exhausted 判定。纯函数，token 语义就地复刻 token-rotation。
-- `memory-bank/prefilter.js` — `buildExtractionInput`：把 user-log 条目组织成按会话分组的提炼输入。纯函数、零 IO、零 LLM。
-- `memory-bank/prefilter-transcript.js` — 会话转录（`~/.claude/projects`）预筛器，**非默认链路**（已被真实数据证伪，仅历史回填 / 终端场景保留）。
-- `memory-bank/extract.js` — LLM 层：`extractFromSessions` 把原话喂分类器产出候选偏好；返回 `null`(调用失败) / `[]`(正常无产出) 的契约决定上层游标是否推进。
-- `memory-bank/promote.js` — 状态机：`mergeCandidates`（候选合并 / 证据累计 / 晋升 / 冲突）、`applyDormancy`（失效降级）。纯函数。
-- `memory-bank/render.js` — 条目 → Markdown：`selectForInjection` / `renderMarkdown`（含注入预算截断）。纯函数。
+- `memory-bank/scan-sessions.js` — `scanForUnanalyzedSessions`：扫描 `~/.claude/projects` 下未分析或已修改的 `.jsonl` 文件，返回待处理列表。纯函数、零 LLM。
+- `memory-bank/analyze.js` — Phase 1 LLM 层：`analyzeSession` 对单个会话转录提取 findings（bug/solution/pattern/preference）；返回 `null`(调用失败) / `[]`(正常无产出)。
+- `memory-bank/synthesize.js` — Phase 2 LLM 层：`synthesizeMemories` 把多会话 findings 合成为 memories 写入 bank；返回 `null`(调用失败) / `[]`(正常无产出)。
+- `memory-bank/render.js` — 条目 → Markdown：`selectForInjection` / `renderMarkdown`（含注入预算截断）；支持 v2 memories（自动归一化 status/inject/scope 字段），`FINDING_TYPE_LABEL` 常量供 UI 层使用。纯函数。
+- `memory-bank/prefilter.js` — **v1 主链路（已不作为默认链路使用）**：`buildExtractionInput` 从 user-log 游标读取并按字节偏移组织会话输入。
+- `memory-bank/extract.js` — **v1 主链路（已不作为默认链路使用）**：`extractFromSessions` 整批一次 LLM 调用提取候选条目。
+- `memory-bank/promote.js` — **v1 主链路（已不作为默认链路使用）**：`mergeCandidates` 状态机晋升 + `applyDormancy` 失效。
 
 ### project-checkup/（只读检测器库，编排在 optimize-ops）
 - `project-checkup/index.js` — `runStaticCheckup` 同步跑静态维度(map / rules)、其余留 `analyzingDim` 占位待异步回填；`recomputeReport` 原地重算总分。
@@ -63,14 +65,16 @@
 
 控制流：`dispatch → claude-exec/index → {logic, reply} + integrations/claude + store/user-log`。（注：web 入口的 owner 流式聊天不走本 feature，直连 `integrations/claude`。）
 
-### 流程 B：记忆库后台提炼（server 启动即常驻）
+### 流程 B：记忆库后台提炼（server 启动即常驻，v2 两阶段流水线）
 `server.js` 调 `startMemoryBankTicker`（`memory-bank/index.js`），每 10 分钟 tick：
 1. `schedule.shouldRun`（注入 now / settings / tokens / activeRunCount）判是否进窗口，不进就 return；
-2. 进窗口 → `runOnce`：`store/user-log.readUserLog`(按字节游标读) → `prefilter.buildExtractionInput`(组织成会话) → `extract.extractFromSessions`(LLM，整批只发**一次**调用) → `promote.mergeCandidates` + `applyDormancy`(状态机) → `render.renderMarkdown` → `writeRenders` 落盘 `memory-bank.md` 并 `ensureImport` 挂进 CLAUDE.md；
-3. 游标推进铁律：extract 返回 `null` 就不推进、下轮整批重试；返回 `[]` 算成功、推进。
+2. 进窗口 → `runOnce` 跑两阶段：
+   - **Phase 1（逐会话分析）**：`scan-sessions.scanForUnanalyzedSessions` 扫 `~/.claude/projects/**/*.jsonl`，找出未分析或文件已变更的会话文件 → 逐文件读取转录内容 → `analyze.analyzeSession`（LLM）提取 findings（bug / solution / pattern / preference）→ `store.addSession` / `patchSession` 把 findings 写入 bank；`analyzeSession` 返回 `null` 表示调用失败、该文件跳过不推进，返回 `[]` 表示正常无产出、推进游标；
+   - **Phase 2（批量合成）**：汇总 bank 中所有 sessions 的 findings → `synthesize.synthesizeMemories`（LLM）合成为跨会话 memories → `store.addMemory` 写入 bank；返回值语义同 Phase 1；
+3. `writeRenders`：`render.renderMarkdown` 渲染 → 落盘 `memory-bank.md` → `ensureImport` 挂进 CLAUDE.md。
 
 另有手动触发路径：`src/entrypoints/web/routes-memory.js` 直接调 `runOnce`。
-数据流：`user-log → prefilter → extract(LLM) → promote → render → 磁盘 memory-bank.md`，纯函数各司其职，只在 `index.js` 汇成 IO。
+数据流：`~/.claude/projects/**/*.jsonl → scan-sessions → analyze(LLM, Phase 1) → store(sessions/findings) → synthesize(LLM, Phase 2) → store(memories) → render → 磁盘 memory-bank.md`，纯函数各司其职，只在 `index.js` 汇成 IO。
 
 ### 流程 C：项目体检 → 一键优化（编排在模块外）
 入口在 `src/entrypoints/web/optimize-ops.js`（HTTP 侧在 `routes-optimize.js`），本目录只提供零件：
@@ -87,8 +91,8 @@
 - 要改 **claude-exec 的执行参数**（工作目录、bypassPermissions、session 续接、user-log 埋点）→ 改 `claude-exec/index.js` 的 `handle`。
 - 要 **新增一个对话 feature** → **不在本目录**，去 `src/plugins/` 建插件并在 `src/plugins/index.js` 登记（见根 CLAUDE.md）；本目录 `index.js` 只装配内核，不加业务 feature。
 - 要改 **记忆库何时跑**（窗口 / 冷却 / 额度门槛 / busy 判定）→ 改 `memory-bank/schedule.js`。
-- 要改 **提炼提示词 / 候选字段 / 什么算偏好** → 改 `memory-bank/extract.js`。
-- 要改 **偏好的晋升门槛 / 证据累计 / 失效** → 改 `memory-bank/promote.js`；要改 **注入预算 / 渲染格式** → 改 `memory-bank/render.js`。
+- 要改 **Phase 1 分析提示词 / findings 字段定义** → 改 `memory-bank/analyze.js`；要改 **Phase 2 合成提示词 / memories 字段定义** → 改 `memory-bank/synthesize.js`。
+- 要改 **会话扫描范围 / 变更检测策略** → 改 `memory-bank/scan-sessions.js`；要改 **注入预算 / 渲染格式** → 改 `memory-bank/render.js`。
 - 要改 **一轮提炼的 IO 编排 / 落盘 / 游标推进 / tick 频率** → 改 `memory-bank/index.js`。
 - 要 **新增一个体检维度** → 建 `project-checkup/check-<dim>.js` + `.logic.js`，权重进 `score.logic.js`，并到 `optimize-ops.js` 的 RUNNERS 登记（调度在模块外）。
 - 要改 **某维度的判分标准** → 改对应 `check-*.logic.js`（纯函数，动它先看 `.test.js`）；要改 **扫描 / 取样 / 跑测试的 IO** → 改对应 `check-*.js`。
