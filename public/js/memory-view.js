@@ -304,8 +304,9 @@ function makeUnanalyzedRow(p) {
 
   const path = document.createElement('span');
   path.className = 'mem-session-path';
-  path.textContent = shortPath(p);
-  path.title = p;
+  const rawPath = typeof p === 'string' ? p : (p?.path || '');
+  path.textContent = shortPath(rawPath);
+  path.title = rawPath;
 
   const badge = document.createElement('span');
   badge.className = 'mem-session-status mem-session-status--pending';
