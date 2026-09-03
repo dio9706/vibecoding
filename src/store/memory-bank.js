@@ -1,79 +1,68 @@
 /**
- * 记忆库持久化 —— memory-bank.json 是偏好条目的唯一真相源。
- * Markdown 与导出包都是它的渲染产物，不反向写回。
+ * 记忆库持久化 v2 —— memory-bank.json 是会话分析结果的唯一真相源。
+ *
+ * v2 schema 说明：
+ * - `sessions`  已分析的会话索引（两阶段采集结果）
+ * - `memories`  最终提炼的记忆条目
+ * - `lastExtractAt`    上次整体提炼的时间戳（ms）
+ * - `lastSessionScanAt` 上次会话扫描的时间戳（ms）
+ *
+ * v1 兼容策略：读到 version !== 2 时返回空 v2 框架，迁移逻辑在 Task 4 实现。
  */
 import { readJson, updateJson } from './index.js';
 
 const FILE = 'memory-bank.json';
 
-/**
- * 两个扫描游标并存，语义不同，绝不可互相顶替：
- * - `userLogOffset` —— store/user-log.js 的**字节偏移**，默认提炼链路用（埋点采集的用户真实输入）。
- * - `lastScannedAt` —— 会话转录（~/.claude/projects）的 **mtime**，留给历史回填与终端场景
- *   （用户在终端直接敲 claude 时不经过本项目后端，埋点拿不到，只有 JSONL 有记录）。
- * 复用同一个字段会让「4096」既可能是字节数又可能是时间戳，一次误读就把整段历史跳过去。
- */
-export const EMPTY_BANK = () => ({
-  version: 1, lastScannedAt: 0, userLogOffset: 0, lastExtractAt: 0, items: [], blacklist: [],
-});
+export const EMPTY_BANK = {
+  version: 2,
+  lastExtractAt: 0,
+  lastSessionScanAt: 0,
+  sessions: [],   // 已分析的会话索引
+  memories: [],   // 最终记忆
+};
 
 export function readBank() {
-  const raw = readJson(FILE, EMPTY_BANK());
+  const raw = readJson(FILE, EMPTY_BANK);
   const b = raw && typeof raw === 'object' ? raw : {};
+  // v1 或未知版本：返回空 v2 框架（迁移逻辑留给 Task 4）
+  if (b.version !== 2) return { ...EMPTY_BANK };
   return {
-    version: 1,
-    lastScannedAt: Number(b.lastScannedAt) || 0,
-    // 旧版文件没有这个字段 → 归 0，从 user-log 开头扫一遍。日志是切数据源后才开始写的，
-    // 量小，重扫一遍的代价远小于「漏掉开头那批证据」。
-    userLogOffset: Number(b.userLogOffset) || 0,
+    version: 2,
     lastExtractAt: Number(b.lastExtractAt) || 0,
-    items: Array.isArray(b.items) ? b.items : [],
-    blacklist: Array.isArray(b.blacklist) ? b.blacklist : [],
+    lastSessionScanAt: Number(b.lastSessionScanAt) || 0,
+    sessions: Array.isArray(b.sessions) ? b.sessions : [],
+    memories: Array.isArray(b.memories) ? b.memories : [],
   };
 }
 
 export function writeBank(bank) {
-  return updateJson(FILE, EMPTY_BANK(), () => bank);
+  return updateJson(FILE, EMPTY_BANK, () => ({
+    version: 2,
+    lastExtractAt: bank.lastExtractAt ?? 0,
+    lastSessionScanAt: bank.lastSessionScanAt ?? 0,
+    sessions: Array.isArray(bank.sessions) ? bank.sessions : [],
+    memories: Array.isArray(bank.memories) ? bank.memories : [],
+  }));
 }
 
-/** 局部更新一条；找不到则不写盘（updateJson 的 fn 返回 undefined = 放弃） */
-export function patchItem(id, patch) {
-  return updateJson(FILE, EMPTY_BANK(), (cur) => {
-    const items = Array.isArray(cur?.items) ? cur.items : [];
-    const i = items.findIndex((it) => it.id === id);
-    if (i < 0) return undefined;
-    items[i] = { ...items[i], ...patch };
-    return { ...cur, items };
-  });
+export function updateBank(fn) {
+  return updateJson(FILE, EMPTY_BANK, fn);
 }
 
-/** 否掉：移出 items，fingerprint 入黑名单（去重），此后同 fingerprint 的候选一律丢弃 */
-export function rejectItem(id, now) {
-  return updateJson(FILE, EMPTY_BANK(), (cur) => {
-    const items = Array.isArray(cur?.items) ? cur.items : [];
-    const blacklist = Array.isArray(cur?.blacklist) ? cur.blacklist : [];
-    const i = items.findIndex((it) => it.id === id);
-    if (i < 0) return undefined;
-    const [gone] = items.splice(i, 1);
-    if (gone.fingerprint && !blacklist.some((b) => b.fingerprint === gone.fingerprint)) {
-      blacklist.push({ fingerprint: gone.fingerprint, statement: gone.statement || '', rejectedAt: now });
-    }
-    return { ...cur, items, blacklist };
-  });
+// ── v1 stub 导出（保持兼容，避免尚未更新的模块 import 崩溃）──────────────────
+// 待 Task 4 完成迁移后可安全移除
+
+/** @deprecated v2 已废弃，条目改用 memories 数组管理 */
+export function patchItem(_id, _patch) {
+  return undefined;
 }
 
-/** 清红点。ids 为 null / 空 → 全部标记已读 */
-export function ackItems(ids) {
-  const set = Array.isArray(ids) && ids.length ? new Set(ids) : null;
-  return updateJson(FILE, EMPTY_BANK(), (cur) => {
-    const items = Array.isArray(cur?.items) ? cur.items : [];
-    let changed = false;
-    const next = items.map((it) => {
-      if (it.acked || (set && !set.has(it.id))) return it;
-      changed = true;
-      return { ...it, acked: true };
-    });
-    if (!changed) return undefined;
-    return { ...cur, items: next };
-  });
+/** @deprecated v2 已废弃 */
+export function rejectItem(_id, _now) {
+  return undefined;
+}
+
+/** @deprecated v2 已废弃 */
+export function ackItems(_ids) {
+  return undefined;
 }
