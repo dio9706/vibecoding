@@ -85,7 +85,10 @@ export async function runOnce(opts = {}) {
 
     // ── Phase 1: 扫描 + 逐会话分析 ──────────────────────────────────────────
     let bank = readBank();
-    const unanalyzed = scanForUnanalyzedSessions(bank);
+    const allUnanalyzed = scanForUnanalyzedSessions(bank);
+    // 每轮最多处理 30 个，避免单次 LLM 调用量过大（每会话一次 LLM，30 个约 3-15 分钟）
+    const MAX_PER_RUN = 30;
+    const unanalyzed = allUnanalyzed.slice(0, MAX_PER_RUN);
 
     let analyzedCount = 0;
     for (const { path: sessionPath, mtime } of unanalyzed) {
@@ -149,8 +152,8 @@ export async function runOnce(opts = {}) {
     // v2 memories 尚无 scope/projectDir 字段，projectDirs 传空列表；
     // render.js 的 selectForInjection 会过滤掉缺 status/inject 字段的条目，写空文件是正确行为。
     bank = readBank();
-    const renders = writeRenders(bank.memories || [], { now, settings, projectDirs: [] });
-    const truncated = renders.reduce((a, r) => a + (r.truncated || 0), 0);
+    const renders = await writeRenders(bank.memories || [], { now, settings, projectDirs: [] });
+    const truncated = (renders || []).reduce((a, r) => a + (r.truncated || 0), 0);
     if (truncated > 0) logger.info('memory-bank', '条目因注入预算未渲染', { truncated });
 
     // 更新最后提炼时间（供 shouldRun 的冷却判定使用）
