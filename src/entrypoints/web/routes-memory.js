@@ -5,7 +5,7 @@ import { sendJson } from './http-util.js';
 import { withJsonBody } from './body.js';
 import { str } from './input.js';
 import { logger } from '../../shared/logger.js';
-import { readBank, patchItem, rejectItem, ackItems, removeMemory } from '../../store/memory-bank.js';
+import { readBank, updateBank, patchMemory, removeMemory } from '../../store/memory-bank.js';
 import { getMemoryBankSettings, setMemoryBankSettings } from '../../store/settings.js';
 import { selectForInjection, CATEGORY_LABEL } from '../../features/memory-bank/render.js';
 import { runOnce, writeRenders } from '../../features/memory-bank/index.js';
@@ -26,10 +26,10 @@ function handleList(res) {
   const bank = readBank();
   const settings = getMemoryBankSettings();
   sendJson(res, 200, {
-    items: bank.items,
-    unackedCount: bank.items.filter((i) => !i.acked).length,
-    conflictCount: bank.items.filter((i) => i.status === 'conflict').length,
-    budget: budgetInfo(bank.items, settings, now),
+    items: bank.memories,
+    unackedCount: bank.memories.filter((i) => !i.acked).length,
+    conflictCount: bank.memories.filter((i) => i.status === 'conflict').length,
+    budget: budgetInfo(bank.memories, settings, now),
     lastExtractAt: bank.lastExtractAt,
     enabled: settings.enabled,
   });
@@ -58,8 +58,8 @@ function handleConfirm(req, res) {
       if (sc === 'global') patch.projectDir = '';
     }
     if (data.inject !== undefined) patch.inject = data.inject === true;
-    if (!readBank().items.some((i) => i.id === id)) return sendJson(res, 404, { error: '条目不存在' });
-    patchItem(id, patch);
+    if (!readBank().memories.some((m) => m.id === id)) return sendJson(res, 404, { error: '条目不存在' });
+    patchMemory(id, patch);
     sendJson(res, 200, { ok: true });
   });
 }
@@ -69,8 +69,8 @@ function handleReject(req, res) {
   return withJsonBody(req, res, (data) => {
     const id = str(data.id);
     if (!id) return sendJson(res, 400, { error: 'id 不能为空' });
-    if (!readBank().items.some((i) => i.id === id)) return sendJson(res, 404, { error: '条目不存在' });
-    rejectItem(id, Date.now());
+    if (!readBank().memories.some((m) => m.id === id)) return sendJson(res, 404, { error: '条目不存在' });
+    removeMemory(id);
     sendJson(res, 200, { ok: true });
   });
 }
@@ -78,10 +78,13 @@ function handleReject(req, res) {
 // ==== POST /api/memory/ack {id?, all?} ====
 function handleAck(req, res) {
   return withJsonBody(req, res, (data) => {
-    if (data.all === true) { ackItems(null); return sendJson(res, 200, { ok: true }); }
+    if (data.all === true) {
+      updateBank((bank) => ({ ...bank, memories: bank.memories.map((m) => ({ ...m, acked: true })) }));
+      return sendJson(res, 200, { ok: true });
+    }
     const id = str(data.id);
     if (!id) return sendJson(res, 400, { error: 'id 或 all 必须提供其一' });
-    ackItems([id]);
+    patchMemory(id, { acked: true });
     sendJson(res, 200, { ok: true });
   });
 }
@@ -165,22 +168,22 @@ function handleExtract(req, res) {
 function handleExport(url, res) {
   const bank = readBank();
   const byCategory = {};
-  for (const it of bank.items) byCategory[it.category] = (byCategory[it.category] || 0) + 1;
+  for (const it of bank.memories) byCategory[it.category] = (byCategory[it.category] || 0) + 1;
   const payload = {
-    schema: 'memory-bank/v1',
+    schema: 'memory-bank/v2',
     exportedAt: new Date().toISOString(),
     stats: {
-      total: bank.items.length,
-      active: bank.items.filter((i) => i.status === 'active').length,
+      total: bank.memories.length,
+      active: bank.memories.filter((i) => i.status === 'active').length,
       byCategory,
     },
     // 全量：含 dormant / candidate / 仅记录组 / 证据链 —— 数字分身要用
-    items: bank.items,
+    items: bank.memories,
   };
   if (str(url.searchParams.get('format')) === 'md') {
     const lines = ['# 我的开发者档案', '', `导出时间：${payload.exportedAt}`, ''];
     for (const cat of CATEGORIES) {
-      const group = bank.items.filter((i) => i.category === cat);
+      const group = bank.memories.filter((i) => i.category === cat);
       if (!group.length) continue;
       lines.push(`## ${CATEGORY_LABEL[cat]}`, '');
       for (const it of group) lines.push(`- ${it.statement}  \`${it.status}\` · 证据 ${it.evidenceCount}`);

@@ -27,8 +27,8 @@ const get = (p) => call(p, 'GET');
 const post = (p, b) => call(p, 'POST', b ?? {});
 
 const seed = () => {
-  const bank = EMPTY_BANK();
-  bank.items = [
+  const bank = { ...EMPTY_BANK };
+  bank.memories = [
     { id: 'm1', category: 'code-style', scope: 'global', projectDir: '', statement: '注释写中文',
       fingerprint: 'f1', status: 'candidate', inject: true, source: 'inferred',
       evidenceCount: 1, evidenceSessions: ['s1'],
@@ -56,7 +56,7 @@ test('POST /api/memory/confirm 置 active 且 promotedBy=manual', async () => {
   seed();
   const r = await post('/api/memory/confirm', { id: 'm1' });
   assert.equal(r.status, 200);
-  const it = readBank().items.find((i) => i.id === 'm1');
+  const it = readBank().memories.find((i) => i.id === 'm1');
   assert.equal(it.status, 'active');
   assert.equal(it.promotedBy, 'manual');
   assert.equal(it.acked, true, '手工确认的不该再亮红点');
@@ -65,7 +65,7 @@ test('POST /api/memory/confirm 置 active 且 promotedBy=manual', async () => {
 test('POST /api/memory/confirm 可同时改写 statement / category / inject', async () => {
   seed();
   await post('/api/memory/confirm', { id: 'm1', statement: '注释写中文，只解释为什么', category: 'writing', inject: false });
-  const it = readBank().items.find((i) => i.id === 'm1');
+  const it = readBank().memories.find((i) => i.id === 'm1');
   assert.equal(it.statement, '注释写中文，只解释为什么');
   assert.equal(it.category, 'writing');
   assert.equal(it.inject, false);
@@ -76,19 +76,18 @@ test('POST /api/memory/confirm 拒绝未知 category', async () => {
   assert.equal((await post('/api/memory/confirm', { id: 'm1', category: 'vibes' })).status, 400);
 });
 
-test('POST /api/memory/reject 移出条目并入黑名单', async () => {
+test('POST /api/memory/reject 移出条目', async () => {
   seed();
   const r = await post('/api/memory/reject', { id: 'm1' });
   assert.equal(r.status, 200);
   const bank = readBank();
-  assert.equal(bank.items.find((i) => i.id === 'm1'), undefined);
-  assert.equal(bank.blacklist[0].fingerprint, 'f1');
+  assert.equal(bank.memories.find((i) => i.id === 'm1'), undefined);
 });
 
 test('POST /api/memory/ack 清红点', async () => {
   seed();
   await post('/api/memory/ack', { all: true });
-  assert.ok(readBank().items.every((i) => i.acked));
+  assert.ok(readBank().memories.every((i) => i.acked));
 });
 
 test('缺 id 返回 400，未知 id 返回 404', async () => {
@@ -101,10 +100,35 @@ test('GET /api/memory/export 含全部条目与证据链', async () => {
   seed();
   const r = await get('/api/memory/export?format=json');
   assert.equal(r.status, 200);
-  assert.equal(r.json.schema, 'memory-bank/v1');
+  assert.equal(r.json.schema, 'memory-bank/v2');
   assert.equal(r.json.items.length, 2);
   assert.ok(r.json.items[0].evidence, '导出必须含证据链 —— 数字分身要用');
   assert.ok(r.json.stats.byCategory);
+});
+
+test('GET /api/memory/sessions 返回会话列表与记忆条目', async () => {
+  seed();
+  const r = await get('/api/memory/sessions');
+  assert.equal(r.status, 200);
+  assert.ok(r.json.ok);
+  assert.ok(Array.isArray(r.json.sessions));
+  assert.ok(Array.isArray(r.json.memories));
+  assert.equal(r.json.memories.length, 2);
+});
+
+test('POST /api/memory/remove 删除指定记忆条目', async () => {
+  seed();
+  const r = await post('/api/memory/remove', { id: 'm1' });
+  assert.equal(r.status, 200);
+  assert.ok(r.json.ok);
+  const bank = readBank();
+  assert.equal(bank.memories.find((m) => m.id === 'm1'), undefined);
+  assert.ok(bank.memories.find((m) => m.id === 'm2'), 'm2 应保留');
+});
+
+test('POST /api/memory/remove 缺 id 返回 400', async () => {
+  seed();
+  assert.equal((await post('/api/memory/remove', {})).status, 400);
 });
 
 test('未知路径 404', async () => {
