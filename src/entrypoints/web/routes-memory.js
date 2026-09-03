@@ -6,7 +6,7 @@ import { withJsonBody } from './body.js';
 import { str } from './input.js';
 import { logger } from '../../shared/logger.js';
 import { readBank, patchItem, rejectItem, ackItems, removeMemory } from '../../store/memory-bank.js';
-import { getMemoryBankSettings } from '../../store/settings.js';
+import { getMemoryBankSettings, setMemoryBankSettings } from '../../store/settings.js';
 import { selectForInjection, CATEGORY_LABEL } from '../../features/memory-bank/render.js';
 import { runOnce, writeRenders } from '../../features/memory-bank/index.js';
 import { scanForUnanalyzedSessions } from '../../features/memory-bank/scan-sessions.js';
@@ -90,6 +90,7 @@ function handleAck(req, res) {
 function handleSessions(res) {
   try {
     const bank = readBank();
+    const settings = getMemoryBankSettings();
     const sessions = bank.sessions.map((s) => {
       let status;
       if (!s.analyzedAt || s.analyzedAt === 0) {
@@ -109,11 +110,30 @@ function handleSessions(res) {
       unanalyzedPaths,
       totalSessions: sessions.length,
       analyzedCount,
+      // v2：记忆条目与设置状态一并返回，前端单次请求获取完整面板数据
+      memories: bank.memories || [],
+      enabled: settings.enabled,
+      lastExtractAt: bank.lastExtractAt,
     });
   } catch (e) {
     logger.error('memory-routes', 'handleSessions 异常', { err: e?.message || String(e) });
     sendJson(res, 500, { ok: false, error: e?.message || String(e) });
   }
+}
+
+// ==== POST /api/memory/settings {enabled?, ...} ====
+function handleSettings(req, res) {
+  return withJsonBody(req, res, (data) => {
+    // 只接受 DEFAULTS.memoryBank 中已有的字段，避免注入未知键
+    const patch = {};
+    if (typeof data.enabled === 'boolean') patch.enabled = data.enabled;
+    if (typeof data.nightStart === 'string') patch.nightStart = data.nightStart;
+    if (typeof data.nightEnd === 'string') patch.nightEnd = data.nightEnd;
+    if (typeof data.minIntervalHours === 'number') patch.minIntervalHours = data.minIntervalHours;
+    if (Object.keys(patch).length === 0) return sendJson(res, 400, { ok: false, error: '未提供可更新字段' });
+    const updated = setMemoryBankSettings(patch);
+    sendJson(res, 200, { ok: true, settings: updated });
+  });
 }
 
 // ==== POST /api/memory/remove {id} ====
@@ -177,6 +197,7 @@ export function handleMemoryRoutes(req, res, url) {
   const { pathname } = url;
   const { method } = req;
   if (pathname === '/api/memory/sessions' && method === 'GET') return handleSessions(res);
+  if (pathname === '/api/memory/settings' && method === 'POST') return handleSettings(req, res);
   if (pathname === '/api/memory/list' && method === 'GET') return handleList(res);
   if (pathname === '/api/memory/confirm' && method === 'POST') return handleConfirm(req, res);
   if (pathname === '/api/memory/reject' && method === 'POST') return handleReject(req, res);
