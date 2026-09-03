@@ -290,6 +290,52 @@ test('patchMemory 缺少 id 或 patch 时抛错', () => {
   assert.throws(() => patchMemory('some-id', null), /id and patch required/);
 });
 
+// ── v1 → v2 迁移测试 ──────────────────────────────────────────────────────────
+
+test('readBank migrates v1 to v2 on first read', () => {
+  // 写入 v1 格式文件
+  const v1 = {
+    version: 1,
+    lastExtractAt: 999,
+    userLogOffset: 100,
+    items: [{ id: 'old-item', statement: 'old rule' }],
+    blacklist: [],
+  };
+  fs.writeFileSync(dataPath('memory-bank.json'), JSON.stringify(v1), 'utf8');
+
+  // 读取时触发迁移
+  const bank = readBank();
+
+  // v2 结构
+  assert.strictEqual(bank.version, 2);
+  assert(Array.isArray(bank.sessions));
+  assert(Array.isArray(bank.memories));
+  assert.strictEqual(bank.sessions.length, 0);
+  assert.strictEqual(bank.memories.length, 0);
+
+  // 备份文件存在
+  const backupExists = fs.existsSync(dataPath('memory-bank.v1.bak.json'));
+  assert(backupExists, 'backup file should exist');
+
+  // 备份内容是 v1
+  const backup = JSON.parse(fs.readFileSync(dataPath('memory-bank.v1.bak.json'), 'utf8'));
+  assert.strictEqual(backup.version, 1);
+  assert.strictEqual(backup.items.length, 1);
+
+  // 清理备份，避免影响后续测试
+  try { fs.unlinkSync(dataPath('memory-bank.v1.bak.json')); } catch { /* ignore */ }
+});
+
+test('readBank migration is idempotent for v2 files', () => {
+  writeBank({ ...EMPTY_BANK });
+  const bank1 = readBank();
+  const bank2 = readBank();
+  assert.strictEqual(bank1.version, 2);
+  assert.strictEqual(bank2.version, 2);
+  // 没有生成 backup（v2 不触发迁移）
+  assert(!fs.existsSync(dataPath('memory-bank.v1.bak.json')), 'no backup for v2 files');
+});
+
 // ── 已跳过的 v1 测试（保留原始用例，待 Task 4 迁移完成后决定是否删除）────────────
 
 // SKIP: 'userLogOffset 与 lastScannedAt 是两个独立游标，互不覆盖'

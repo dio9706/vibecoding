@@ -7,9 +7,11 @@
  * - `lastExtractAt`    上次整体提炼的时间戳（ms）
  * - `lastSessionScanAt` 上次会话扫描的时间戳（ms）
  *
- * v1 兼容策略：读到 version !== 2 时返回空 v2 框架，迁移逻辑在 Task 4 实现。
+ * v1 兼容策略：readBank 调用前先执行 migrateV1IfNeeded()，
+ * 检测到 v1 文件时备份并原地覆写为空 v2 框架。
  */
-import { readJson, updateJson } from './index.js';
+import fs from 'node:fs';
+import { readJson, updateJson, dataPath } from './index.js';
 
 const FILE = 'memory-bank.json';
 
@@ -21,7 +23,42 @@ export const EMPTY_BANK = {
   memories: [],   // 最终记忆
 };
 
+/**
+ * 检测并迁移 v1 → v2。幂等：v2 文件或不存在文件时直接返回。
+ * 副作用：在磁盘上生成 memory-bank.v1.bak.json 并覆写 memory-bank.json。
+ */
+function migrateV1IfNeeded() {
+  const file = dataPath('memory-bank.json');
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return; // 文件不存在或解析失败，readBank 会用 fallback，不需要迁移
+  }
+
+  if (!raw || raw.version !== 1) return; // 不是 v1，不需要迁移
+
+  // 备份
+  const backupFile = dataPath('memory-bank.v1.bak.json');
+  try {
+    fs.writeFileSync(backupFile, JSON.stringify(raw, null, 2), 'utf8');
+  } catch (e) {
+    // 备份失败不阻塞迁移，只记日志
+    // （logger 可能还未初始化，用 console.warn 替代）
+    console.warn('[memory-bank] v1 backup failed:', e?.message);
+  }
+
+  // 写入空 v2
+  const v2 = { ...EMPTY_BANK };
+  try {
+    fs.writeFileSync(file, JSON.stringify(v2), 'utf8');
+  } catch (e) {
+    console.warn('[memory-bank] v1 migration write failed:', e?.message);
+  }
+}
+
 export function readBank() {
+  migrateV1IfNeeded(); // 幂等，v2 文件时直接 return
   const raw = readJson(FILE, EMPTY_BANK);
   const b = raw && typeof raw === 'object' ? raw : {};
   // v1 或未知版本：返回空 v2 框架（迁移逻辑留给 Task 4）
