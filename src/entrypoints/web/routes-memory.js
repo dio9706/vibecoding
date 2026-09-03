@@ -5,10 +5,11 @@ import { sendJson } from './http-util.js';
 import { withJsonBody } from './body.js';
 import { str } from './input.js';
 import { logger } from '../../shared/logger.js';
-import { readBank, patchItem, rejectItem, ackItems } from '../../store/memory-bank.js';
+import { readBank, patchItem, rejectItem, ackItems, removeMemory } from '../../store/memory-bank.js';
 import { getMemoryBankSettings } from '../../store/settings.js';
 import { selectForInjection, CATEGORY_LABEL } from '../../features/memory-bank/render.js';
-import { runOnce } from '../../features/memory-bank/index.js';
+import { runOnce, writeRenders } from '../../features/memory-bank/index.js';
+import { scanForUnanalyzedSessions } from '../../features/memory-bank/scan-sessions.js';
 
 const CATEGORIES = Object.keys(CATEGORY_LABEL);
 
@@ -85,6 +86,54 @@ function handleAck(req, res) {
   });
 }
 
+// ==== GET /api/memory/sessions ====
+function handleSessions(res) {
+  try {
+    const bank = readBank();
+    const sessions = bank.sessions.map((s) => {
+      let status;
+      if (!s.analyzedAt || s.analyzedAt === 0) {
+        status = 'pending';
+      } else if (s.mtime > s.analyzedAt) {
+        status = 'outdated';
+      } else {
+        status = 'analyzed';
+      }
+      return { ...s, status };
+    });
+    const unanalyzedPaths = scanForUnanalyzedSessions(bank);
+    const analyzedCount = sessions.filter((s) => s.status === 'analyzed').length;
+    sendJson(res, 200, {
+      ok: true,
+      sessions,
+      unanalyzedPaths,
+      totalSessions: sessions.length,
+      analyzedCount,
+    });
+  } catch (e) {
+    logger.error('memory-routes', 'handleSessions 异常', { err: e?.message || String(e) });
+    sendJson(res, 500, { ok: false, error: e?.message || String(e) });
+  }
+}
+
+// ==== POST /api/memory/remove {id} ====
+async function handleRemove(req, res) {
+  return withJsonBody(req, res, async (data) => {
+    const id = str(data.id);
+    if (!id) return sendJson(res, 400, { ok: false, error: 'id required' });
+    try {
+      removeMemory(id);
+      const bank = readBank();
+      const settings = getMemoryBankSettings();
+      await writeRenders(bank.memories || [], { now: Date.now(), settings, projectDirs: [] });
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      logger.error('memory-routes', '删除记忆条目异常', { id, err: e?.message || String(e) });
+      sendJson(res, 500, { ok: false, error: e?.message || String(e) });
+    }
+  });
+}
+
 /** POST /api/memory/extract：手动提炼。202 立即返回，前端轮询 list（对齐 handleBitable 的长任务范式） */
 function handleExtract(req, res) {
   sendJson(res, 202, { ok: true });
@@ -127,10 +176,12 @@ function handleExport(url, res) {
 export function handleMemoryRoutes(req, res, url) {
   const { pathname } = url;
   const { method } = req;
+  if (pathname === '/api/memory/sessions' && method === 'GET') return handleSessions(res);
   if (pathname === '/api/memory/list' && method === 'GET') return handleList(res);
   if (pathname === '/api/memory/confirm' && method === 'POST') return handleConfirm(req, res);
   if (pathname === '/api/memory/reject' && method === 'POST') return handleReject(req, res);
   if (pathname === '/api/memory/ack' && method === 'POST') return handleAck(req, res);
+  if (pathname === '/api/memory/remove' && method === 'POST') return handleRemove(req, res);
   if (pathname === '/api/memory/extract' && method === 'POST') return handleExtract(req, res);
   if (pathname === '/api/memory/export' && method === 'GET') return handleExport(url, res);
   return sendJson(res, 404, { error: 'not found' });
