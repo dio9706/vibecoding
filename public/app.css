@@ -112,7 +112,6 @@
         flex: 1;
         min-width: 0;
       }
-      /* .title-cursor 已弃用：cursor 动画直接写入 title-text textContent */
       .conv-rm {
         color: var(--faint);
         background: none;
@@ -128,36 +127,8 @@
       .conv-rm:hover {
         color: var(--red);
       }
-      /* 任务运行中：旋转光晕边框（inspira-ui glow-border 风格） */
-      /* @property 让 conic-gradient 的角度可以被插值动画 */
-      @property --glow-angle {
-        syntax: '<angle>';
-        initial-value: 0deg;
-        inherits: false;
-      }
-      .conv-item.running {
-        border: 1px solid transparent;
-        background-image:
-          linear-gradient(var(--bg), var(--bg)),
-          conic-gradient(
-            from var(--glow-angle),
-            transparent 0%,
-            var(--accent) 15%,
-            var(--amber) 35%,
-            var(--accent-hi) 50%,
-            transparent 65%
-          );
-        background-origin: border-box;
-        background-clip: padding-box, border-box;
-        animation: glowSpin 3s linear infinite, glowPulse 2s ease-in-out infinite;
-      }
-      @keyframes glowSpin {
-        to { --glow-angle: 360deg; }
-      }
-      @keyframes glowPulse {
-        0%, 100% { box-shadow: 0 0 8px rgba(217, 119, 87, 0.2), 0 0 18px rgba(217, 119, 87, 0.08); }
-        50%       { box-shadow: 0 0 14px rgba(217, 119, 87, 0.4), 0 0 28px rgba(217, 119, 87, 0.15); }
-      }
+      /* 任务运行中的 .conv-item.running 扫光边框见文件后部「会话列表：小节标题 + 置顶活跃会话」，
+         必须排在 .active / .pinned 之后才能赢得层叠 */
       /* 侧边栏收起状态 */
       .sidebar.collapsed {
         width: 0;
@@ -527,6 +498,22 @@
         position: relative;
         overflow: visible;
       }
+      /* 右上角三颗工具按钮去外边框，hover 时浮出 */
+      #behaviorBtn, #projectMapBtn, #settingsBtn {
+        border-color: transparent;
+      }
+      #behaviorBtn:hover, #projectMapBtn:hover, #settingsBtn:hover {
+        border-color: var(--border);
+      }
+      /* 行为/地图按钮颜色与其他 topbar 按钮保持一致（icon-btn 默认 #fff 太亮） */
+      #behaviorBtn, #projectMapBtn {
+        color: var(--muted);
+        position: relative;
+        overflow: visible;
+      }
+      #behaviorBtn:hover:not(:disabled), #projectMapBtn:hover:not(:disabled) {
+        color: var(--text);
+      }
       .btn.stop:hover:not(:disabled) {
         background: rgba(217, 119, 87, 0.22);
         border-color: var(--accent);
@@ -784,6 +771,9 @@
         width: 90vw;
         height: 90vh;
         overflow: hidden;
+        display: flex;
+        align-items: center;
+        justify-content: center;
       }
       .lightbox-img {
         display: block;
@@ -1756,7 +1746,7 @@
 
       .sidebar-footer .btn {
         width: 100%;
-        padding: 8px 12px;
+        padding: 11px 12px;
         font-size: 12px;
       }
 
@@ -1862,6 +1852,44 @@
       }
       .conv-item.user-pinned.active {
         border-color: var(--accent);
+      }
+      /* 任务运行中：旋转扫光边框（inspira-ui glow-border 风格）
+         原理：conic-gradient 铺满 border-box 背景层，再用 padding-box 裁剪的纯色层盖住内部，
+         只让 1px 边框区域透出旋转的彩色弧段；暗段用 --border-soft 同色保证整圈边框始终可见。
+         选择器重复 .running 提权到 (0,3,0) 并排在 .active / .pinned / .user-pinned.active 之后：
+         那几条用 background 简写会把 background-image 重置成 none，不压过去扫光就不显示。 */
+      @property --glow-angle {
+        syntax: '<angle>';
+        initial-value: 0deg;
+        inherits: false;
+      }
+      .conv-item.running.running {
+        --conv-fill: var(--bg);
+        border: 1px solid transparent;
+        background-image:
+          linear-gradient(var(--conv-fill), var(--conv-fill)),
+          conic-gradient(
+            from var(--glow-angle),
+            #22232e   0deg,
+            #22232e  60deg,
+            var(--accent)    100deg,
+            var(--amber)     140deg,
+            var(--accent-hi) 170deg,
+            #22232e  210deg,
+            #22232e  360deg
+          );
+        background-origin: border-box;
+        background-clip: padding-box, border-box;
+        box-shadow: 0 0 10px rgba(217, 119, 87, 0.25);
+        animation: glowSpin 2.4s linear infinite;
+      }
+      /* 选中/置顶态：内层填充带回 accent 底色，否则扫光的纯色遮罩会把高亮背景吃掉 */
+      .conv-item.running.active,
+      .conv-item.running.pinned {
+        --conv-fill: color-mix(in srgb, var(--accent) 14%, var(--bg));
+      }
+      @keyframes glowSpin {
+        to { --glow-angle: 360deg; }
       }
       .conv-pin-ic {
         flex-shrink: 0;
@@ -2607,7 +2635,44 @@
 .tool-row-name.off {
   color: var(--muted);
 }
-/* 工具/会话行的禁用态（当前只有 openai-compat 下的 ⚡ ultracode 行在用）：整行灰掉、不可点，
+/* 光辉文字（inspira-ui radiant-text）：一道高光周期性扫过文字。
+   用 ::after 叠一层而不是直接给本体做 background-clip:text —— 后者要求 color:transparent，
+   高光之外的字就没了；叠加层让底下文字保持 .off/.on 的常规配色，高光纯装饰。
+   data-text 冗余存一份文案是 content:attr() 的取值来源，改文案要两处同步。 */
+.radiant-text {
+  position: relative;
+  display: inline-block;
+}
+.radiant-text::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  color: transparent;
+  /* 背景放大到 250% 后靠 background-position 平移：高光在背景正中，平移时扫过可见区 */
+  background: linear-gradient(
+      90deg,
+      transparent 42%,
+      var(--accent-hi) 50%,
+      transparent 58%
+    )
+    no-repeat;
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: radiantShine 4s linear infinite;
+  pointer-events: none;
+}
+/* 0→40% 高光停在左侧屏外（静默期），40→70% 扫过，之后停在右侧屏外；
+   循环边界的位置跳变发生在高光不可见时，看不出接缝 */
+@keyframes radiantShine {
+  0%, 40% {
+    background-position: 100% center;
+  }
+  70%, 100% {
+    background-position: 0% center;
+  }
+}
+/* 工具/会话行的禁用态（当前只有 openai-compat 下的 ✨ Ultracode 行在用）：整行灰掉、不可点，
    但名字上的 title 要留着，那是用户能看到「为什么灰」的唯一地方 */
 .tool-row.disabled {
   opacity: 0.5;
@@ -2615,6 +2680,16 @@
 }
 .tool-row.disabled .tool-row-name {
   pointer-events: auto;
+}
+/* 禁用态不该还闪着招手 */
+.tool-row.disabled .radiant-text::after {
+  animation: none;
+}
+/* 无障碍：用户要求减少动效时只留静态文字 */
+@media (prefers-reduced-motion: reduce) {
+  .radiant-text::after {
+    animation: none !important;
+  }
 }
 /* Toggle 开关 */
 .tool-toggle {
@@ -3721,23 +3796,70 @@
 }
 
 /* ---- 项目地图弹框 ---- */
-.pm-modal { width: 680px; max-width: 90vw; max-height: 82vh; display: flex; flex-direction: column; }
+.pm-modal { width: 860px; max-width: 93vw; max-height: 90vh; display: flex; flex-direction: column; }
 .pm-body { flex: 1; overflow-y: auto; padding: 0 4px 8px; }
-.pm-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 48px 24px; text-align: center; }
-.pm-empty-icon { font-size: 36px; }
+/* 通用空态（加载中 / 生成中 / 错误） */
+.pm-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 56px 24px; text-align: center; }
 .pm-empty-text { color: var(--text); font-size: 14px; }
-.pm-empty-sub { color: var(--faint); font-size: 12px; font-family: var(--mono); word-break: break-all; }
-.pm-summary { padding: 16px 0 8px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
-.pm-summary-line { display: flex; gap: 12px; align-items: baseline; font-size: 13px; }
-.pm-summary-label { color: var(--faint); min-width: 72px; }
-.pm-summary-value { color: var(--text); }
-.pm-summary-path { font-family: var(--mono); font-size: 12px; word-break: break-all; }
-.pm-regen-bar { margin-bottom: 16px; }
-.pm-module-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.pm-module-item { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; background: var(--surface); border-radius: 6px; }
-.pm-mod-name { font-weight: 600; font-size: 13px; color: var(--text); }
-.pm-mod-path { font-size: 11px; font-family: var(--mono); color: var(--faint); }
-.pm-mod-desc { font-size: 12px; color: var(--muted); }
+.pm-error { color: #e55; }
+/* 「未生成」状态：地球 + 文字 + 大按钮 */
+.pm-no-map { display: flex; flex-direction: column; align-items: center; padding: 28px 24px 40px; gap: 16px; text-align: center; }
+/* 半球效果：canvas 是 330×330 的完整球，这里只给 186px 高并裁掉下半截。
+   186 略大于半径（165），所以球最宽处仍在可视区内，切口落在赤道稍下方 —— 呈现
+   「地球从下方升起」的观感；给足 200px 反而会露出球底弧线，不再是半球。 */
+.pm-globe-wrap {
+  width: 330px;
+  height: 186px;
+  overflow: hidden;
+  flex-shrink: 0;
+  /* 底部 10% 渐隐：纯裁切会留一条刀切般的白色硬边。球最宽处在 165px（88.7%），
+     正好落在渐隐起点之前，所以轮廓宽度不受影响，只是切口自然融进深色背景。 */
+  -webkit-mask-image: linear-gradient(to bottom, #000 90%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 90%, transparent 100%);
+  /* 抵消渐隐带占位：那 19px 已经看不见了，不减掉的话按钮会显得离球太远 */
+  margin-bottom: -12px;
+}
+/* 「生成项目地图」主按钮：比普通 btn 更大更明显 */
+.pm-gen-btn { padding: 10px 32px !important; font-size: 15px !important; border-radius: 8px !important; margin-top: 4px; }
+/* 生成中旋转圈 */
+.pm-spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: pm-spin 0.9s linear infinite; }
+@keyframes pm-spin { to { transform: rotate(360deg); } }
+/* ---- 项目地图：已生成态（画布模式） ---- */
+/* 画布自己滚动/缩放，外层 body 不再滚，否则滚轮缩放会带着整个弹框一起滚 */
+.pm-body--map { display: flex; flex-direction: column; gap: 10px; overflow: hidden; padding-bottom: 6px; }
+.pm-map-bar { display: flex; align-items: center; gap: 10px; padding: 12px 6px 0; flex: 0 0 auto; }
+.pm-map-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.pm-map-path { font-family: var(--mono); font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-map-stat { font-size: 11.5px; color: var(--faint); }
+.pm-map-filter { width: 240px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 7px 10px; font-size: 12.5px; outline: none; }
+.pm-map-filter:focus { border-color: var(--accent); }
+/* 给绝对定位的 .rq-canvas-host（inset:0）一个有高度的定位上下文；高度随视口收缩，小屏不把弹框顶出屏外 */
+.pm-map-canvas { position: relative; height: min(540px, calc(90vh - 190px)); min-height: 320px; border-radius: 12px; border: 1px solid var(--border-soft); overflow: hidden; flex: 0 0 auto; }
+/* map-canvas 内部的 .rq-canvas-host / .rq-minimap 都是 absolute，显式给它们一个铺满的定位祖先，不靠隔代兜底 */
+.pm-map-mount { position: absolute; inset: 0; }
+/* 模块卡片。高度由 JS 按 layoutMap 的结果内联钉死，这里只管内部排布 */
+.rq-node.pm-node { padding: 10px 12px; box-sizing: border-box; display: flex; flex-direction: column; gap: 5px; cursor: pointer; overflow: hidden; }
+.pm-node-name { font-size: 13.5px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pm-node-path { font-family: var(--mono); font-size: 10.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pm-node-desc { font-size: 11.5px; line-height: 1.45; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; flex: 1; }
+.pm-node-foot { display: flex; gap: 10px; font-size: 10.5px; color: var(--faint); }
+/* 详情抽屉：叠在画布右侧，不挤压画布 */
+.pm-drawer { position: absolute; right: 0; top: 0; bottom: 0; width: min(380px, 78%); z-index: 30; background: var(--panel); border-left: 1px solid var(--border); box-shadow: -12px 0 32px rgba(0, 0, 0, 0.4); padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.pm-drawer[hidden] { display: none; }
+.pm-drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pm-drawer-name { font-size: 15px; color: var(--text); }
+.pm-drawer-close { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 6px; }
+.pm-drawer-close:hover { color: var(--text); background: var(--panel-2); }
+.pm-drawer-path { font-family: var(--mono); font-size: 11px; color: var(--faint); word-break: break-all; }
+.pm-drawer-label { font-size: 11px; color: var(--faint); margin-bottom: 5px; letter-spacing: 0.02em; }
+.pm-drawer-desc { font-size: 12.5px; line-height: 1.55; color: var(--text); }
+.pm-drawer-list { margin: 0; padding-left: 16px; font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
+.pm-drawer-list.pm-files { font-family: var(--mono); font-size: 11px; }
+.pm-drawer-exports { font-family: var(--mono); font-size: 11px; color: var(--muted); line-height: 1.6; word-break: break-all; }
+.pm-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pm-chip { font-size: 11.5px; padding: 3px 9px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); cursor: pointer; }
+.pm-chip:hover { border-color: var(--accent); color: var(--accent-hi); }
+.pm-chips:empty::after { content: '无'; font-size: 11.5px; color: var(--faint); }
 
 /* ---- textareaDialog 多行输入框样式 ---- */
 .prompt-input.textarea-dialog {
@@ -3829,6 +3951,49 @@
 .mem-item:hover .mem-act { opacity: 1; }
 .mem-act:hover { color: var(--text); }
 .mem-act.danger:hover { color: var(--red); }
+
+/* 记忆库 v2 — 开关控件 */
+.mem-toggle-wrap { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.mem-toggle-label { font-size: 12px; color: #666; }
+.mem-toggle-opt { padding: 2px 10px; border: 1px solid #ccc; border-radius: 12px;
+  cursor: pointer; background: transparent; color: #888; font-family: inherit; font-size: 12px; }
+.mem-toggle-opt.active { border-color: #1a6fa8; background: #1a6fa8; color: #fff; }
+
+/* 记忆库 v2 — 已记忆区 */
+.mem-memory-item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0;
+  border-bottom: 1px solid var(--border, #e8e8e8); }
+.mem-memory-body { flex: 1; min-width: 0; }
+.mem-memory-cat { display: inline; font-size: 11px; padding: 1px 6px; border-radius: 10px;
+  background: #e8f4fd; color: #1a6fa8; margin-right: 6px; }
+.mem-memory-text { font-size: 13px; line-height: 1.5; }
+.mem-memory-reasoning { font-size: 12px; color: #888; margin-top: 2px; }
+.mem-remove-btn { padding: 2px 8px; font-size: 12px; border-radius: 4px;
+  border: 1px solid #e0b0b0; color: #c44; background: transparent;
+  cursor: pointer; white-space: nowrap; flex-shrink: 0; font-family: inherit; }
+.mem-remove-btn:hover { background: #fff0f0; }
+
+/* 记忆库 v2 — 会话列表区 */
+.mem-session-item { padding: 4px 0; border-bottom: 1px solid var(--border, #eee); }
+.mem-session-header { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 4px 0; }
+.mem-session-arrow { font-size: 12px; color: #999; user-select: none; transition: transform 0.15s; }
+.mem-session-arrow.open { transform: rotate(90deg); }
+.mem-session-path { flex: 1; font-size: 12px; color: #555; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.mem-session-status { font-size: 11px; padding: 1px 6px; border-radius: 10px; white-space: nowrap; }
+.mem-session-status--analyzed { background: #e6f4e6; color: #2a7a2a; }
+.mem-session-status--pending  { background: #fff3cd; color: #856404; }
+.mem-session-status--outdated { background: #fde8e8; color: #9b2335; }
+.mem-session-findings { padding: 4px 0 4px 20px; }
+.mem-finding-item { display: flex; align-items: flex-start; gap: 6px; padding: 3px 0; font-size: 12px; }
+.mem-finding-type { padding: 1px 5px; border-radius: 8px; font-size: 10px; white-space: nowrap; flex-shrink: 0; }
+.mem-finding-type--bug        { background: #fde8e8; color: #9b2335; }
+.mem-finding-type--solution   { background: #e6f4e6; color: #2a7a2a; }
+.mem-finding-type--pattern    { background: #e8f0fd; color: #1a4fa8; }
+.mem-finding-type--preference { background: #f3e8fd; color: #6a1aa8; }
+.mem-finding-summary { flex: 1; color: #444; line-height: 1.4; }
+.mem-unanalyzed-item .mem-session-path { color: #aaa; }
+.mem-hint { color: #aaa; font-size: 13px; padding: 8px 0; }
+
 /* .badge-dot 是绝对定位，宿主必须建立定位上下文 */
 #toolMemory .tool-item-title { position: relative; overflow: visible; }
 
@@ -4090,7 +4255,7 @@
   color: var(--text);
 }
 
-/* ---- 消息气泡折叠（高度截断显示末尾内容）---- */
+/* ---- 消息气泡折叠（渐进模糊 + 顶部展开标签）---- */
 .bubble.msg-folded {
   max-height: 240px;
   overflow-y: scroll;
@@ -4102,39 +4267,50 @@
   display: none;              /* Chrome/Safari */
 }
 
-.msg-fold-overlay {
+/* 遮罩容器：sticky 贴顶，高度约 1.5 行，margin-bottom 负值不占空间 */
+.msg-blur-overlay {
   position: sticky;
   top: 0;
   left: 0;
   right: 0;
-  height: 28px;
-  pointer-events: none;
-  margin-bottom: -28px;       /* 不占空间，叠在内容上 */
+  height: 40px;
+  margin-bottom: -40px;
   z-index: 1;
-  /* background 由下面按气泡类型分别设置 */
-}
-
-.msg.user .msg-fold-overlay {
-  background: linear-gradient(to bottom, var(--accent-soft) 0%, transparent 100%);
-}
-
-.msg.assistant .msg-fold-overlay {
-  background: linear-gradient(to bottom, var(--panel) 0%, transparent 100%);
-}
-
-.msg-expand-btn {
-  display: block;
-  margin: 6px 0 0;
-  padding: 5px 12px;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  font-size: 12px;
-  color: var(--muted);
   cursor: pointer;
-  transition: background 0.15s;
+  user-select: none;
 }
 
-.msg-expand-btn:hover {
-  background: var(--panel-2);
+/* 每一层 blur，绝对定位覆盖整个遮罩区域，JS 注入 backdrop-filter + mask-image */
+.msg-blur-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* overlay 容器自身承载渐变背景，覆盖全高，消除透明区悬空感 */
+.msg.user .msg-blur-overlay {
+  background: linear-gradient(to bottom, var(--accent-soft) 55%, transparent 100%);
+}
+
+.msg.assistant .msg-blur-overlay {
+  background: linear-gradient(to bottom, var(--panel) 55%, transparent 100%);
+}
+
+/* 顶部展开标签，叠在模糊层之上，背景由 overlay 提供 */
+.msg-expand-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  padding: 3px 10px 8px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  text-align: center;
+}
+
+.msg-blur-overlay:hover .msg-expand-label {
+  opacity: 0.8;
 }
