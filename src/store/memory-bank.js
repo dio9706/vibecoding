@@ -35,18 +35,32 @@ export function readBank() {
   };
 }
 
+/**
+ * 整体覆写 bank。调用方需先读出最新值（readBank）再传入，
+ * 否则并发写入会互相覆盖内容（此函数只保证写操作本身原子，不合并语义）。
+ */
 export function writeBank(bank) {
   return updateJson(FILE, EMPTY_BANK, () => ({
     version: 2,
-    lastExtractAt: bank.lastExtractAt ?? 0,
-    lastSessionScanAt: bank.lastSessionScanAt ?? 0,
+    lastExtractAt: Number(bank.lastExtractAt) || 0,
+    lastSessionScanAt: Number(bank.lastSessionScanAt) || 0,
     sessions: Array.isArray(bank.sessions) ? bank.sessions : [],
     memories: Array.isArray(bank.memories) ? bank.memories : [],
   }));
 }
 
 export function updateBank(fn) {
-  return updateJson(FILE, EMPTY_BANK, fn);
+  return updateJson(FILE, EMPTY_BANK, (cur) => {
+    const next = fn(cur);
+    if (next === undefined) return undefined;   // 放弃写盘约定
+    return {
+      version: 2,
+      lastExtractAt: Number(next.lastExtractAt) || 0,
+      lastSessionScanAt: Number(next.lastSessionScanAt) || 0,
+      sessions: Array.isArray(next.sessions) ? next.sessions : [],
+      memories: Array.isArray(next.memories) ? next.memories : [],
+    };
+  });
 }
 
 // ── v1 stub 导出（保持兼容，避免尚未更新的模块 import 崩溃）──────────────────
