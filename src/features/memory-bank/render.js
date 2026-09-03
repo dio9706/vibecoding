@@ -5,6 +5,13 @@
  * 实际没有，这是最难排查的一类问题。
  */
 
+export const FINDING_TYPE_LABEL = {
+  bug: '易错点',
+  solution: '解决方案',
+  pattern: '规律',
+  preference: '偏好',
+};
+
 export const CATEGORY_LABEL = {
   'code-style': '代码风格',
   collaboration: '协作习惯',
@@ -25,6 +32,25 @@ const HEADER = '<!-- 由记忆库自动生成，勿手工编辑；改动请在�
 const DAY_MS = 86400000;
 
 /**
+ * 把 v2 memory 对象归一化为 selectForInjection 能处理的 v1 格式。
+ * v2 memories（来自 synthesize.js）缺少 status / inject / scope / evidenceCount / lastSeenAt / projectDir，
+ * 归一化后才能正常通过过滤逻辑，无需改动核心排序/截断流程。
+ */
+function normalizeMem(mem) {
+  return {
+    status: 'active',
+    inject: true,
+    scope: 'global',
+    category: mem.category,
+    statement: mem.statement,
+    evidenceCount: 1,
+    lastSeenAt: mem.createdAt || 0,
+    source: 'inferred',
+    projectDir: '',
+  };
+}
+
+/**
  * 排序权重：运行时计算、不落盘（少一个要维护一致性的持久化字段）。
  * 证据越多越重；最后一次出现越近越重（半衰期 60 天）。
  */
@@ -36,11 +62,15 @@ export function weight(item, now) {
 
 /** 按 scope 过滤 + 排序 + 预算截断，返回入选条目 */
 export function selectForInjection(items, { scope, projectDir = '', now, maxItems = 40, maxChars = 3000 }) {
+  // 入口处归一化：v2 memories 缺少 v1 字段（status/inject/scope），归一后才能正常过滤
+  const normalizedItems = (items || []).map(it =>
+    it.status === undefined ? normalizeMem(it) : it
+  );
   // 未知 category 的条目在渲染阶段无处落地（renderMarkdown 按 SECTION_ORDER 分节），
   // 必须在这里就诚实地计入 truncated，否则会被无声丢弃：面板报 0 条未注入，规则却哪儿都不在。
   // 只统计「本该有资格注入、但因 category 未知被挡掉」的条目，dormant/inject=false 等本就不合格的不算。
   let categoryRejected = 0;
-  const pool = (items || []).filter((it) => {
+  const pool = normalizedItems.filter((it) => {
     if (it.status !== 'active' || !it.inject) return false;
     if (scope === 'project') {
       if (!(it.scope === 'project' && it.projectDir === projectDir)) return false;
@@ -80,7 +110,11 @@ export function selectForInjection(items, { scope, projectDir = '', now, maxItem
  *   跳过会让磁盘上的旧内容继续被 CLAUDE.md 引用，用户否掉的规则将永久生效。
  */
 export function renderMarkdown(items, opts) {
-  const { included, truncated } = selectForInjection(items, opts);
+  // 入口处归一化：v2 memories 缺少 v1 字段（status/inject/scope），归一后传给 selectForInjection
+  const normalized = (items || []).map(it =>
+    it.status === undefined ? normalizeMem(it) : it
+  );
+  const { included, truncated } = selectForInjection(normalized, opts);
   if (included.length === 0) return { text: '', included: [], truncated };
 
   const lines = [HEADER, ''];
