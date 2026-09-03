@@ -82,33 +82,32 @@ function renderToggle() {
     lbl.className = 'mem-toggle-label';
     lbl.textContent = '闲时提炼';
 
-    const onBtn = document.createElement('button');
-    onBtn.className = 'mem-toggle-opt';
-    onBtn.dataset.val = 'on';
-    onBtn.textContent = '开';
-    onBtn.title = '在空闲时段自动分析会话、提炼记忆';
-    onBtn.onclick = () => toggleEnabled(true);
+    // iOS 风格 switch
+    const switchLabel = document.createElement('label');
+    switchLabel.className = 'mem-switch';
+    switchLabel.title = '开启后在凌晨 3-8 点自动分析会话、提炼记忆';
 
-    const offBtn = document.createElement('button');
-    offBtn.className = 'mem-toggle-opt';
-    offBtn.dataset.val = 'off';
-    offBtn.textContent = '关';
-    offBtn.title = '关闭自动提炼';
-    offBtn.onclick = () => toggleEnabled(false);
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = _enabled;
+    checkbox.onchange = () => toggleEnabled(checkbox.checked);
+
+    const track = document.createElement('span');
+    track.className = 'mem-switch-track';
+
+    switchLabel.appendChild(checkbox);
+    switchLabel.appendChild(track);
 
     wrap.appendChild(lbl);
-    wrap.appendChild(onBtn);
-    wrap.appendChild(offBtn);
+    wrap.appendChild(switchLabel);
 
     // 插到 toolbar 最前面
     toolbar.insertBefore(wrap, toolbar.firstChild);
   }
 
-  // 更新激活态（不重建节点）
-  wrap.querySelectorAll('.mem-toggle-opt').forEach((b) => {
-    const isActive = (b.dataset.val === 'on') === _enabled;
-    b.classList.toggle('active', isActive);
-  });
+  // 更新 checked 状态（不重建节点）
+  const cb = wrap.querySelector('input[type=checkbox]');
+  if (cb) cb.checked = _enabled;
 }
 
 async function toggleEnabled(val) {

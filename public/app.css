@@ -3938,7 +3938,7 @@
 /* 记忆库面板 */
 .mem-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
 .mem-budget-tip { flex: 1; color: var(--faint); font-size: 12px; }
-.mem-section-label { margin: 12px 0 6px; color: var(--faint); font-size: 12px; }
+.mem-section-label { margin: 18px 0 10px; color: var(--faint); font-size: 12px; letter-spacing: .02em; }
 .mem-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px; border-radius: 6px; }
 .mem-item:hover { background: var(--bg-hover, rgba(255,255,255,0.06)); }
 .mem-item-body { flex: 1; min-width: 0; }
@@ -3952,12 +3952,23 @@
 .mem-act:hover { color: var(--text); }
 .mem-act.danger:hover { color: var(--red); }
 
-/* 记忆库 v2 — 开关控件 */
-.mem-toggle-wrap { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+/* 记忆库 v2 — switch 开关 */
+.mem-toggle-wrap { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
 .mem-toggle-label { font-size: 12px; color: #666; }
-.mem-toggle-opt { padding: 2px 10px; border: 1px solid #ccc; border-radius: 12px;
-  cursor: pointer; background: transparent; color: #888; font-family: inherit; font-size: 12px; }
-.mem-toggle-opt.active { border-color: #1a6fa8; background: #1a6fa8; color: #fff; }
+.mem-switch { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
+.mem-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+.mem-switch-track {
+  position: absolute; inset: 0; border-radius: 20px;
+  background: #ccc; cursor: pointer; transition: background 0.2s;
+}
+.mem-switch input:checked + .mem-switch-track { background: #1a6fa8; }
+.mem-switch-track::after {
+  content: ''; position: absolute;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #fff; top: 3px; left: 3px;
+  transition: transform 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,.2);
+}
+.mem-switch input:checked + .mem-switch-track::after { transform: translateX(16px); }
 
 /* 记忆库 v2 — 已记忆区 */
 .mem-memory-item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0;
@@ -4280,20 +4291,13 @@
   user-select: none;
 }
 
-/* 每一层 blur，绝对定位覆盖整个遮罩区域，JS 注入 backdrop-filter + mask-image */
-.msg-blur-layer {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-/* overlay 容器自身承载渐变背景，覆盖全高，消除透明区悬空感 */
+/* 纯 CSS 渐变遮罩：85% 不透明保证标签可读，最后 15% 平滑过渡到内容 */
 .msg.user .msg-blur-overlay {
-  background: linear-gradient(to bottom, var(--accent-soft) 55%, transparent 100%);
+  background: linear-gradient(to bottom, var(--accent-soft) 85%, transparent 100%);
 }
 
 .msg.assistant .msg-blur-overlay {
-  background: linear-gradient(to bottom, var(--panel) 55%, transparent 100%);
+  background: linear-gradient(to bottom, var(--panel) 85%, transparent 100%);
 }
 
 /* 顶部展开标签，叠在模糊层之上，背景由 overlay 提供 */
