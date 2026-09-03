@@ -7,6 +7,7 @@ import os from 'node:os';
 process.env.APP_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'membank-'));
 const {
   readBank, writeBank, updateBank, patchItem, rejectItem, ackItems, EMPTY_BANK,
+  addSession, getSession, findSessionByPath, patchSession,
 } = await import('./memory-bank.js');
 const { dataPath } = await import('./index.js');
 
@@ -90,6 +91,74 @@ test('rejectItem stub：不抛错，返回 undefined', () => {
 
 test('ackItems stub：不抛错，返回 undefined', () => {
   assert.equal(ackItems(null), undefined);
+});
+
+// ── sessions CRUD 测试 ─────────────────────────────────────────────────────────
+
+test('addSession 正常添加会话', () => {
+  writeBank({ ...EMPTY_BANK });
+  addSession({ id: 'sess-1', path: '/a/b.jsonl', mtime: 1000 });
+  const b = readBank();
+  assert.equal(b.sessions.length, 1);
+  assert.equal(b.sessions[0].id, 'sess-1');
+});
+
+test('addSession 同 id 幂等，不重复添加', () => {
+  writeBank({ ...EMPTY_BANK });
+  addSession({ id: 'sess-idempotent', path: '/x.jsonl', mtime: 2000 });
+  addSession({ id: 'sess-idempotent', path: '/x.jsonl', mtime: 2000 });
+  const b = readBank();
+  assert.equal(b.sessions.filter((s) => s.id === 'sess-idempotent').length, 1);
+});
+
+test('addSession 缺少 id 时抛错', () => {
+  assert.throws(() => addSession({}), /session\.id required/);
+  assert.throws(() => addSession(null), /session\.id required/);
+});
+
+test('getSession 找到时返回 session', () => {
+  writeBank({ ...EMPTY_BANK });
+  addSession({ id: 'sess-get', path: '/c.jsonl', mtime: 3000, analyzedAt: 42 });
+  const s = getSession('sess-get');
+  assert.ok(s !== null);
+  assert.equal(s.id, 'sess-get');
+  assert.equal(s.analyzedAt, 42);
+});
+
+test('getSession 找不到时返回 null', () => {
+  writeBank({ ...EMPTY_BANK });
+  assert.equal(getSession('nonexistent'), null);
+});
+
+test('findSessionByPath 按 path+mtime 精确匹配', () => {
+  writeBank({ ...EMPTY_BANK });
+  addSession({ id: 'sess-p1', path: '/proj/conv.jsonl', mtime: 5000 });
+  addSession({ id: 'sess-p2', path: '/proj/conv.jsonl', mtime: 9999 }); // 同路径不同 mtime
+
+  const found = findSessionByPath('/proj/conv.jsonl', 5000);
+  assert.ok(found !== null);
+  assert.equal(found.id, 'sess-p1');
+
+  // mtime 不匹配时返回 null
+  assert.equal(findSessionByPath('/proj/conv.jsonl', 1111), null);
+  // path 不匹配时返回 null
+  assert.equal(findSessionByPath('/other.jsonl', 5000), null);
+});
+
+test('patchSession 更新指定字段', () => {
+  writeBank({ ...EMPTY_BANK });
+  addSession({ id: 'sess-patch', path: '/d.jsonl', mtime: 4000, status: 'pending' });
+  patchSession('sess-patch', { status: 'analyzed', analyzedAt: 99 });
+  const s = getSession('sess-patch');
+  assert.equal(s.status, 'analyzed');
+  assert.equal(s.analyzedAt, 99);
+  assert.equal(s.path, '/d.jsonl'); // 未改字段保留
+});
+
+test('patchSession id 不存在时静默放弃，不抛错', () => {
+  writeBank({ ...EMPTY_BANK });
+  assert.doesNotThrow(() => patchSession('no-such-id', { status: 'x' }));
+  assert.equal(readBank().sessions.length, 0);
 });
 
 // ── 已跳过的 v1 测试（保留原始用例，待 Task 4 迁移完成后决定是否删除）────────────

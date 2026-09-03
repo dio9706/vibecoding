@@ -63,6 +63,60 @@ export function updateBank(fn) {
   });
 }
 
+// ── sessions CRUD ────────────────────────────────────────────────────────────
+
+/**
+ * 添加一条会话记录（幂等：同 id 不重复插入）。
+ * @param {{ id: string, [key: string]: any }} session
+ */
+export function addSession(session) {
+  if (!session || !session.id) throw new Error('session.id required');
+  updateBank((bank) => {
+    // 同 id 已存在，放弃写盘（幂等）
+    if (bank.sessions.some((s) => s.id === session.id)) return undefined;
+    bank.sessions.push(session);
+    return bank;
+  });
+}
+
+/**
+ * 按 id 读取会话，不存在返回 null。
+ * @param {string} id
+ * @returns {{ id: string, [key: string]: any } | null}
+ */
+export function getSession(id) {
+  const bank = readBank();
+  return bank.sessions.find((s) => s.id === id) || null;
+}
+
+/**
+ * 按 path + mtime 精确匹配会话，不存在返回 null。
+ * 用于判断某个转录文件是否已分析过（两个游标同时匹配才算同一次采集）。
+ * @param {string} path
+ * @param {number} mtime
+ * @returns {{ id: string, [key: string]: any } | null}
+ */
+export function findSessionByPath(path, mtime) {
+  const bank = readBank();
+  return bank.sessions.find((s) => s.path === path && s.mtime === mtime) || null;
+}
+
+/**
+ * 局部更新指定 id 的会话字段（浅合并）。
+ * id 不存在时静默放弃，不抛错，不写盘。
+ * @param {string} id
+ * @param {object} patch
+ */
+export function patchSession(id, patch) {
+  if (!id || !patch) throw new Error('id and patch required');
+  updateBank((bank) => {
+    const idx = bank.sessions.findIndex((s) => s.id === id);
+    if (idx < 0) return undefined; // 不存在则放弃写盘
+    bank.sessions[idx] = { ...bank.sessions[idx], ...patch };
+    return bank;
+  });
+}
+
 // ── v1 stub 导出（保持兼容，避免尚未更新的模块 import 崩溃）──────────────────
 // 待 Task 4 完成迁移后可安全移除
 
