@@ -150,7 +150,7 @@ export function getMemory(id) {
  * @returns {Array}
  */
 export function listMemories() {
-  return readBank().memories || [];
+  return readBank().memories;
 }
 
 /**

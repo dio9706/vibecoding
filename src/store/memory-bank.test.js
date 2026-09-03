@@ -175,7 +175,7 @@ test('patchSession 不覆盖 id 字段', () => {
 // ── memories CRUD 测试 ────────────────────────────────────────────────────────
 
 test('addMemory 正常添加记忆条目', () => {
-  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  writeBank({ ...EMPTY_BANK });
   addMemory({ id: 'mem-1', content: '用户偏好深色模式', createdAt: 1000 });
   const b = readBank();
   assert.equal(b.memories.length, 1);
@@ -184,7 +184,7 @@ test('addMemory 正常添加记忆条目', () => {
 });
 
 test('addMemory 同 id 幂等，不重复添加', () => {
-  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  writeBank({ ...EMPTY_BANK });
   addMemory({ id: 'mem-idempotent', content: 'first' });
   addMemory({ id: 'mem-idempotent', content: 'second' });
   const b = readBank();
@@ -198,7 +198,7 @@ test('addMemory 缺少 id 时抛错', () => {
 });
 
 test('getMemory 找到时返回 memory', () => {
-  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  writeBank({ ...EMPTY_BANK });
   addMemory({ id: 'mem-get', content: '喜欢简洁风格', tags: ['ui'] });
   const m = getMemory('mem-get');
   assert.ok(m !== null);
@@ -208,12 +208,12 @@ test('getMemory 找到时返回 memory', () => {
 });
 
 test('getMemory 找不到时返回 null', () => {
-  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  writeBank({ ...EMPTY_BANK });
   assert.equal(getMemory('nonexistent-mem'), null);
 });
 
 test('listMemories 返回所有记忆条目', () => {
-  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  writeBank({ ...EMPTY_BANK });
   addMemory({ id: 'mem-list-1', content: 'a' });
   addMemory({ id: 'mem-list-2', content: 'b' });
   const list = listMemories();
@@ -223,13 +223,13 @@ test('listMemories 返回所有记忆条目', () => {
 });
 
 test('listMemories bank 为空时返回空数组', () => {
-  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  writeBank({ ...EMPTY_BANK });
   const list = listMemories();
   assert.deepEqual(list, []);
 });
 
 test('removeMemory 删除指定 id 的条目', () => {
-  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  writeBank({ ...EMPTY_BANK });
   addMemory({ id: 'mem-rm-1', content: 'keep' });
   addMemory({ id: 'mem-rm-2', content: 'remove me' });
   removeMemory('mem-rm-2');
@@ -239,7 +239,7 @@ test('removeMemory 删除指定 id 的条目', () => {
 });
 
 test('removeMemory id 不存在时静默放弃，不抛错', () => {
-  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  writeBank({ ...EMPTY_BANK });
   addMemory({ id: 'mem-rm-exist', content: 'x' });
   assert.doesNotThrow(() => removeMemory('no-such-mem'));
   assert.equal(readBank().memories.length, 1);
@@ -251,7 +251,7 @@ test('removeMemory id 缺失时抛错', () => {
 });
 
 test('patchMemory 更新指定字段', () => {
-  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  writeBank({ ...EMPTY_BANK });
   addMemory({ id: 'mem-patch', content: 'old content', tags: ['a'], score: 1 });
   patchMemory('mem-patch', { content: 'new content', score: 5 });
   const m = getMemory('mem-patch');
@@ -261,13 +261,13 @@ test('patchMemory 更新指定字段', () => {
 });
 
 test('patchMemory id 不存在时静默放弃，不抛错', () => {
-  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  writeBank({ ...EMPTY_BANK });
   assert.doesNotThrow(() => patchMemory('no-such-mem', { content: 'x' }));
   assert.equal(readBank().memories.length, 0);
 });
 
 test('patchMemory 不覆盖 id 字段', () => {
-  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  writeBank({ ...EMPTY_BANK });
   addMemory({ id: 'mem-patch-id', content: 'original' });
   patchMemory('mem-patch-id', { id: 'hacked', content: 'updated' });
   const m = getMemory('mem-patch-id');
@@ -277,7 +277,7 @@ test('patchMemory 不覆盖 id 字段', () => {
 });
 
 test('patchMemory 空 patch {} 时不写盘', () => {
-  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  writeBank({ ...EMPTY_BANK });
   addMemory({ id: 'mem-patch-empty', content: 'unchanged' });
   patchMemory('mem-patch-empty', {});
   const m = getMemory('mem-patch-empty');
