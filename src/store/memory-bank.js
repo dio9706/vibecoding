@@ -74,8 +74,7 @@ export function addSession(session) {
   updateBank((bank) => {
     // 同 id 已存在，放弃写盘（幂等）
     if (bank.sessions.some((s) => s.id === session.id)) return undefined;
-    bank.sessions.push(session);
-    return bank;
+    return { ...bank, sessions: [...bank.sessions, session] };
   });
 }
 
@@ -112,8 +111,12 @@ export function patchSession(id, patch) {
   updateBank((bank) => {
     const idx = bank.sessions.findIndex((s) => s.id === id);
     if (idx < 0) return undefined; // 不存在则放弃写盘
-    bank.sessions[idx] = { ...bank.sessions[idx], ...patch };
-    return bank;
+    if (Object.keys(patch).length === 0) return undefined; // 空 patch 不写盘
+    const { id: _drop, ...safePatch } = patch; // 防止 id 字段被覆盖
+    const updated = bank.sessions.map((s, i) =>
+      i === idx ? { ...s, ...safePatch } : s
+    );
+    return { ...bank, sessions: updated };
   });
 }
 

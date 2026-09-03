@@ -161,6 +161,16 @@ test('patchSession id 不存在时静默放弃，不抛错', () => {
   assert.equal(readBank().sessions.length, 0);
 });
 
+test('patchSession 不覆盖 id 字段', () => {
+  writeBank({ ...EMPTY_BANK });
+  addSession({ id: 'ses-patch-id', path: '/p.jsonl', mtime: 1, title: 't', analyzedAt: 0, findings: [] });
+  patchSession('ses-patch-id', { id: 'hacked', title: 'updated' });
+  const s = getSession('ses-patch-id');
+  assert(s, 'session should still exist');
+  assert.strictEqual(s.id, 'ses-patch-id', 'id must not be overwritten');
+  assert.strictEqual(s.title, 'updated', 'title should be updated');
+});
+
 // ── 已跳过的 v1 测试（保留原始用例，待 Task 4 迁移完成后决定是否删除）────────────
 
 // SKIP: 'userLogOffset 与 lastScannedAt 是两个独立游标，互不覆盖'
