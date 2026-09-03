@@ -192,7 +192,7 @@ function makeMemoryRow(m) {
 
   // [移除] 按钮
   const rm = document.createElement('button');
-  rm.className = 'mem-act mem-remove-btn';
+  rm.className = 'mem-remove-btn';
   rm.textContent = '移除';
   rm.title = '从记忆库删除这条记忆';
   rm.onclick = async () => {
