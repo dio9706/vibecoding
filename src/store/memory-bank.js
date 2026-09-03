@@ -120,6 +120,73 @@ export function patchSession(id, patch) {
   });
 }
 
+// ── memories CRUD ────────────────────────────────────────────────────────────
+
+/**
+ * 添加一条记忆条目（幂等：同 id 不重复插入）。
+ * @param {{ id: string, [key: string]: any }} memory
+ */
+export function addMemory(memory) {
+  if (!memory || !memory.id) throw new Error('memory.id required');
+  updateBank((bank) => {
+    // 同 id 已存在，放弃写盘（幂等）
+    if (bank.memories.some((m) => m.id === memory.id)) return undefined;
+    return { ...bank, memories: [...bank.memories, memory] };
+  });
+}
+
+/**
+ * 按 id 读取记忆条目，不存在返回 null。
+ * @param {string} id
+ * @returns {{ id: string, [key: string]: any } | null}
+ */
+export function getMemory(id) {
+  const bank = readBank();
+  return bank.memories.find((m) => m.id === id) || null;
+}
+
+/**
+ * 返回所有记忆条目列表。
+ * @returns {Array}
+ */
+export function listMemories() {
+  return readBank().memories || [];
+}
+
+/**
+ * 删除指定 id 的记忆条目。
+ * id 不存在时静默放弃，不抛错。
+ * @param {string} id
+ */
+export function removeMemory(id) {
+  if (!id) throw new Error('id required');
+  updateBank((bank) => {
+    const exists = bank.memories.some((m) => m.id === id);
+    if (!exists) return undefined; // 不存在则放弃写盘
+    return { ...bank, memories: bank.memories.filter((m) => m.id !== id) };
+  });
+}
+
+/**
+ * 局部更新指定 id 的记忆字段（浅合并）。
+ * id 不存在时静默放弃，不抛错，不写盘。
+ * @param {string} id
+ * @param {object} patch
+ */
+export function patchMemory(id, patch) {
+  if (!id || !patch) throw new Error('id and patch required');
+  updateBank((bank) => {
+    const idx = bank.memories.findIndex((m) => m.id === id);
+    if (idx < 0) return undefined; // 不存在则放弃写盘
+    if (Object.keys(patch).length === 0) return undefined; // 空 patch 不写盘
+    const { id: _drop, ...safePatch } = patch; // 防止 id 字段被覆盖
+    const updated = bank.memories.map((m, i) =>
+      i === idx ? { ...m, ...safePatch } : m
+    );
+    return { ...bank, memories: updated };
+  });
+}
+
 // ── v1 stub 导出（保持兼容，避免尚未更新的模块 import 崩溃）──────────────────
 // 待 Task 4 完成迁移后可安全移除
 

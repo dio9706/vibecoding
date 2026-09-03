@@ -8,6 +8,7 @@ process.env.APP_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'membank-'));
 const {
   readBank, writeBank, updateBank, patchItem, rejectItem, ackItems, EMPTY_BANK,
   addSession, getSession, findSessionByPath, patchSession,
+  addMemory, getMemory, listMemories, removeMemory, patchMemory,
 } = await import('./memory-bank.js');
 const { dataPath } = await import('./index.js');
 
@@ -169,6 +170,124 @@ test('patchSession 不覆盖 id 字段', () => {
   assert(s, 'session should still exist');
   assert.strictEqual(s.id, 'ses-patch-id', 'id must not be overwritten');
   assert.strictEqual(s.title, 'updated', 'title should be updated');
+});
+
+// ── memories CRUD 测试 ────────────────────────────────────────────────────────
+
+test('addMemory 正常添加记忆条目', () => {
+  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  addMemory({ id: 'mem-1', content: '用户偏好深色模式', createdAt: 1000 });
+  const b = readBank();
+  assert.equal(b.memories.length, 1);
+  assert.equal(b.memories[0].id, 'mem-1');
+  assert.equal(b.memories[0].content, '用户偏好深色模式');
+});
+
+test('addMemory 同 id 幂等，不重复添加', () => {
+  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  addMemory({ id: 'mem-idempotent', content: 'first' });
+  addMemory({ id: 'mem-idempotent', content: 'second' });
+  const b = readBank();
+  assert.equal(b.memories.filter((m) => m.id === 'mem-idempotent').length, 1);
+  assert.equal(b.memories[0].content, 'first');
+});
+
+test('addMemory 缺少 id 时抛错', () => {
+  assert.throws(() => addMemory({}), /memory\.id required/);
+  assert.throws(() => addMemory(null), /memory\.id required/);
+});
+
+test('getMemory 找到时返回 memory', () => {
+  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  addMemory({ id: 'mem-get', content: '喜欢简洁风格', tags: ['ui'] });
+  const m = getMemory('mem-get');
+  assert.ok(m !== null);
+  assert.equal(m.id, 'mem-get');
+  assert.equal(m.content, '喜欢简洁风格');
+  assert.deepEqual(m.tags, ['ui']);
+});
+
+test('getMemory 找不到时返回 null', () => {
+  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  assert.equal(getMemory('nonexistent-mem'), null);
+});
+
+test('listMemories 返回所有记忆条目', () => {
+  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  addMemory({ id: 'mem-list-1', content: 'a' });
+  addMemory({ id: 'mem-list-2', content: 'b' });
+  const list = listMemories();
+  assert.equal(list.length, 2);
+  assert.ok(list.some((m) => m.id === 'mem-list-1'));
+  assert.ok(list.some((m) => m.id === 'mem-list-2'));
+});
+
+test('listMemories bank 为空时返回空数组', () => {
+  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  const list = listMemories();
+  assert.deepEqual(list, []);
+});
+
+test('removeMemory 删除指定 id 的条目', () => {
+  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  addMemory({ id: 'mem-rm-1', content: 'keep' });
+  addMemory({ id: 'mem-rm-2', content: 'remove me' });
+  removeMemory('mem-rm-2');
+  const b = readBank();
+  assert.equal(b.memories.length, 1);
+  assert.equal(b.memories[0].id, 'mem-rm-1');
+});
+
+test('removeMemory id 不存在时静默放弃，不抛错', () => {
+  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  addMemory({ id: 'mem-rm-exist', content: 'x' });
+  assert.doesNotThrow(() => removeMemory('no-such-mem'));
+  assert.equal(readBank().memories.length, 1);
+});
+
+test('removeMemory id 缺失时抛错', () => {
+  assert.throws(() => removeMemory(''), /id required/);
+  assert.throws(() => removeMemory(null), /id required/);
+});
+
+test('patchMemory 更新指定字段', () => {
+  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  addMemory({ id: 'mem-patch', content: 'old content', tags: ['a'], score: 1 });
+  patchMemory('mem-patch', { content: 'new content', score: 5 });
+  const m = getMemory('mem-patch');
+  assert.equal(m.content, 'new content');
+  assert.equal(m.score, 5);
+  assert.deepEqual(m.tags, ['a']); // 未改字段保留
+});
+
+test('patchMemory id 不存在时静默放弃，不抛错', () => {
+  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  assert.doesNotThrow(() => patchMemory('no-such-mem', { content: 'x' }));
+  assert.equal(readBank().memories.length, 0);
+});
+
+test('patchMemory 不覆盖 id 字段', () => {
+  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  addMemory({ id: 'mem-patch-id', content: 'original' });
+  patchMemory('mem-patch-id', { id: 'hacked', content: 'updated' });
+  const m = getMemory('mem-patch-id');
+  assert.ok(m, 'memory should still exist');
+  assert.strictEqual(m.id, 'mem-patch-id', 'id must not be overwritten');
+  assert.strictEqual(m.content, 'updated', 'content should be updated');
+});
+
+test('patchMemory 空 patch {} 时不写盘', () => {
+  writeBank({ version: 2, lastExtractAt: 0, lastSessionScanAt: 0, sessions: [], memories: [] });
+  addMemory({ id: 'mem-patch-empty', content: 'unchanged' });
+  patchMemory('mem-patch-empty', {});
+  const m = getMemory('mem-patch-empty');
+  assert.equal(m.content, 'unchanged');
+});
+
+test('patchMemory 缺少 id 或 patch 时抛错', () => {
+  assert.throws(() => patchMemory('', { content: 'x' }), /id and patch required/);
+  assert.throws(() => patchMemory(null, { content: 'x' }), /id and patch required/);
+  assert.throws(() => patchMemory('some-id', null), /id and patch required/);
 });
 
 // ── 已跳过的 v1 测试（保留原始用例，待 Task 4 迁移完成后决定是否删除）────────────
