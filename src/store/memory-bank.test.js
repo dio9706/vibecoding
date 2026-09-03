@@ -59,6 +59,8 @@ test('读到 v1 数据时返回空 v2 框架（迁移兜底）', () => {
   assert.equal(b.version, 2);
   assert.deepEqual(b.sessions, []);
   assert.deepEqual(b.memories, []);
+  // 清理迁移产生的备份文件，防止污染其他测试
+  try { fs.unlinkSync(dataPath('memory-bank.v1.bak.json')); } catch {}
 });
 
 test('updateBank 可原子更新 bank', () => {
