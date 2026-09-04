@@ -343,6 +343,8 @@ export function runResult(run, info) {
   run.is_error = !!info.is_error;
   run.subtype = info.subtype || '';
   run.result = info.result || '';
+  run.inputTokens = info.inputTokens ?? 0;
+  run.outputTokens = info.outputTokens ?? 0;
   touch(run);
 }
 
@@ -445,7 +447,14 @@ export function finishRun(run) {
   run.updatedAt = Date.now();
   stopWatchdog(run);
   drainAsks(run);
-  fanout(run, 'done', { result: run.result || run.text, is_error: run.is_error, subtype: run.subtype, ...unsentField(run) });
+  fanout(run, 'done', {
+    result: run.result || run.text,
+    is_error: run.is_error,
+    subtype: run.subtype,
+    ...unsentField(run),
+    inputTokens: run.inputTokens || 0,
+    outputTokens: run.outputTokens || 0,
+  });
   closeAll(run);
   emitSettled(run);
 }
@@ -461,7 +470,14 @@ export function failRun(run, message) {
   run.updatedAt = Date.now();
   stopWatchdog(run);
   drainAsks(run);
-  fanout(run, 'done', { result: run.text, is_error: true, subtype: run.subtype, ...unsentField(run) });
+  fanout(run, 'done', {
+    result: run.text,
+    is_error: true,
+    subtype: run.subtype,
+    ...unsentField(run),
+    inputTokens: run.inputTokens || 0,
+    outputTokens: run.outputTokens || 0,
+  });
   closeAll(run);
   emitSettled(run);
 }
