@@ -6,6 +6,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { logger, preview } from '../shared/logger.js';
 import { describeTaskEvent, isTaskEvent } from './claude.logic.js';
+import { runScript } from './shell.js';
 
 /**
  * 插话（steering）输入队列 —— SDK 流式输入模式的 prompt 源。
@@ -270,4 +271,38 @@ export async function runClaude(prompt, opts = {}) {
   logger.error('claude', `✖ 重试 ${maxRetries} 次后仍失败`, { ms: Date.now() - t0 });
   inputQueue?.close();
   throw lastError;
+}
+
+/**
+ * 通过 Claude CLI 子进程向指定会话发送 /compact 指令，触发上下文压缩。
+ * SDK 暂无压缩 API，改用 shell 子进程方式（claude --print /compact --resume SESSION_ID）。
+ * 压缩后 session ID 不变，token 差值无法从 CLI 输出精确获取，返回占位 0。
+ *
+ * @param {string} sessionId
+ * @returns {Promise<{newSessionId: string, inputTokensBefore: number, inputTokensAfter: number}>}
+ */
+export async function compactSession(sessionId) {
+  if (!sessionId) throw new Error('sessionId is required');
+
+  logger.info('claude', '触发上下文压缩', { sessionId });
+
+  const result = await runScript(
+    'claude',
+    ['/compact', '--resume', sessionId],
+    { timeoutMs: 120_000 },
+  );
+
+  if (!result.ok) {
+    const msg = result.msg || result.err || result.out || 'compact failed';
+    logger.warn('claude', '上下文压缩失败', { sessionId, msg });
+    throw new Error(`Compact failed: ${msg}`);
+  }
+
+  logger.info('claude', '上下文压缩完成', { sessionId });
+
+  return {
+    newSessionId: sessionId, // 压缩后 session ID 不变
+    inputTokensBefore: 0,    // CLI 不返回结构化 token 数据
+    inputTokensAfter: 0,
+  };
 }

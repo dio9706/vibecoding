@@ -27,6 +27,8 @@ import { startOpenAiRun } from './run-openai.js';
 import { sendJson } from './http-util.js';
 import { normalizeMode, str } from './input.js';
 import { withJsonBody } from './body.js';
+import { logger } from '../../shared/logger.js';
+import { compactSession } from '../../integrations/claude.js';
 
 /**
  * 记一条用户输入原始日志（记忆库数据采集层，见 store/user-log.js）。
@@ -266,4 +268,31 @@ export function handleRunAttach(url, res) {
     });
     res.end();
   }
+}
+
+// ==== POST /api/conversation/compact ====
+/**
+ * 触发上下文压缩（Context Compact）。
+ * 通过 Claude CLI 子进程对指定 session 发送 /compact 指令。
+ * 返回 { success, newSessionId, inputTokensBefore, inputTokensAfter }。
+ */
+export function handleConvCompact(req, res) {
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+  return withJsonBody(req, res, async (data) => {
+    const convId = str(data.convId);
+    const currentSessionId = str(data.currentSessionId);
+
+    if (!convId || !currentSessionId) {
+      sendJson(res, 400, { success: false, error: 'Missing convId or currentSessionId' });
+      return;
+    }
+
+    try {
+      const result = await compactSession(currentSessionId);
+      sendJson(res, 200, { success: true, ...result });
+    } catch (err) {
+      logger.error('web', 'compact 接口异常', { convId, error: err.message });
+      sendJson(res, 500, { success: false, error: err.message });
+    }
+  });
 }

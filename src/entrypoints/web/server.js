@@ -18,6 +18,7 @@ import { recoverPendingAndOrphans } from './run-claude.js';
 import { startRequirementPump } from './requirement-ops.js';
 import { startAutoDevPump } from '../../plugins/team-tools/auto-dev/index.js';
 import { startMemoryBankTicker } from '../../features/memory-bank/index.js';
+import { startProjectMapIdleTicker } from './project-map-ops.js';
 import {
   handleRunStart,
   handleRunAbort,
@@ -29,6 +30,7 @@ import {
   handleRunPending,
   handleRunPendingDismiss,
   handleRunAttach,
+  handleConvCompact,
 } from './routes-run.js';
 import {
   handleSettings,
@@ -67,6 +69,7 @@ import {
 import { handleRequirementRoutes } from './routes-requirements.js';
 import { handleMemoryRoutes } from './routes-memory.js';
 import { handleOptimizeRoutes } from './routes-optimize.js';
+import { healAllBusyOnStartup } from './optimize-ops.js';
 import { handleProjectMapRoutes } from './routes-project-map.js';
 import { handleConvNotifyRoutes } from './routes-conv-notify.js';
 import { startConvNotify } from './conv-notify.js';
@@ -132,6 +135,7 @@ const ROUTES = [
   { path: '/api/run/pending', h: (req, res) => handleRunPending(res) },
   { path: '/api/run/pending/dismiss', h: (req, res) => handleRunPendingDismiss(req, res) },
   { path: '/api/run', h: (req, res, url) => handleRunAttach(url, res) },
+  { path: '/api/conversation/compact', method: 'POST', h: (req, res) => handleConvCompact(req, res) },
   { path: '/api/history', h: (req, res, url) => handleHistory(url, res) },
   // 前缀必须排在上面的精确匹配之后
   { prefix: '/api/history/', h: (req, res, url) => handleHistoryDetail(url, res) },
@@ -267,11 +271,16 @@ export const ready = new Promise((resolve) => {
     pruneUploads(); // 清理旧上传副本
     setInterval(pruneUploads, 24 * 60 * 60 * 1000); // pm2 常驻数周不重启，仅启动清一次会积压
     recoverPendingAndOrphans(); // 孤儿恢复 + 待续跑重排（逻辑见 run-claude.js）
+    // 体检/优化的占用记录落盘、job 注册表在内存：新进程必然没有在跑的任务，
+    // 盘上残留的都是上次进程的尸体。不清的话用户点体检只会反复看到
+    // 「该项目正在体检或优化中」，要等一小时才自然解开（见 optimize-ops.js 的详细说明）
+    healAllBusyOnStartup();
     scheduleAllSwitchBacks(); // 恢复 token switch-back 排程（跨重启）
     startAutoDevPump(); // 自动开发泵：仅 web 进程执行（feishu 只标记状态），含中断任务恢复
     startRequirementPump(); // 需求工作流串行闸泵：docgen/系统任务出队 + busy 崩溃恢复
     startConvNotify(); // 会话飞书通知：注册 run 终结监听器
     startMemoryBankTicker({ cwd: process.cwd() }); // 记忆库 10 分钟 tick：窗口内才真跑提炼
+    startProjectMapIdleTicker(); // 项目地图闲时刷新 10 分钟 tick：凌晨窗口且用户开启才真跑
     resolve();
   });
 });
