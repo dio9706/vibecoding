@@ -39,24 +39,38 @@ const { isPoolExhausted } = await import('../capabilities/token-rotation.js');
 const { matchStrongIntent } = await import('./intent-keywords.js');
 const { REGISTRY } = await import('../shared/messages.js');
 
-test('welcome 引导文案里的「例:」必须真能被 L1 强前缀识别（防文案教用户说一句识别不了的话）', () => {
+test('welcome 引导文案里的「例:」必须真能触发对应功能（防文案教用户说一句识别不了的话）', () => {
   // 文案与词表是两个文件，很容易各自演进。典型坑：把「提个bug」排版成「提个 bug」——
   // 词表是无空格字面量，加空格后掉出 L1，用户照着说反而又收到这条兜底文案。
+  //
+  // 示例分两类，走的是**两套**触发机制，不能一把尺子量：
+  //   1. 前三条走本模块 L1 强前缀（matchStrongIntent）。
+  //   2. 第四条走插件 tracking-stats 的前缀 match，与 L1 词表无关 ——
+  //      它是插件型 feature、不走 action-configs，不写进 welcome 用户就永远发现不了。
+  //      这里只能校验「前缀在句首且正文非空」，真正的触发契约由该插件自己的单测守。
   const examples = REGISTRY.welcome.defaultText
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => /^例[:：]/.test(l))
     .map((l) => l.replace(/^例[:：]\s*/, ''));
-  assert.equal(examples.length, 3, '引导文案应有需求/故障/问询三条示例');
+  assert.equal(examples.length, 4, '引导文案应有需求/故障/问询/埋点四条示例');
+
+  const [strongExamples, pluginExample] = [examples.slice(0, 3), examples[3]];
   assert.deepEqual(
-    examples.map((e) => matchStrongIntent(e)?.type ?? null),
+    strongExamples.map((e) => matchStrongIntent(e)?.type ?? null),
     ['feature', 'bug', 'question'],
-    '三条示例须分别命中 feature / bug / question 强前缀',
+    '前三条示例须分别命中 feature / bug / question 强前缀',
   );
-  for (const e of examples) {
+  for (const e of strongExamples) {
     // 只命中前缀却把正文一起吃掉，同样是坏示例（feedback 会当成「只发了前缀」去追问）
     assert.ok(matchStrongIntent(e).body.length >= 5, `示例正文被前缀吃掉：${e}`);
   }
+
+  assert.ok(pluginExample.startsWith('帮我统计埋点'), `埋点示例的前缀必须在句首：${pluginExample}`);
+  assert.ok(
+    pluginExample.replace(/^帮我统计埋点[:：]?\s*/, '').length >= 5,
+    `埋点示例缺正文，用户照抄会触发追问：${pluginExample}`,
+  );
 });
 
 test('isChitchat：常见问候/寒暄/纯表情标点 → true（走免 LLM 快路）', () => {

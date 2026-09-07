@@ -22,6 +22,17 @@ const TICK_MS = 10 * 60 * 1000;
 
 let _timer = null;
 let _running = false;
+let _shouldStop = false;
+
+/** 请求中止当前 runOnce 循环（处理完当前会话后停止） */
+export function stopOnce() {
+  _shouldStop = true;
+}
+
+/** 当前是否正在提炼中 */
+export function isRunning() {
+  return _running;
+}
 
 /**
  * 渲染并落盘两个 scope 的 Markdown，同时挂接对应 CLAUDE.md。
@@ -79,24 +90,28 @@ export async function runOnce(opts = {}) {
     return { analyzed: 0, newMemories: null, skipped: 'already-running' };
   }
   _running = true;
+  _shouldStop = false;
   try {
-    const { _runner, model, now = Date.now() } = opts;
+    const { _runner, model } = opts;
     const settings = getMemoryBankSettings();
 
     // ── Phase 1: 扫描 + 逐会话分析 ──────────────────────────────────────────
     let bank = readBank();
-    const allUnanalyzed = scanForUnanalyzedSessions(bank);
-    // 每轮最多处理 30 个，避免单次 LLM 调用量过大（每会话一次 LLM，30 个约 3-15 分钟）
-    const MAX_PER_RUN = 30;
-    const unanalyzed = allUnanalyzed.slice(0, MAX_PER_RUN);
+    const unanalyzed = scanForUnanalyzedSessions(bank);
 
     let analyzedCount = 0;
     for (const { path: sessionPath, mtime } of unanalyzed) {
+      // 每次循环开始检查暂停信号
+      if (_shouldStop) {
+        _shouldStop = false;
+        logger.info('memory-bank', '收到暂停信号，提前终止 Phase 1');
+        break;
+      }
+
       let content;
       try {
         content = fs.readFileSync(sessionPath, 'utf8');
       } catch {
-        // 读文件失败（被删除/无权限）——跳过，不报错
         continue;
       }
 
@@ -121,14 +136,15 @@ export async function runOnce(opts = {}) {
         continue;
       }
 
-      // findings 为 [] 或 [...]：成功，写入结果并标记 analyzed
+      // findings 为 [] 或 [...]：用当前时刻作为 analyzedAt（避免长批次中 mtime > 批次起始时间导致下轮误判为待分析）
+      const analyzedAt = Date.now();
       const freshBank = readBank();
       const existing = freshBank.sessions.find((s) => s.path === sessionPath);
       if (existing) {
-        patchSession(existing.id, { mtime, analyzedAt: now, findings, status: 'analyzed' });
+        patchSession(existing.id, { mtime, analyzedAt, findings, status: 'analyzed' });
       } else {
         const id = `ses_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-        addSession({ id, path: sessionPath, mtime, analyzedAt: now, findings, status: 'analyzed' });
+        addSession({ id, path: sessionPath, mtime, analyzedAt, findings, status: 'analyzed' });
       }
       analyzedCount++;
     }
@@ -193,7 +209,10 @@ export function startMemoryBankTicker({ cwd = process.cwd() } = {}) {
         // providerId 走默认值 DEFAULT_PROVIDER_ID('claude-agent')：提炼最终经
         // runClassifierOnce → claudeAuthOpts() → getActiveToken() 也是这个默认 provider，两边必须一致。
       });
-      if (!decision.run) return;
+      if (!decision.run) {
+        logger.info('memory-bank', 'tick 跳过', { reason: decision.reason, window: decision.window });
+        return;
+      }
       logger.info('memory-bank', '进入提炼窗口', { window: decision.window });
       await runOnce({ now });
     } catch (e) {

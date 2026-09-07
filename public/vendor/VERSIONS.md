@@ -8,5 +8,6 @@
 | `purify.min.js` | dompurify | 3.4.14 | `dist/purify.min.js` |
 | `marked.umd.js` | marked | 18.0.11 | `lib/marked.umd.js` |
 | `anime.umd.min.js` | animejs | 4.5.0 | `dist/bundles/anime.umd.min.js` |
+| `cobe.esm.js` | cobe | 2.0.1 | `dist/index.esm.js` |
 
 引用位置：`public/index.html`（script 标签）、`public/js/util.render.test.js`（渲染测试直接加载）。

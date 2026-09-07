@@ -1,74 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { extractExports, extractImports } from '../../src/features/project-map/collect-facts.logic.js'
 
-test('extractExports: 识别 export default function', () => {
-  const code = `
-    export default function login(user) {
-      return { token: 'abc' }
-    }
-    export const logout = () => {}
-  `
-  const result = extractExports(code, 'src/auth/index.ts')
-  assert.deepEqual(result, ['login', 'logout'])
-})
-
-test('extractExports: 识别 export class', () => {
-  const code = `
-    export class AuthService {
-      verify() {}
-    }
-    export { login } from './service'
-  `
-  const result = extractExports(code, 'src/auth/index.ts')
-  assert.deepEqual(result, ['AuthService', 'login'])
-})
-
-test('extractExports: 忽略内部函数', () => {
-  const code = `
-    function privateFunc() {}
-    export const publicFunc = () => {}
-  `
-  const result = extractExports(code, 'src/auth/index.ts')
-  assert.deepEqual(result, ['publicFunc'])
-})
-
-test('extractExports: 处理 re-export', () => {
-  const code = `export { a, b, c } from './other'`
-  const result = extractExports(code, 'src/auth/index.ts')
-  assert.deepEqual(result, ['a', 'b', 'c'])
-})
-
-test('extractImports: 识别 ES6 import', () => {
-  const code = `
-    import { login } from '../auth'
-    import UserModel from '../user'
-    import * as utils from 'lodash'
-  `
-  const result = extractImports(code)
-  assert(result.includes('../auth'))
-  assert(result.includes('../user'))
-  assert(result.includes('lodash'))
-})
-
-test('extractImports: 识别 CommonJS require', () => {
-  const code = `
-    const { login } = require('../auth')
-    const UserModel = require('../user')
-  `
-  const result = extractImports(code)
-  assert(result.includes('../auth'))
-  assert(result.includes('../user'))
-})
-
-test('extractImports: 去重导入', () => {
-  const code = `
-    import { login } from '../auth'
-    import { logout } from '../auth'
-  `
-  const result = extractImports(code)
-  assert.deepEqual(result, ['../auth'])
-})
+/**
+ * 项目地图的扫描与持久化回归。
+ *
+ * 原先这里还有一批 extractExports / extractImports 的单测，测的是 project-map 自己那份
+ * 抽取器。该实现已删除、改为复用 project-checkup/evidence 下的版本（旧版实测漏抽全部
+ * export async function、不认动态 import、且会把注释里的 export 当真代码），
+ * 对应的单测也随宿主一起迁走 —— 抽取器的行为由 symbols.logic.test.js /
+ * selectors-project.logic.test.js 钉住，不该在这里再维护第二份口径。
+ */
 
 test('collectProjectFacts: 识别 src/features/* 作为模块', async () => {
   const { collectProjectFacts } = await import('../../src/features/project-map/collect-facts.js')
@@ -93,17 +34,22 @@ test('collectProjectFacts: 检测模块间依赖关系', async () => {
 
   const result = await collectProjectFacts(projectPath)
 
-  // auth 导入 user，所以 auth.dependsOn 包含 'user'
-  const authModule = result.modules.find(m => m.name === 'auth')
-  assert(authModule.dependsOn.includes('user'), `Expected auth.dependsOn to include 'user', got ${JSON.stringify(authModule.dependsOn)}`)
+  // dependsOn / usedBy / edges 的端点一律是模块 id，而 id 是相对路径不是目录名：
+  // 模块可以嵌套（src/features 与 src/features/auth 并存），拿目录名当键会撞车。
+  const AUTH = 'src/features/auth'
+  const USER = 'src/features/user'
+
+  // auth 导入 user
+  const authModule = result.modules.find(m => m.id === AUTH)
+  assert(authModule.dependsOn.includes(USER), `Expected auth.dependsOn to include '${USER}', got ${JSON.stringify(authModule.dependsOn)}`)
 
   // user 不导入 auth
-  const userModule = result.modules.find(m => m.name === 'user')
-  assert(!userModule.dependsOn.includes('auth'), `Expected user.dependsOn NOT to include 'auth', got ${JSON.stringify(userModule.dependsOn)}`)
+  const userModule = result.modules.find(m => m.id === USER)
+  assert(!userModule.dependsOn.includes(AUTH), `Expected user.dependsOn NOT to include '${AUTH}', got ${JSON.stringify(userModule.dependsOn)}`)
 
   // 验证 edges：应该有一条 auth -> user 的边
-  const authToUserEdge = result.edges.find(e => e.from === 'auth' && e.to === 'user')
-  assert(authToUserEdge, `Expected edge from 'auth' to 'user', got edges: ${JSON.stringify(result.edges)}`)
+  const authToUserEdge = result.edges.find(e => e.from === AUTH && e.to === USER)
+  assert(authToUserEdge, `Expected edge from '${AUTH}' to '${USER}', got edges: ${JSON.stringify(result.edges)}`)
 })
 
 test('persist: 保存和加载地图 - round-trip 测试', async () => {

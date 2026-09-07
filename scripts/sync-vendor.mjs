@@ -43,6 +43,7 @@ const MANIFEST = [
   { pkg: 'dompurify', from: 'dist/purify.min.js', to: 'purify.min.js' },
   { pkg: 'marked', from: 'lib/marked.umd.js', to: 'marked.umd.js' },
   { pkg: 'animejs', from: 'dist/bundles/anime.umd.min.js', to: 'anime.umd.min.js' },
+  { pkg: 'cobe', from: 'dist/index.esm.js', to: 'cobe.esm.js' },
 ];
 
 /** vendor 根目录下允许存在的文件；多出来的会被告警（大概率是升级后的孤儿副本） */

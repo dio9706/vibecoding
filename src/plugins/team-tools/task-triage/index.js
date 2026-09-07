@@ -12,7 +12,7 @@ import { develop, analyze } from '../task-ops.js';
 import { groupPending, sortForTriage, parseAction, parseYesNo } from './logic.js';
 import { logger } from '../../../shared/logger.js';
 import { getActiveBot } from '../../../store/settings.js';
-import { requestAutoDevelop, isOverrideStart } from '../auto-dev/index.js';
+import { requestAutoDevelop, isOverrideStart } from '../auto-dev/queue.js';
 import { recordOverride } from '../review/index.js';
 
 // openId → 会话

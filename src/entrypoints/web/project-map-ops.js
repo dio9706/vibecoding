@@ -8,11 +8,14 @@
  * 给 Claude 对话设计的，地图生成一条都用不上）。
  */
 import fs from 'node:fs';
+import path from 'node:path';
 import crypto from 'node:crypto';
 import { sendTo } from '../../store/runs.js';
 import { logger } from '../../shared/logger.js';
 import { generateProjectMap } from '../../features/project-map/gen-map.js';
-import { saveProjectMap, loadProjectMap } from '../../features/project-map/persist.js';
+import { saveProjectMap, loadProjectMap, listProjectMaps } from '../../features/project-map/persist.js';
+import { shouldIdleRefresh } from '../../features/project-map/idle-schedule.logic.js';
+import { getUiPrefs } from '../../store/settings.js';
 import { runClassifierOnce } from '../../capabilities/llm-classify.js';
 
 const jobs = new Map(); // jobId -> job
@@ -38,7 +41,10 @@ function assertValidProjectDir(dir) {
  * 同一个项目只要前端传法不变，id 就稳定。
  */
 export function safeProjectId(dir) {
-  const raw = String(dir);
+  // 先归一化再算：同一个目录写成 `C:\a\b`、`C:/a/b`、`C:\a\b\` 三种形态时，
+  // 直接哈希原串会得到三个不同 id —— 存的时候用一种、取的时候用另一种，
+  // 地图就"凭空消失"、前端退回「未生成」。path.resolve 统一分隔符并去掉尾部斜杠。
+  const raw = path.resolve(String(dir));
   const base = raw.replace(/[^a-zA-Z0-9]/g, '_').slice(-80); // 取尾部：盘符前缀同质化严重，尾部差异度更高
   const hash = crypto.createHash('sha1').update(raw).digest('hex').slice(0, 8);
   return `${base}_${hash}`;
@@ -134,10 +140,14 @@ export function startMapGen(dir) {
 /** 生成主流程：跑完整链路 → 落盘 → 收尾。LLM 补语义失败时 generateProjectMap 内部已自行降级，不会走到这里的 catch */
 async function runMapGen(job) {
   try {
+    // 带上已落盘的旧地图：指纹没变的模块直接复用描述，只有改动过的才送 LLM。
+    // 读失败不算错——顶多退化成一次全量生成，不该因此让整次生成失败。
+    const previous = await loadProjectMap(job.projectId).catch(() => null);
     const mapData = await generateProjectMap({
       projectId: job.projectId,
       projectPath: job.dir,
       logTag: 'project-map',
+      previous,
       onProgress: ({ stage, detail }) => pushEvent(job, 'step', { stage, detail }),
     });
     await saveProjectMap(job.projectId, mapData);
@@ -213,4 +223,81 @@ function gc() {
     done.sort((a, b) => a.updatedAt - b.updatedAt);
     for (const job of done.slice(0, done.length - MAX_DONE)) jobs.delete(job.id);
   }
+}
+
+// ==================== 闲时刷新 ====================
+
+/** tick 间隔。窗口 30 分钟远宽于此，保证一定能醒在窗口里 */
+const IDLE_TICK_MS = 10 * 60 * 1000;
+let idleTimer = null;
+/** 上轮闲时刷新完成的时间戳。只存内存：重启后至多多跑一轮，代价是一次几乎零成本的空转 */
+let lastIdleRunAt = null;
+
+/**
+ * 跑一轮闲时刷新：给每个已生成过地图的项目重新生成一次。
+ *
+ * 之所以敢「全都刷一遍」，是因为生成已经增量化了——指纹没变的模块直接复用旧描述，
+ * 一个没改动过的项目整轮下来一次 LLM 都不发，只花几百毫秒扫盘。
+ * 真正的开销只落在确实改动过的模块上，这正是我们想要的。
+ *
+ * 逐个项目串行：并发刷新会同时开多个只读 agent 抢额度，而闲时刷新本就不赶时间。
+ */
+export async function runIdleRefresh() {
+  const maps = await listProjectMaps();
+  logger.info('project-map', '闲时刷新开始', { projects: maps.length });
+
+  let refreshed = 0;
+  let skipped = 0;
+  for (const { projectId, projectPath } of maps) {
+    // 地图里没存路径（老版本生成的）就没法重扫，只能等用户手动重新生成一次补上
+    if (!projectPath) { skipped += 1; continue; }
+    // 项目目录已被删除/移走：留着旧地图不动，用户下次打开能看到最后一次的结果
+    if (!fs.existsSync(projectPath)) { skipped += 1; continue; }
+    // 有人正在手动生成同一个项目，让路——串行闸本就不允许并发
+    if (busyByProject.has(projectId)) { skipped += 1; continue; }
+
+    try {
+      const previous = await loadProjectMap(projectId).catch(() => null);
+      const mapData = await generateProjectMap({
+        projectId,
+        projectPath,
+        logTag: 'project-map/idle',
+        previous,
+      });
+      await saveProjectMap(projectId, mapData);
+      refreshed += 1;
+    } catch (e) {
+      // 单个项目失败不能中断整批：后面的项目还等着刷
+      logger.warn('project-map', '闲时刷新单项失败', { projectId, err: e?.message || String(e) });
+    }
+  }
+
+  lastIdleRunAt = Date.now();
+  logger.info('project-map', '闲时刷新结束', { refreshed, skipped });
+  return { refreshed, skipped };
+}
+
+/**
+ * 启动闲时刷新 ticker。web 入口启动时调用一次。
+ *
+ * 整个 tick 体兜异常：设置文件被写坏之类的问题不能变成 unhandledRejection 打死常驻进程——
+ * 地图刷新是锦上添花的功能，绝不该拖垮执行台（同 memory-bank ticker 的取舍）。
+ */
+export function startProjectMapIdleTicker() {
+  if (idleTimer) clearInterval(idleTimer); // 幂等：重复调用不叠加定时器
+  idleTimer = setInterval(async () => {
+    try {
+      const decision = shouldIdleRefresh({
+        now: Date.now(),
+        enabled: !!getUiPrefs().projectMapIdleRefresh,
+        lastRunAt: lastIdleRunAt,
+      });
+      if (!decision.run) return;
+      logger.info('project-map', '进入闲时刷新窗口', { localHour: new Date().getHours() });
+      await runIdleRefresh();
+    } catch (e) {
+      logger.warn('project-map', '闲时刷新 tick 异常', { err: e?.message || String(e) });
+    }
+  }, IDLE_TICK_MS);
+  idleTimer.unref?.(); // 别因为这个定时器把进程钉住不退出
 }

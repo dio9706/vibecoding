@@ -5,8 +5,8 @@
 ## 文件清单
 
 - `dispatch.js` — 路由核心。把统一 Context 分发到某个 feature；并提供异常兜底包装 `dispatchSafely`。导出 `dispatch` / `dispatchSafely`。**本模块唯一入口**。
-- `intent.js` — 意图识别。收缩为四类显式意图（bug/feature/question/action，另加 material/other），逐层短路。导出 `classify` / `isChitchat` / `extractEnv` / `INTENT_CLASSIFY_TIMEOUT_MS`。
-- `intent-keywords.js` — 强意图前缀词表（纯函数，零 LLM 成本的快路）。导出 `matchStrongIntent`。仅被 `intent.js` 调用。
+- `intent.js` — 意图识别。收缩为四类显式意图（bug/feature/question/action，另加 material/other），逐层短路。导出 `classify` / `isChitchat` / `INTENT_CLASSIFY_TIMEOUT_MS`。（曾有个 `extractEnv`，全仓无调用方且只认 dev/test 不认 prod，2026-09-04 随变量契约改造删除 —— 环境识别现在完全由 `plugins/action-runner/feature/` 的变量声明驱动。）
+- `intent-keywords.js` — 强意图前缀词表（纯函数，零 LLM 成本的快路）。导出 `matchStrongIntent`。**零依赖叶子，可被下层 import**（现由 `intent.js` 与 `features/claude-exec/logic.js` 共用，理由同 `signals.js`，见下文 §C）。
 - `signals.js` — dispatch 分发信号量，仅导出 `PASS`（一个 Symbol）。**叶子模块，禁止 import 任何东西**（打破 ESM 循环，见下文）。
 - `dispatch.test.js` / `intent.test.js` / `intent-keywords.test.js` — 对应单测。
 
@@ -37,9 +37,22 @@
 
 控制流：`intent.js` → `intent-keywords.js`（`matchStrongIntent`）、`../capabilities/llm-classify.js`（`runClassifierOnce`）、`../shared/config.js`（`config.intent.classifyModel`），并动态 import `../store/action-configs.js` / `../store/settings.js`。
 
-### C. 为什么 `PASS` 单独成文件
+### C. 为什么 `PASS` 单独成文件 —— 以及本模块的两个「零依赖叶子」
 
 `PASS` 需被 `dispatch.js` 与各 plugin 的 feature 同时引用，而 `dispatch.js → features/index.js → plugins/… → feature` 本就是一条 import 链。若把 `PASS` 定义在 `dispatch.js`，feature 反向 import 会成环；而 `features/index.js` 带**顶层 await**，ESM 循环 + 顶层 await 会死锁在模块图上。故 `signals.js` 必须保持零依赖的叶子。
+
+**`intent-keywords.js` 是同一形状的第二个叶子。** 它被 `features/claude-exec/logic.js` 反向 import
+（`shouldOwnerExec` 要用同一套强前缀词表判断「提交需求 / 提交故障」该让路给 feedback）。
+按根 `CLAUDE.md` 的通则「下层不得 import 上层」这是一条违规，但它是**刻意允许的例外**，理由与 `PASS` 完全一致：
+
+- 词表必须**只有一份**。让 features 自己抄一份，两处词表迟早分叉——而分叉的后果是
+  同一句「提交需求：xxx」在 intent 层被识别、在 claude-exec 的让路判断里没被识别，
+  消息被 owner 全接吞掉，用户看不到任何评审流程。
+- 它零依赖，**不可能成环**（这也是环检测器实测确认过的：全仓 import 环为 0）。
+
+所以这两个文件的纪律是硬性的：**`signals.js` 与 `intent-keywords.js` 禁止 import 任何东西**。
+一旦其中任何一个开始 import（哪怕只是 `logger`），下层对它的 import 就立刻变成真实的反向依赖，
+上面那条例外的前提也就不成立了。
 
 ## 常见改动入口
 

@@ -13,7 +13,7 @@ import { systemNotify } from '../../../integrations/notify.js';
 import { analyze, attachMaterialToRecentTask } from '../task-ops.js';
 import { addMaterial, drainMaterials, saveTextMaterial, materialDetailLine } from '../material-pool.js';
 import { reviewTask, recordOverride } from '../review/index.js';
-import { requestAutoDevelop } from '../auto-dev/index.js';
+import { requestAutoDevelop } from '../auto-dev/queue.js';
 import { getActiveBot, getMyFeishuOpenId } from '../../../store/settings.js';
 import { logger } from '../../../shared/logger.js';
 import { config } from '../../../shared/config.js';

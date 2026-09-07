@@ -8,7 +8,7 @@ import { logger } from '../../shared/logger.js';
 import { readBank, updateBank, patchMemory, removeMemory } from '../../store/memory-bank.js';
 import { getMemoryBankSettings, setMemoryBankSettings } from '../../store/settings.js';
 import { selectForInjection, CATEGORY_LABEL } from '../../features/memory-bank/render.js';
-import { runOnce, writeRenders } from '../../features/memory-bank/index.js';
+import { runOnce, writeRenders, stopOnce, isRunning } from '../../features/memory-bank/index.js';
 import { scanForUnanalyzedSessions } from '../../features/memory-bank/scan-sessions.js';
 
 const CATEGORIES = Object.keys(CATEGORY_LABEL);
@@ -99,8 +99,9 @@ function handleSessions(res) {
     const sessions = bank.sessions
       .filter((s) => !s.mtime || s.mtime >= cutoff) // 过滤超过 30 天的
       .map((s) => {
-        let status = s.status; // 优先使用 bank 里的 status（如 analyzing）
-        if (status !== 'analyzing') {
+        // 若 bank 里是 analyzing 但当前没有提炼在跑（如重启后残留），降级为正常计算
+        let status = (s.status === 'analyzing' && isRunning()) ? 'analyzing' : null;
+        if (!status) {
           if (!s.analyzedAt || s.analyzedAt === 0) {
             status = 'pending';
           } else if (s.mtime > s.analyzedAt) {
@@ -165,9 +166,18 @@ async function handleRemove(req, res) {
 
 /** POST /api/memory/extract：手动提炼。202 立即返回，前端轮询 list（对齐 handleBitable 的长任务范式） */
 function handleExtract(req, res) {
-  sendJson(res, 202, { ok: true });
-  runOnce({ cwd: process.cwd() }).catch((e) =>
-    logger.error('memory-routes', '手动提炼异常', { err: e?.message || String(e) }));
+  sendJson(res, 202, { ok: true, running: isRunning() });
+  if (!isRunning()) {
+    runOnce({ cwd: process.cwd() }).catch((e) =>
+      logger.error('memory-routes', '手动提炼异常', { err: e?.message || String(e) }));
+  }
+}
+
+/** POST /api/memory/stop：请求暂停当前提炼（处理完当前会话后停止） */
+function handleStop(req, res) {
+  if (!isRunning()) return sendJson(res, 200, { ok: true, stopped: false, reason: 'not-running' });
+  stopOnce();
+  sendJson(res, 200, { ok: true, stopped: true });
 }
 
 // ==== GET /api/memory/export?format=json|md ====
@@ -213,6 +223,7 @@ export function handleMemoryRoutes(req, res, url) {
   if (pathname === '/api/memory/ack' && method === 'POST') return handleAck(req, res);
   if (pathname === '/api/memory/remove' && method === 'POST') return handleRemove(req, res);
   if (pathname === '/api/memory/extract' && method === 'POST') return handleExtract(req, res);
+  if (pathname === '/api/memory/stop' && method === 'POST') return handleStop(req, res);
   if (pathname === '/api/memory/export' && method === 'GET') return handleExport(url, res);
   return sendJson(res, 404, { error: 'not found' });
 }

@@ -8,7 +8,7 @@
 |---|---|
 | `token-rotation.js` | 备用 Token 轮换引擎：纯函数状态机（`pickActive`/`reduceRateLimit`/`recoverExpired`）+ 有状态胶水（读写 settings、switch-back 定时器、切换通知）。active token 不落库，由 `pickActive` 实时算出「偏好最高的可用号」。 |
 | `token-rotation.test.js` | 纯函数状态机的单测。 |
-| `llm-classify.js` | 单轮**零工具** LLM 分类骨架，三个分类点共用；封装事故驱动的防卡死细节（额度 fail-fast、abort+race 双保险、禁全部工具、首个 JSON 块提取、失败归因）。 |
+| `llm-classify.js` | 单轮**零工具** LLM 分类骨架，各分类点共用；封装事故驱动的防卡死细节（额度 fail-fast、abort+race 双保险、禁全部工具、首个 JSON 块提取、失败归因），并统一 `DEFAULT_EFFORT='low'`（全部调用点都是浅层任务，逐点传会分叉）。 |
 | `llm-classify.test.js` | `extractFirstJsonObject`/`classifyOutcome` 等的单测。 |
 | `llm-readonly-agent.js` | 多轮**只读** LLM 骨架，用于必须实地读代码才能作答的任务（生成项目地图）；核心是三层只读防线。 |
 

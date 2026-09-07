@@ -277,82 +277,8 @@
           stopStreamScramble();
         }
 
-        // ---------- 5. 会话标题 cursor 扫描动画（参考 anime.js ScrambleText cursor）----------
-        // 效果：cursor 字符（'░▒▓█' 循环）从文字左端游动到右端，
-        //   左侧字符依次「落定」为真实文字，右侧字符持续乱码，扫一遍后短暂停再重复。
-        //
-        // 架构：全局单一 rAF ticker + 全局时钟相位（见下方 _scanTick）。
-        //   不用「每元素独立计时」的原因：conv-list 流式输出期间会被
-        //   renderConvListDebounced 每 200ms 整体重渲染（innerHTML=''），title-text 元素
-        //   被销毁重建；若动画从元素创建时刻计时，每次重建都把扫描位置重置到开头，
-        //   视觉上「只闪一下就没了」。改用全局时钟：相位只与 (now % period) 有关，
-        //   元素重建后新元素按当前相位继续渲染，视觉完全连续。
-        const _SCAN_CURSOR = '░▒▓█';   // frontier 光标使用的块字符序列
-
-        // 全局单一 rAF ticker + 全局时钟相位（解决 conv-list 重渲染打断动画的问题）
-        const _scanTargets = new Map(); // titleTextEl -> { base: 原始标题文字 }
-        let _scanRaf = null;
-        let _scanT0  = 0; // 全局时钟起点
-
-        function _scanTick(now) {
-          if (_scanT0 === 0) _scanT0 = now;
-          const elapsed = now - _scanT0;
-          for (const [el, info] of _scanTargets) {
-            if (!el.isConnected) { _scanTargets.delete(el); continue; } // 离 DOM 自动清理
-            const title = info.base;
-            const n = title.length;
-            if (!n) continue;
-            const scanMs  = Math.min(n * 116, 3750); // 扫描一遍时长（较原速快约 20%）
-            const pauseMs = 600;                      // 每遍之间停顿
-            const period  = scanMs + pauseMs;
-            const phase   = elapsed % period;
-            if (phase >= scanMs) {
-              if (el.textContent !== title) el.textContent = title; // 停顿阶段显示完整
-              continue;
-            }
-            const p   = phase / scanMs;
-            const pos = Math.floor(p * n);
-            const L   = _SCAN_CURSOR.length; // 光标拖尾长度（4）
-            let out = '';
-            for (let i = 0; i < n; i++) {
-              const ch = title[i];
-              const dist = pos - i; // 距 frontier 的距离（0 最亮，向左渐弱）
-              if (dist >= 0 && dist < L) {
-                // 4 格渐变光标拖尾：frontier(dist=0)=█，向左依次 ▓▒░
-                out += _SCAN_CURSOR[L - 1 - dist];
-              } else {
-                out += ch;              // 其余全部真实文字
-              }
-            }
-            el.textContent = out;
-          }
-          if (_scanTargets.size > 0) {
-            _scanRaf = requestAnimationFrame(_scanTick);
-          } else {
-            _scanRaf = null;
-            _scanT0  = 0;
-          }
-        }
-
-        /** 为 titleText 元素启动扫描 cursor 动画（running 时调用） */
-        function startCursorLoop(titleTextEl) {
-          if (!titleTextEl || _scanTargets.has(titleTextEl)) return;
-          _scanTargets.set(titleTextEl, { base: titleTextEl.textContent });
-          if (!_scanRaf) {
-            _scanT0  = 0;
-            _scanRaf = requestAnimationFrame(_scanTick);
-          }
-        }
-
-        /** 停止扫描并恢复原始文字（运行结束时调用） */
-        function stopCursorLoop(titleTextEl) {
-          if (!titleTextEl) return;
-          const info = _scanTargets.get(titleTextEl);
-          if (info) {
-            titleTextEl.textContent = info.base; // 恢复原文
-            _scanTargets.delete(titleTextEl);
-          }
-        }
+        // 会话标题的 cursor 扫描动画已移除：运行状态改由 .conv-item.running 的扫光边框表达，
+        // 标题保持静态可读（原实现会把 textContent 替换成块字符，长标题时读不出内容）。
 
         return {
           playVibeAnimation,
@@ -364,7 +290,5 @@
           setMascotState,
           showMascotStatus,
           hideMascotStatus,
-          startCursorLoop,
-          stopCursorLoop,
         };
       })();

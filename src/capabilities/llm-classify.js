@@ -12,6 +12,37 @@ import { logger } from '../shared/logger.js';
 export const CLASSIFY_TIMEOUT_MS = 30_000;
 
 /**
+ * 本骨架全部调用点的默认思考档位。
+ *
+ * 为什么设默认而不是逐点传：这里的调用**全是浅层任务** —— 6 选 1 分类（intent）、
+ * 闭集/正则抽取（slot-filler）、动作消歧（task-triage）、表格字段映射（bug-patrol）、
+ * 抽条目成 JSON（memory-bank）、打分归类（project-checkup）。没有一个需要思考预算，
+ * 而 `runClaude` 早已透传 `effort`（claude.js 的 query options），此前从没人设过它。
+ * 只给其中一个调用点加会留下「同样是一行 JSON 的调用，有的设了有的没设」的不一致，
+ * 下一个人加调用点时无从判断该不该设。
+ *
+ * 覆盖方式：调用点传 `effort: '<档位>'` 覆盖；传 `effort: null` 显式退回 SDK 默认
+ *（不向 runClaude 传该键）。
+ *
+ * ⚠️ 它砍的是生成阶段的思考 token，**砍不掉 SDK 冷启**（实测：一次鉴权即失败的调用，
+ * init 仍耗 2.7~3.7s）。想省掉整次调用请在调用方做本地快路，而不是指望这个旋钮。
+ */
+export const DEFAULT_EFFORT = 'low';
+
+/**
+ * 纯函数：把调用点传的 `effort` 归结为「最终传给 runClaude 的值」。
+ *
+ * 三态刻意区分（`undefined` ≠ `null`）：
+ *   undefined（没传）→ DEFAULT_EFFORT
+ *   null（显式关闭）  → null，调用方据此**不传**该键给 runClaude，退回 SDK 默认
+ *   具体档位          → 原样透传
+ * 抽成纯函数是为了可测：本模块其余部分全是 SDK 调用，没法直测。
+ */
+export function resolveEffort(effort) {
+  return effort === undefined ? DEFAULT_EFFORT : effort || null;
+}
+
+/**
  * 从模型回复里截出第一个完整的 JSON 对象（含嵌套），截不出返回 null。
  *
  * 为什么不能用正则：旧实现是 `out.match(/\{[\s\S]*?\}/)`，非贪婪匹配从第一个 `{` 停在
@@ -31,32 +62,95 @@ export const CLASSIFY_TIMEOUT_MS = 30_000;
  * @param {unknown} text 模型原始输出
  * @returns {string|null} 第一个完整 JSON 对象的原文；找不到 `{` 或扫到结尾仍未配平 → null
  */
-export function extractFirstJsonObject(text) {
+/**
+ * 从一段文本里扫出**全部**顶层配平的 JSON 对象块（按出现顺序）。
+ *
+ * ## 为什么需要「全部」而不只是第一个
+ *
+ * 单轮零工具的分类调用里，模型只说一句话、只吐一个对象，取第一个就够了。
+ * 但**多轮工具调用**的 agent 会边探索边叙述：它可能引用一段带花括号的代码、
+ * 写一个中间结果对象、或者复述部分 JSON。这些都出现在最终答案之前。
+ *
+ * 实测事故（2026-09-03 整体评估）：`reason` 是 `null`——那意味着**解析成功了**
+ * ——但 `validatePlan` 不认。也就是抓到了一个真的 JSON 对象，只不过不是计划本体，
+ * 而是模型在中途输出的另一个对象。整维度白跑 6.3 分钟。
+ *
+ * 有了全部块，调用方就能按「必须含某个键」去挑正确的那一个（见 pickJsonObject）。
+ */
+export function extractJsonObjects(text) {
   const s = typeof text === 'string' ? text : '';
-  const start = s.indexOf('{');
-  if (start < 0) return null;
+  const out = [];
 
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < s.length; i++) {
-    const ch = s[i];
-    if (inString) {
-      // 转义只影响紧随其后的一个字符，处理完立刻复位（否则 `\\"` 这种「转义反斜杠 + 真引号」会判错）
-      if (escaped) escaped = false;
-      else if (ch === '\\') escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
+  let i = 0;
+  while (i < s.length) {
+    const start = s.indexOf('{', i);
+    if (start < 0) break;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+
+    for (let j = start; j < s.length; j += 1) {
+      const ch = s[j];
+      if (inString) {
+        // 转义只影响紧随其后的一个字符，处理完立刻复位（否则 `\\"` 这种「转义反斜杠 + 真引号」会判错）
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === '{') depth += 1;
+      else if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) { end = j; break; }
+      }
     }
-    if (ch === '"') inString = true;
-    else if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) return s.slice(start, i + 1);
-    }
+
+    if (end < 0) break; // 剩下的都配不平（被截断），后面不会再有完整块
+    out.push(s.slice(start, end + 1));
+    i = end + 1;
   }
-  // 扫到结尾还没配平 = 回复被截断，宁可返回 null 也不交一段残缺 JSON 给下游
-  return null;
+
+  return out;
+}
+
+/**
+ * 首个配平的 JSON 对象块。
+ *
+ * **行为一字未变**（单轮分类点的既有校准依赖它）：扫到结尾还没配平就返回 null，
+ * 宁可什么都不给也不交一段残缺 JSON 给下游。
+ * 多轮工具调用的场景请用 `pickJsonObject` 并传 `requireKeys`。
+ */
+export function extractFirstJsonObject(text) {
+  return extractJsonObjects(text)[0] ?? null;
+}
+
+/**
+ * 按「必须含哪些键」挑出正确的那个 JSON 对象。
+ *
+ * 从**后往前**找：模型的最终答案总在最后，中途叙述里的对象在前面。
+ * 一个都匹配不上时退回最后一个能解析的对象——那仍然比「第一个」更可能是答案，
+ * 而且让调用方的校验层去判它对不对（校验失败会如实报出来，不会被当成成功）。
+ *
+ * @param {string} text
+ * @param {string[]} [requireKeys] 必须存在的顶层键
+ * @returns {object|null} 已解析的对象
+ */
+export function pickJsonObject(text, requireKeys = []) {
+  const blocks = extractJsonObjects(text);
+  let lastParsed = null;
+
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    let obj;
+    try { obj = JSON.parse(blocks[i]); } catch { continue; }
+    if (!obj || typeof obj !== 'object') continue;
+    if (!lastParsed) lastParsed = obj;
+    if (requireKeys.every((k) => k in obj)) return obj;
+  }
+
+  return lastParsed;
 }
 
 /**
@@ -102,7 +196,7 @@ export function classifyOutcome(o) {
  * @param {object} opts 同 runClassifierOnce
  * @returns {Promise<{data: object|null, reason: string|null}>}
  */
-export async function runClassifierDetailed({ prompt, systemPrompt, model, logTag, timeoutMs }) {
+export async function runClassifierDetailed({ prompt, systemPrompt, model, logTag, timeoutMs, effort }) {
   // 额度耗尽 fail-fast：曾发生五小时限流窗口内 SDK 流永不结束 → 不发起注定失败 / 会 stall 的分类调用
   if (isPoolExhausted(getTokens())) {
     logger.warn('llm-classify', 'token 池全部耗尽，跳过分类（fail-fast）', { logTag });
@@ -110,6 +204,7 @@ export async function runClassifierDetailed({ prompt, systemPrompt, model, logTa
   }
   // 意图分类点传 10s（用户在等第一条回复）；其余调用点不传，沿用 30s
   const budget = Number(timeoutMs) > 0 ? Number(timeoutMs) : CLASSIFY_TIMEOUT_MS;
+  const effortOpt = resolveEffort(effort);
   let out = '';
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), budget);
@@ -119,6 +214,7 @@ export async function runClassifierDetailed({ prompt, systemPrompt, model, logTa
     const call = runClaude(prompt, {
       ...claudeAuthOpts(), // 跟随备用账号轮换，别烧主账号额度
       ...(systemPrompt ? { systemPrompt } : {}),
+      ...(effortOpt ? { effort: effortOpt } : {}),
       persistSession: false, // 内部一次性调用，不落盘 session
       model,
       maxTurns: 1, // 分类只需一轮文本输出；即使模型试图调工具也就此收束
@@ -153,6 +249,7 @@ export async function runClassifierDetailed({ prompt, systemPrompt, model, logTa
  * @param {string} opts.model         分类模型
  * @param {string} opts.logTag        日志标识（如 'intent/feedback'）
  * @param {number} [opts.timeoutMs]   超时预算（默认 CLASSIFY_TIMEOUT_MS=30s；意图分类点传 10s）
+ * @param {string|null} [opts.effort] 思考档位（默认 DEFAULT_EFFORT='low'；传 null 显式关闭）
  * @returns {Promise<object|null>}    首个 JSON 对象或 null（失败原因见 runClassifierDetailed）
  */
 export async function runClassifierOnce(opts) {

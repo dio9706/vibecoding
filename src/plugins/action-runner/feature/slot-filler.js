@@ -1,144 +1,157 @@
 /**
- * 槽位填充 —— 从用户消息中提取动作所需变量值，识别缺失的必填变量。
- * 优先用 Claude（精准提取），失败/超时/额度耗尽降级到正则兜底（手机号 / env）。
+ * 槽位填充 —— 编排层。真正的抽取逻辑在三个纯函数模块里：
+ *   var-contract.js  变量声明 → 有效契约（展开 preset）
+ *   local-extract.js 本地确定性抽取（词表 / 正则 + 弃权规则）
+ *   extract-prompt.js LLM 提示词生成
  *
- * 抽取完一律过 normalizeVars 归一（当前只有 env 有归一规则）。事故背景：
- * 用户说「体验版」时机器人识别不到，只有说「test」才稳 —— 两条路径都不认中文：
- *   1) 正则兜底只有 /\b(dev|test)\b/：中文别名与 prod 全漏 → 判字段缺失 → 追问；
- *   2) Claude 抽取提示词没给候选值，抽出的是中文原值（action-log.jsonl 有实证
- *      {"env":"正式版"}），而 reset_onboarding.py / refund_orders.py 是
- *      argparse choices=["dev","test"]，中文进去直接退出 2。
- * 归一层放在 Node 侧而不是各脚本里：脚本是用户可自己加的，不能要求每个脚本都自带别名表。
+ * 本文件只负责串起来：本地抽 → 还缺必填吗 → 缺才调一次 LLM → 合并归一。
+ *
+ * ## 为什么这么拆（2026-09-04 改造）
+ *
+ * 旧实现把抽取规则按**变量名**写死在三处：`NORMALIZERS = { env: normalizeEnv }`、
+ * `regexExtract` 里的 `phone`/`env` 字面量、提示词里的 `hasEnv` 分支。用户新加一个动作、
+ * 变量叫 `region` 或 `订单号`，三处一处都不生效 —— 抽不到、归一不了、模型也不知道合法值，
+ * 表现为「机器人老是追问」，而用户无从察觉原因。
+ *
+ * ## 顺带解决的延迟
+ *
+ * 旧实现**每次**都调一次 LLM 抽参，生产实测 8~17s（光 Claude Code SDK 冷启就 2.7~3.7s，
+ * 实测一次鉴权即失败的调用 init 仍耗 2.7s）。而 env 是闭集查表、phone 是正则，都不需要推理。
+ * 现在这类变量本地抽完就返回，**主路径零 LLM**；LLM 只在还剩自由文本字段时才调，
+ * 且提示词里只列剩下的字段。
  */
 import { getVar } from '../../../store/user-vars.js';
 import { runClassifierOnce } from '../../../capabilities/llm-classify.js';
 import { logger } from '../../../shared/logger.js';
+import { resolveVariable } from './var-contract.js';
+import { localExtract, normalizeValue } from './local-extract.js';
+import { buildExtractPrompt } from './extract-prompt.js';
 
-// 抽取用轻模型（Haiku）：仅做单轮抽取，不需要重模型（与 config.intent.classifyModel 无关，那是分类用的 sonnet）
+/** 抽取用轻模型：已是最低档（Haiku）。分类点统一的 effort 默认档在 llm-classify.js。 */
 const EXTRACT_MODEL = 'claude-haiku-4-5';
-// 超时即 abort（runClassifierOnce 内部还有 race 兜底），绝不拖死上层槽位填充流程
-const EXTRACT_TIMEOUT_MS = 10_000;
 
 /**
- * 环境别名 → 规范值。**必须与 scripts/get_qrcode.py 的 ENV_ALIASES 保持一致**
- *（那边是脚本侧的第二道防线，两边同时认才不会出现「Node 认了脚本不认」）。
+ * 超时即 abort（runClassifierOnce 内部还有 race 兜底），绝不拖死上层槽位填充流程。
+ *
+ * 为什么是 25s 而不是最初的 10s：生产实测这次调用耗时落在 8~17s
+ *（app-2026-09-04.log 有 `result ms:10321` 紧跟 `✖ runClaude ms:10440 Operation aborted`
+ * —— 模型算完了、钱也扣了，却被超时丢弃）。预算卡在耗时分布中间会让成败五五开。
+ *
+ * 改造后这条路径只在「还有自由文本必填字段」时才走到，触发频率大幅下降，
+ * 但预算仍保持 25s：偶尔走一次就要走通，不能再出现「算完了被丢掉」。
  */
-const ENV_ALIASES = {
-  dev: 'dev', 开发版: 'dev', 开发: 'dev', 开发环境: 'dev', develop: 'dev', development: 'dev',
-  test: 'test', 体验版: 'test', 体验: 'test', 测试版: 'test', 测试: 'test', 测试环境: 'test', trial: 'test',
-  prod: 'prod', 线上版: 'prod', 线上: 'prod', 正式版: 'prod', 正式: 'prod',
-  生产版: 'prod', 生产: 'prod', 生产环境: 'prod', 线上环境: 'prod', online: 'prod', production: 'prod',
-};
-
-/** 归一前先剥掉常被一起抽出来的尾巴词（「正式版二维码」→「正式版」） */
-const ENV_JUNK_RE = /(二维码|预览码|小程序码|的|环境|数据|订单|\s)/g;
-
-/**
- * 自由文本里扫描环境词的**保守**正则（与 normalizeEnv 的宽松策略刻意不同）。
- * 只收无歧义的完整说法：裸「测试」「开发」在自由文本里几乎都是动词
- *（「帮我测试一下这个功能」「开发那边说…」），收进来会把无关消息误判成有环境。
- * 裸词只在追问上下文（forVar）里才认——那时整条消息就是对「哪个环境？」的回答。
- */
-const ENV_SCAN_RE =
-  /(?:\b(dev|test|prod|production)\b|开发版|开发环境|体验版|测试版|测试环境|线上版|线上环境|正式版|生产环境)/i;
-
-/**
- * 同上，g 版本，**只给 matchAll 用**（matchAll 要求 g，且按规范会内部克隆正则，
- * 不会污染这里的 lastIndex；仍单独定义一个常量，避免任何人拿它去 .test()）。
- */
-const ENV_SCAN_RE_G = new RegExp(ENV_SCAN_RE.source, 'gi');
-
-/**
- * 否定词：出现在环境词**所在分句**里，说明这个环境词是被排除的对象而不是目标。
- * 事故场景：「别清 test，清 dev」——旧实现取第一个命中，直接清了 test（不可逆）。
- */
-const NEGATION_RE = /(别|不要|不是|不用|无需|除了|而不是)/;
-
-/** 分句边界：否定词只在同句内生效，否则「不是很急，清一下 test 环境」会被误伤 */
-const CLAUSE_SPLIT_RE = /[，,。；;！!？?\n]/;
-
-/**
- * 自由文本里扫环境词，**拿不准就弃权**（返回 null → 该字段判缺失 → 追问一次）。
- * 猜错的代价是清错环境/退错款（不可逆），多问一句的代价只是一轮对话 —— 不对称，永远选后者。
- * 弃权条件：① 出现两个不同环境（「别清 test，清 dev」）；② 环境词所在分句里有否定词。
- * 注意：只约束正则。LLM 抽出的值照常采纳 —— 语义判断本就该模型做，它能读懂「别…要…」。
- */
-function scanEnv(text) {
-  const t = String(text ?? '');
-  const hits = [];
-  for (const m of t.matchAll(ENV_SCAN_RE_G)) {
-    const env = normalizeEnv(m[0]);
-    if (env) hits.push({ env, index: m.index });
-  }
-  if (!hits.length) return null;
-
-  if (new Set(hits.map((h) => h.env)).size > 1) {
-    logger.info('slot-filler', '一句话出现多个环境词，正则弃权（交给追问/LLM）', {
-      envs: [...new Set(hits.map((h) => h.env))],
-    });
-    return null;
-  }
-
-  const { env, index } = hits[0];
-  const clause = t.slice(0, index).split(CLAUSE_SPLIT_RE).pop();
-  if (NEGATION_RE.test(clause)) {
-    logger.info('slot-filler', '环境词被否定词修饰，正则弃权（交给追问/LLM）', { env });
-    return null;
-  }
-  return env;
-}
-
-/**
- * 把用户/LLM 给出的环境词归一到 dev/test/prod；识别不了返回 null（**绝不瞎猜**）。
- * @param {unknown} raw
- * @returns {'dev'|'test'|'prod'|null}
- */
-export function normalizeEnv(raw) {
-  const v = String(raw ?? '').trim().replace(ENV_JUNK_RE, '');
-  if (!v) return null;
-  return ENV_ALIASES[v] || ENV_ALIASES[v.toLowerCase()] || null;
-}
-
-/** 变量名 → 归一函数。归一返回 null 表示「这个值不合法」，调用方按未提供处理。 */
-const NORMALIZERS = { env: normalizeEnv };
-
-/**
- * 按变量名归一收集到的值；归一失败的键**直接删掉**（视为该字段缺失，走追问），
- * 而不是把非法值透传给脚本 —— 后者会让用户看到一坨 argparse 报错。
- * @param {object} actionConfig
- * @param {object} vars
- * @returns {object} 归一后的新对象
- */
-export function normalizeVars(actionConfig, vars) {
-  const out = { ...(vars || {}) };
-  for (const v of actionConfig?.variables || []) {
-    const fn = NORMALIZERS[v.name];
-    if (!fn || !(v.name in out)) continue;
-    const normalized = fn(out[v.name]);
-    if (normalized) out[v.name] = normalized;
-    else {
-      logger.info('slot-filler', '变量值无法归一，按缺失处理', { name: v.name, raw: String(out[v.name]).slice(0, 40) });
-      delete out[v.name];
-    }
-  }
-  return out;
-}
+const EXTRACT_TIMEOUT_MS = 25_000;
 
 /**
  * 从用户消息文本提取配置所需的变量值，并与该用户已持久化的变量合并。
+ *
  * @param {object} actionConfig 动作配置（含 variables 定义）
  * @param {string} text 用户消息
  * @param {string|null} userId 用于查询持久变量；null 表示不查（如追问中间态的新输入）
  * @param {{forVar?: string, llmExtract?: Function}} [opts]
- *   forVar：当前正在追问的变量名 —— 此时整条消息就是对该字段的回答，允许把整条消息送去归一
- *           （用户只回「体验」两个字也要认，自由文本正则不收这种裸词）。
- *   llmExtract：可注入的 LLM 抽取函数，单测用（默认真实 Claude 调用）。
+ *   forVar：当前正在追问的变量名 —— 该变量额外获得 weakAliases 与「整条消息当候选值」两项待遇
+ *           （用户只回「体验」两个字也要认）。
+ *   llmExtract：可注入的 LLM 抽取函数 `(text, unresolved) => Promise<object|null>`，单测用。
+ *               `unresolved` 是 resolveVariable 的产物数组。
+ *   onLlmStart：**即将真的发起 LLM 调用**时同步回调一次（本地全命中则永不触发）。
+ *               调用方用它来发「请稍等」那条即时应答 —— 本地抽取是亚毫秒级的，
+ *               命中就直接执行了，此时再弹一句「我正在确认所需信息」纯属噪音
+ *               （用户会先看到「请稍等」再立刻看到「正在执行」，观感像卡了一下）。
+ *               为什么是回调而不是让调用方自己判断：要判断就得把「哪些字段还缺、
+ *               持久值顶不顶得住、是不是弃权」这套规则在 feature 层再实现一遍，
+ *               两份规则迟早分叉。
  * @returns {Promise<object>} 已收集变量（部分，已归一）
  */
 export async function extractVars(actionConfig, text, userId, opts = {}) {
+  const { forVar, llmExtract = llmExtractDefault, onLlmStart } = opts;
+  const variables = actionConfig?.variables || [];
   const persistent = userId ? getPersistentVars(actionConfig, userId) : {};
-  const extracted = await extractVarsFromText(actionConfig, text, opts);
-  return normalizeVars(actionConfig, { ...persistent, ...extracted });
+
+  // ① 本地确定性抽取（零成本）
+  const { values: local, unresolved } = localExtract(variables, text, { forVar });
+
+  // ② 决定要不要为这些字段烧一次 LLM。**「值不值得调」与「调了问哪些字段」是两件事**，
+  //    合成一件会出安全问题（复核实证，2026-09-04）：
+  //
+  //    - 值不值得调（trigger）：必填 + 本地抽不出 + 「没有持久化旧值 **或** 本地是弃权而非没提到」。
+  //      持久化旧值能顶掉一个字段，正是「第二次不用再报手机号」这个功能；但**弃权不算没提到** ——
+  //      用户说「我的号从 138… 换成 139…，清一下 test」会因两个号命中而弃权，若当成没提到就会
+  //      静默沿用旧号，清掉另一个人的数据。
+  //    - 调了问哪些（payload）：全部必填的 unresolved，**含被持久化顶掉的那些**。
+  //      调用既然已经发生，边际成本为零，而用户这次说的新值必须有机会覆盖旧值
+  //      （旧实现把它们排除在提示词外，于是新值永远进不来）。
+  //
+  //    非必填字段两边都不进：为一个可选字段烧 8~17s 不划算，缺了也不影响执行。
+  const declOf = new Map(variables.filter((v) => v && v.name).map((v) => [v.name, v]));
+  const requiredUnresolved = unresolved.filter((rv) => declOf.get(rv.name)?.required);
+  const shouldCallLlm = requiredUnresolved.some((rv) => !persistent[rv.name] || rv.reason === 'abstained');
+
+  let fromLlm = {};
+  if (shouldCallLlm) {
+    // 通知调用方「这次真要等模型了」。绝不让它的异常影响抽取本身 ——
+    // 它的唯一用途是发一条锦上添花的提示。
+    try {
+      onLlmStart?.();
+    } catch (e) {
+      logger.warn('slot-filler', 'onLlmStart 回调异常（不影响抽取）', { err: e?.message || String(e) });
+    }
+    const got = await llmExtract(text, requiredUnresolved);
+    if (got && typeof got === 'object') {
+      for (const [k, v] of Object.entries(got)) {
+        // 只收「声明过 && 本地没抽到」的字段：本地抽到的是确定性结果，
+        // 不该被模型改写；没声明过的键是模型幻觉，直接丢。
+        if (!declOf.has(k) || k in local) continue;
+        if (v === null || v === undefined || !String(v).trim()) continue;
+        fromLlm[k] = v;
+      }
+    }
+  } else if (unresolved.length) {
+    logger.info('slot-filler', '全部必填字段本地抽取命中，跳过 LLM', {
+      resolved: Object.keys(local),
+      skipped: unresolved.map((rv) => rv.name),
+    });
+  }
+
+  // ③ 合并。顺序：持久化 < 本地 < LLM —— 用户这次说的话优先于上次存的值。
+  const merged = { ...persistent, ...local, ...fromLlm };
+
+  // ④ 弃权字段的最后一道闸：本地读不准、LLM 也没给出值时，**丢弃持久化旧值**，
+  //    让它判缺失去追问。否则「我的号从 138… 换成 139…」在 LLM 也失手时仍会落回旧号 ——
+  //    而这条链路的下游是清数据 / 退款这类不可逆脚本。宁可多问一句。
+  for (const rv of requiredUnresolved) {
+    if (rv.reason !== 'abstained') continue;
+    if (rv.name in fromLlm || rv.name in local) continue;
+    if (!(rv.name in merged)) continue;
+    logger.info('slot-filler', '本地弃权且 LLM 未给出值，丢弃持久化旧值改为追问', { name: rv.name });
+    delete merged[rv.name];
+  }
+
+  return normalizeCollected(variables, merged);
+}
+
+/**
+ * 按变量声明归一全部收集到的值；归一失败的键**直接删掉**（视为缺失，走追问），
+ * 而不是把非法值透传给脚本 —— 后者会让用户看到一坨 argparse 报错。
+ *
+ * 持久化的值也要过这一关：user-vars 里可能存着旧格式或被手改坏的值。
+ */
+function normalizeCollected(variables, collected) {
+  const out = { ...(collected || {}) };
+  for (const raw of variables) {
+    const rv = resolveVariable(raw);
+    if (!rv.name || !(rv.name in out)) continue;
+    // weak=true：走到这里的值要么是用户明确给的、要么是模型抽的，都已脱离「自由文本歧义」语境
+    const normalized = normalizeValue(rv, out[rv.name], { weak: true });
+    if (normalized) out[rv.name] = normalized;
+    else {
+      logger.info('slot-filler', '变量值无法归一，按缺失处理', {
+        name: rv.name,
+        raw: String(out[rv.name]).slice(0, 40),
+      });
+      delete out[rv.name];
+    }
+  }
+  return out;
 }
 
 /** 获取该用户已持久化的变量（仅 persistent=true 的变量） */
@@ -153,76 +166,24 @@ function getPersistentVars(actionConfig, userId) {
   return result;
 }
 
-/** 从文本中提取变量（仅新值，不查持久化） */
-async function extractVarsFromText(actionConfig, text, opts = {}) {
-  const { forVar, llmExtract = tryClaudeExtract } = opts;
-  const requiredVars = (actionConfig.variables || []).filter((v) => v.required);
-
-  // 正则兜底先跑（同步、零成本），LLM 结果覆盖其上。
-  // 刻意不是二选一：LLM 抽取常常只吐它最有把握的一两个字段，漏掉的正好由正则补上
-  //（旧实现是 LLM 一旦成功就完全不看正则，白白丢掉能抓到的值）。
-  const merged = { ...regexExtract(text) };
-  if (requiredVars.length > 0) {
-    const llm = await llmExtract(text, requiredVars);
-    if (llm) {
-      for (const [k, v] of Object.entries(llm)) {
-        if (v !== null && v !== undefined && String(v).trim()) merged[k] = v;
-      }
-    }
-  }
-
-  // 追问上下文：该字段仍然没抓到时，把整条消息当作它的候选值送去归一。
-  // 只对有归一函数的变量生效 —— 没有校验器的自定义变量不能盲取，否则「我不知道」会被当成答案。
-  if (forVar && !merged[forVar] && NORMALIZERS[forVar]) {
-    const v = NORMALIZERS[forVar](text);
-    if (v) merged[forVar] = v;
-  }
-  return merged;
-}
-
-/** 用 Claude 提取变量（失败返回 null，降级到正则兜底） */
-async function tryClaudeExtract(text, variables) {
-  const varDefs = variables.map((v) => `${v.name}=${v.label || v.name}`).join(', ');
-  const hasEnv = variables.some((v) => v.name === 'env');
-  const prompt =
-    `从用户消息提取变量，仅输出一行 JSON。\n` +
-    `变量定义：${varDefs}\n` +
-    // 给出候选值与归一要求：不给的话模型会原样吐中文（实测抽出 "正式版"），
-    // 而脚本侧 argparse choices=["dev","test"] 只认规范值。
-    (hasEnv
-      ? `env 只能取 dev / test / prod 三者之一，需把用户说法归一：\n` +
-        `  开发版·开发环境·dev → dev；体验版·测试版·测试环境·test → test；线上版·正式版·生产环境·prod → prod\n` +
-        `  用户没提环境、或说的是其它环境（如「预发布」）时，省略 env 字段，不要猜。\n`
-      : '') +
-    `用户消息：「${text}」\n` +
-    `输出：{"变量名":"值"}，找不到的字段省略。`;
-
-  // 复用 llm-classify 的单轮调用骨架：额度耗尽 fail-fast（旧实现没有，限流时白等 10s
-  // 再落正则兜底，正是「只有说 test 才准」的高频诱因）、abort+race 双保险、首个 JSON 块提取。
+/**
+ * 默认 LLM 抽取：提示词由变量声明自动生成（不再有 `name === 'env'` 之类的分支）。
+ * 失败/超时/额度耗尽返回 null，此时缺失字段走追问。
+ */
+async function llmExtractDefault(text, unresolved) {
   return runClassifierOnce({
-    prompt,
+    prompt: buildExtractPrompt(unresolved, text),
     model: EXTRACT_MODEL,
     logTag: 'slot-filler/extract',
     timeoutMs: EXTRACT_TIMEOUT_MS,
   });
 }
 
-/** 正则兜底：手机号、env（LLM 失败/超时/额度耗尽时的唯一防线，必须认中文别名） */
-function regexExtract(text) {
-  const result = {};
-  const t = String(text ?? '');
-  const phoneMatch = t.match(/1[3-9]\d{9}/);
-  if (phoneMatch) result.phone = phoneMatch[0];
-  const env = scanEnv(t);
-  if (env) result.env = env;
-  return result;
-}
-
 /**
  * 从配置中找出缺失的必填变量
  * @param {object} actionConfig
  * @param {object} collected 已收集的变量
- * @returns {Array<object>} 缺失的变量定义
+ * @returns {Array<object>} 缺失的变量定义（**原始声明**，调用方要读 prompt/label）
  */
 export function pickMissingVars(actionConfig, collected) {
   return (actionConfig.variables || []).filter((v) => v.required && !collected[v.name]);

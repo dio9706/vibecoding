@@ -1,4 +1,10 @@
 /**
+ * LLM 没能给出描述时的占位符。
+ * 增量复用要靠它区分「真描述」与「降级占位」，写死字面量会两处漂移，故收成常量。
+ */
+export const PLACEHOLDER_DESC = '(待补充)'
+
+/**
  * 构造「LLM 补语义」的 prompt
  * LLM 只需补充 description 和 keyFunctions，不需要改结构
  * @param {object} factsPack - {modules: [{id, name, path, files, imports, dependsOn, usedBy}]}
@@ -12,7 +18,9 @@ export function buildMapGenPrompt(factsPack) {
       .map(f => `  - ${f.path}: ${f.exports.join(', ')}`)
       .join('\n')
 
-    return `【${m.name}】(${m.path})
+    // 必须把 id 明写给模型：mergeSupplements 是按 id 匹配回填的，
+    // 模型不知道 id 就只能瞎编，回来的 supplements 一条也对不上，描述全成「(待补充)」。
+    return `【${m.name}】id=${m.id} (${m.path})
 ${filesList}
 导入：${m.imports.join(', ') || '无'}
 被依赖：${m.usedBy.map(id => modules.find(mm => mm.id === id)?.name).join(', ') || '无'}`
@@ -27,11 +35,14 @@ ${modulesSummary}
 请返回 JSON 格式的补充信息。每个模块的 description 应该简明扼要（1-2 句），
 keyFunctions 应该列出 3-5 个最关键的函数/方法。
 
+**id 必须原样照抄上面每个模块的 id=，不要自己编号**，否则补充信息无法回填。
+上面列出的每个模块都要有一条对应的补充。
+
 返回格式（务必是有效的 JSON）：
 {
   "supplements": [
     {
-      "id": "m1",
+      "id": "上面给出的 id，原样照抄",
       "description": "...",
       "keyFunctions": ["func1()", "func2()", ...]
     }
@@ -75,9 +86,40 @@ export function parseMapGenResponse(response) {
 }
 
 /**
+ * 增量选材：按指纹把模块分成「可复用上一版描述」和「需要重新描述」两堆。
+ *
+ * 为什么值得做：整条生成链里扫描是零成本的（几百毫秒、不花 token），贵的只有补语义。
+ * 全量重描 21 个模块和只描 2 个改动模块，token 差一个数量级。
+ *
+ * 判据是三个条件同时成立才复用：指纹一致、上一版存在、且上一版描述是真货。
+ * 最后一条不能省——上一版可能因为 LLM 调用失败而降级成 '(待补充)'，
+ * 那种占位符要是被当成"已有描述"复用，模块就再也等不到真正的描述了。
+ *
+ * @param {array} modules 本次扫描出的模块（带 fingerprint）
+ * @param {object|null} previous 上一版地图
+ * @returns {{reused: array, stale: array}} reused 是可直接并入的 supplement 条目，stale 是待送 LLM 的模块
+ */
+export function splitByFingerprint(modules, previous) {
+  const prevById = new Map((previous?.modules || []).map(m => [m.id, m]))
+  const reused = []
+  const stale = []
+
+  for (const m of modules) {
+    const old = prevById.get(m.id)
+    const hasRealDesc = !!old?.description && old.description !== PLACEHOLDER_DESC
+    if (old && m.fingerprint && old.fingerprint === m.fingerprint && hasRealDesc) {
+      reused.push({ id: m.id, description: old.description, keyFunctions: old.keyFunctions || [] })
+    } else {
+      stale.push(m)
+    }
+  }
+  return { reused, stale }
+}
+
+/**
  * 将补语义与事实包合并
- * @param {array} modules - 来自 Task 2 的模块数组
- * @param {array} supplements - 来自 LLM 的补语义数组
+ * @param {array} modules - 扫描出的模块数组
+ * @param {array} supplements - 补语义数组（LLM 新产出的 + 增量复用的）
  * @returns {array} 合并后的模块数组，每个新增 description 和 keyFunctions
  */
 export function mergeSupplements(modules, supplements) {
@@ -85,7 +127,7 @@ export function mergeSupplements(modules, supplements) {
 
   return modules.map(m => ({
     ...m,
-    description: supplementMap.get(m.id)?.description || '(待补充)',
+    description: supplementMap.get(m.id)?.description || PLACEHOLDER_DESC,
     keyFunctions: supplementMap.get(m.id)?.keyFunctions || []
   }))
 }

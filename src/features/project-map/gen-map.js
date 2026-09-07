@@ -16,6 +16,7 @@ import {
   buildMapGenPrompt,
   mergeSupplements,
   validateProjectMap,
+  splitByFingerprint,
 } from './gen-map.logic.js';
 import { runReadonlyAgent, READONLY_AGENT_TIMEOUT_MS } from '../../capabilities/llm-readonly-agent.js';
 import { logger } from '../../shared/logger.js';
@@ -76,6 +77,7 @@ export async function generateProjectMap(opts = {}) {
     onProgress,
     model = null,
     logTag = 'gen-map',
+    previous = null, // 上一版地图；指纹一致的模块直接复用描述，只有改动过的才送 LLM
   } = opts;
 
   // 验证必填参数
@@ -109,42 +111,53 @@ export async function generateProjectMap(opts = {}) {
     });
 
     // ========== 阶段 2: llm 补语义 ==========
-    logger.info(logTag, '开始调用 LLM 补语义', { projectId, modules: factsPack.modules.length });
-    onProgress?.({ stage: 'llm', detail: '正在调用 LLM 补充语义信息...' });
-
     if (signal?.aborted) {
       throw new Error('Generation aborted before LLM call');
     }
 
-    // 构造 prompt（需要适配数据格式）
-    const adaptedFactsPack = adaptFactsPackForPrompt(factsPack);
-    const prompt = buildMapGenPrompt(adaptedFactsPack);
+    // 增量：指纹与上一版一致、且上一版已有真实描述的模块直接复用，不送进 LLM。
+    // 扫描本身是零成本的，贵的只有补语义这一步——所以省 token 的关键是缩小送模范围，
+    // 而不是跳过扫描（跳过扫描会让依赖边和文件清单一起过期）。
+    const { reused, stale } = splitByFingerprint(factsPack.modules, previous);
+    let supplements = reused;
 
-    // 调用只读 agent（超时 600s）
-    const llmResult = await runReadonlyAgent({
-      prompt,
-      cwd: projectPath,
-      model,
-      logTag,
-      timeoutMs: READONLY_AGENT_TIMEOUT_MS,
-      signal,
-      maxTurns: 30,
-    });
-
-    let supplements = [];
-
-    // 降级方案：LLM 失败不抛错，仍继续
-    if (llmResult.data) {
-      logger.info(logTag, 'LLM 返回有效数据', { projectId });
-      supplements = llmResult.data.supplements || [];
+    if (!stale.length) {
+      logger.info(logTag, '全部模块指纹未变，跳过 LLM', { projectId, reused: reused.length });
+      onProgress?.({ stage: 'llm', detail: '无改动模块，跳过语义补充' });
     } else {
-      // 失败原因诊断
-      logger.warn(logTag, 'LLM 补语义失败，进行降级', {
-        projectId,
-        reason: llmResult.reason,
-        denied: llmResult.denied,
+      logger.info(logTag, '开始调用 LLM 补语义', { projectId, stale: stale.length, reused: reused.length });
+      onProgress?.({
+        stage: 'llm',
+        detail: reused.length
+          ? `正在补充 ${stale.length} 个改动模块的语义（复用 ${reused.length} 个）...`
+          : '正在调用 LLM 补充语义信息...',
       });
-      // 不抛错，继续下去（modules + edges 仍可用）
+
+      // 只把待描述的模块喂给模型；其余模块不进 prompt，token 随之下降
+      const prompt = buildMapGenPrompt(adaptFactsPackForPrompt({ ...factsPack, modules: stale }));
+
+      // 调用只读 agent（超时 600s）
+      const llmResult = await runReadonlyAgent({
+        prompt,
+        cwd: projectPath,
+        model,
+        logTag,
+        timeoutMs: READONLY_AGENT_TIMEOUT_MS,
+        signal,
+        maxTurns: 30,
+      });
+
+      // 降级方案：LLM 失败不抛错，仍继续（modules + edges 仍可用，复用的描述也还在）
+      if (llmResult.data) {
+        logger.info(logTag, 'LLM 返回有效数据', { projectId });
+        supplements = [...reused, ...(llmResult.data.supplements || [])];
+      } else {
+        logger.warn(logTag, 'LLM 补语义失败，进行降级', {
+          projectId,
+          reason: llmResult.reason,
+          denied: llmResult.denied,
+        });
+      }
     }
 
     // ========== 阶段 3: merge 合并补语义 ==========
@@ -159,6 +172,9 @@ export async function generateProjectMap(opts = {}) {
 
     mapData = {
       projectId,
+      // 前端要展示「哪个项目、何时生成」；projectId 是哈希过的文件名，人读不出路径，所以原样带上。
+      projectPath,
+      generatedAt: new Date().toISOString(),
       modules: mergedModules,
       edges: factsPack.edges,
       externalDeps: factsPack.externalDeps,

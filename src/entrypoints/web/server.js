@@ -68,6 +68,7 @@ import {
 } from './routes-files.js';
 import { handleRequirementRoutes } from './routes-requirements.js';
 import { handleMemoryRoutes } from './routes-memory.js';
+import { handleCleanupRoutes } from './routes-cleanup.js';
 import { handleOptimizeRoutes } from './routes-optimize.js';
 import { healAllBusyOnStartup } from './optimize-ops.js';
 import { handleProjectMapRoutes } from './routes-project-map.js';
@@ -84,6 +85,7 @@ import {
   handleHistoryDetail,
   handleScripts,
   handleActionsGet,
+  handleActionPresetsGet,
   handleActionsPost,
   handleActionsPut,
   handleActionsDelete,
@@ -155,6 +157,7 @@ const ROUTES = [
   { prefix: '/api/conv-notify/', h: (req, res, url) => handleConvNotifyRoutes(req, res, url) },
   { prefix: '/api/req/', h: (req, res, url) => handleRequirementRoutes(req, res, url) },
   { prefix: '/api/memory/', h: (req, res, url) => handleMemoryRoutes(req, res, url) },
+  { prefix: '/api/cleanup/', h: (req, res, url) => handleCleanupRoutes(req, res, url) },
   { prefix: '/api/optimize/', h: (req, res, url) => handleOptimizeRoutes(req, res, url) },
   { prefix: '/api/project-map/', h: (req, res, url) => handleProjectMapRoutes(req, res, url) },
   { path: '/api/settings', h: (req, res) => handleSettings(req, res) },
@@ -179,6 +182,8 @@ const ROUTES = [
   { prefix: '/api/bots/', method: 'PUT', h: (req, res, url) => handleBotsUpdate(req, res, url) },
   { prefix: '/api/bots/', method: 'DELETE', h: (req, res, url) => handleBotsDelete(req, res, url) },
   // 注意参数顺序是 (res, url)，与相邻 handler 都不同 —— 表内适配的价值就在这
+  // 必须排在 /api/actions 之前？不必：路径不同且无前缀遮蔽关系，但放一起便于阅读
+  { path: '/api/action-presets', method: 'GET', h: (req, res) => handleActionPresetsGet(res) },
   { path: '/api/actions', method: 'GET', h: (req, res, url) => handleActionsGet(res, url) },
   { path: '/api/actions', method: 'POST', h: (req, res) => handleActionsPost(req, res) },
   { prefix: '/api/actions/', method: 'PUT', h: (req, res, url) => handleActionsPut(req, res, url) },

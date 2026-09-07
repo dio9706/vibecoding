@@ -5,9 +5,11 @@
  * 禁止 innerHTML 拼接（本项目硬性约定，因为渲染的是后端/LLM 产出的不可信文本）。
  */
 import { $, lsGet, lsSet } from './util.js';
-import { dimListFrom } from './optimize-view.logic.js';
 import {
-  canFix, fixButtonLabel, summarizeResults, scoreDelta, stepLabel, dirtyConfirmMessage,
+  dimListFrom, groupDims, groupSummary, checkupAge, STALE_CHECKUP_DAYS,
+} from './optimize-view.logic.js';
+import {
+  canFix, fixButtonLabel, summarizeResults, scoreDelta, stepLabel, dirtyConfirmMessage, kindLabel,
 } from './optimize-fix.logic.js';
 import { openDirPickerFor } from './dir-popover.js';
 import { confirmDialog } from './ui.js';
@@ -42,6 +44,14 @@ let fixJobId = null;
  *    变得不可选的维度会自动剔除，都不需要额外的重算逻辑去追。
  */
 let deselectedDims = new Set();
+/**
+ * 各维度的批级进度：`维度id -> {done, total}`。
+ *
+ * 为什么必须有：一个维度要**全部批次跑完**才落地成分数，而 deadcode 这类维度有 19 批、
+ * 每批约 55 秒——卡片会转圈二十多分钟、界面零变化。实测已经因此被误判为「任务死了」。
+ * 存在 DOM 之外的理由同 deselectedDims：render() 每次都重建全部卡片。
+ */
+let dimProgress = new Map();
 
 const GRADE_LABEL = {
   healthy: '健康',
@@ -57,6 +67,28 @@ function el(tag, className, text) {
   return n;
 }
 
+/**
+ * 上次体检时间 + 超期标记。
+ *
+ * 超过一个月就把时间标红并挂一个「长时间未体检」标签：那时报告里的结论大概率已经指向
+ * 被改动过甚至移走的文件——它不只是旧，是会误导人（见 optimize-view.logic.js 的阈值说明）。
+ */
+function renderLastAt(host, at) {
+  host.textContent = '';
+  host.classList.remove('is-stale');
+  if (!at) return;
+
+  const { stale, days } = checkupAge(at);
+  host.appendChild(el('span', null, `上次体检 ${new Date(at).toLocaleString()}`));
+  if (!stale) return;
+
+  host.classList.add('is-stale');
+  const badge = el('span', 'opt-stale-badge', '长时间未体检');
+  // 标题里给出具体天数与阈值：只说「长时间」用户无从判断要不要立刻处理
+  badge.title = `已经 ${days} 天没有体检（超过 ${STALE_CHECKUP_DAYS} 天即提示）`;
+  host.appendChild(badge);
+}
+
 function renderScore(report) {
   const ring = $('#optRing');
   const num = $('#optScoreNum');
@@ -65,11 +97,23 @@ function renderScore(report) {
   const lastAt = $('#optLastAt');
 
   ring.className = 'opt-ring';
+
+  // 体检进行中：分数环换成 loading。这一档必须先判——
+  // 此刻报告里还留着**上一次**的分数，直接显示会让用户以为这次已经出结果了
+  if (checkupBusy) {
+    ring.classList.add('is-loading');
+    num.textContent = '';
+    grade.textContent = checkupBusy === 'posting' ? '正在启动…' : '分析中…';
+    count.textContent = '各维度陆续出结果，可以离开这个页面';
+    renderLastAt(lastAt, report?.at);
+    return;
+  }
+
   if (!report || typeof report.score !== 'number') {
     num.textContent = '--';
     grade.textContent = '未体检';
     count.textContent = '';
-    lastAt.textContent = '';
+    renderLastAt(lastAt, report?.at);
     return;
   }
 
@@ -77,7 +121,7 @@ function renderScore(report) {
   if (report.grade) ring.classList.add(`is-${report.grade}`);
   grade.textContent = GRADE_LABEL[report.grade] || '';
   count.textContent = `发现 ${report.issueCount} 项问题`;
-  lastAt.textContent = `上次体检 ${new Date(report.at).toLocaleString()}`;
+  renderLastAt(lastAt, report.at);
 }
 
 function renderIssues(box, issues) {
@@ -90,12 +134,102 @@ function renderIssues(box, issues) {
   }
 }
 
+/**
+ * 渲染 holistic 的行动计划块。
+ *
+ * 单独一块而不是混进 issue 列表：issue 是「哪里有问题」，计划是「先做哪件、做完算什么」。
+ * 后者是这一维的全部价值，塞进一排 issue 里会被当成第 18 条问题而不是一份计划。
+ */
+function renderPlan(box, plan) {
+  // 业务理解置顶：它决定了后面每条建议是否可信。用户先要认同「这个工具读懂了我的项目」，
+  // 否则再具体的建议也只会被当成又一份通用报告
+  if (plan.businessRead) {
+    const b = el('div', 'opt-plan-biz');
+    b.appendChild(el('div', 'opt-plan-title', '这个项目是做什么的'));
+    b.appendChild(el('div', 'opt-plan-text', plan.businessRead));
+    box.appendChild(b);
+  }
+
+  if (plan.verdict) {
+    const v = el('div', 'opt-plan-verdict');
+    v.appendChild(el('div', 'opt-plan-title', '总体判断'));
+    v.appendChild(el('div', 'opt-plan-text', plan.verdict));
+    box.appendChild(v);
+  }
+
+  if (plan.businessRisks?.length) {
+    // 与 topActions 分开渲染：这些是「你得知道」而不是「你得做」，
+    // 混进待办里会让人以为逐条做完就没事了
+    const r = el('div', 'opt-plan-risks');
+    r.appendChild(el('div', 'opt-plan-title', '业务特有风险（通用扫描看不见的）'));
+    const ul = el('ul', 'opt-plan-list');
+    for (const it of plan.businessRisks) {
+      const li = el('li', null, it.what);
+      if (it.evidence) li.appendChild(el('div', 'opt-plan-sub', `依据：${it.evidence}`));
+      ul.appendChild(li);
+    }
+    r.appendChild(ul);
+    box.appendChild(r);
+  }
+
+  if (plan.strengths?.length) {
+    // 只报问题会让用户失去判断基准，也不知道哪些现有约定不该被后续改动破坏
+    const s = el('div', 'opt-plan-strengths');
+    s.appendChild(el('div', 'opt-plan-title', '做得好、应当保持'));
+    const ul = el('ul', 'opt-plan-list');
+    for (const t of plan.strengths) ul.appendChild(el('li', null, t));
+    s.appendChild(ul);
+    box.appendChild(s);
+  }
+
+  if (plan.contradictions?.length) {
+    const c = el('div', 'opt-plan-contra');
+    c.appendChild(el('div', 'opt-plan-title', '跨维度矛盾（需要你拍板）'));
+    const ul = el('ul', 'opt-plan-list');
+    for (const it of plan.contradictions) {
+      const li = el('li', null, it.what);
+      if (it.resolution) li.appendChild(el('div', 'opt-plan-sub', `建议取舍：${it.resolution}`));
+      ul.appendChild(li);
+    }
+    c.appendChild(ul);
+    box.appendChild(c);
+  }
+}
+
 function renderDims(report) {
   const host = $('#optDims');
   host.textContent = '';
 
-  for (const d of dimListFrom(report)) {
+  for (const group of groupDims(dimListFrom(report))) {
+    const section = el('div', 'opt-group');
+
+    const head = el('div', 'opt-group-head');
+    head.appendChild(el('span', 'opt-group-label', group.label));
+    head.appendChild(el('span', 'opt-group-sum', groupSummary(group.dims)));
+    // 组标题可折叠：17 个维度全展开是一面墙，用户往往只关心一两个域。
+    // 折叠后靠 groupSummary 仍能看出这个域好不好，不是把信息藏起来
+    head.addEventListener('click', () => section.classList.toggle('is-folded'));
+    section.appendChild(head);
+
+    const body = el('div', 'opt-group-body');
+    renderDimCards(body, group.dims);
+    section.appendChild(body);
+
+    host.appendChild(section);
+  }
+}
+
+/** 批级进度文案。没有进度信息时返回空串，由调用方回退到常规提示 */
+function progressText(d) {
+  const p = dimProgress.get(d.key);
+  if (!d.busy || !p || !p.total) return '';
+  return `AI 分析中… 第 ${p.done}/${p.total} 批`;
+}
+
+function renderDimCards(host, dims) {
+  for (const d of dims) {
     const card = el('div', 'opt-dim');
+    card.dataset.dim = d.key;
     if (d.status === 'disabled') card.classList.add('is-disabled');
     if (d.busy) card.classList.add('is-busy');
 
@@ -117,7 +251,11 @@ function renderDims(report) {
     // analyzing / pending / disabled / error 用 reason 说明为什么没分，避免用户以为坏了；
     // partial 有分数但结论不完整，用 note 标注出来别让人当成可信分数
     const hintText = d.status === 'done' ? d.hint : (d.note || d.reason || d.hint);
-    head.appendChild(el('span', 'opt-dim-hint', hintText));
+    const hintEl = el('span', 'opt-dim-hint', progressText(d) || hintText);
+    // 打上 data-dim：批级进度事件来得很频繁（每批一次），靠它定点改这一个节点，
+    // 不必为每个进度事件重建全部 17 张卡片
+    hintEl.dataset.dimHint = d.key;
+    head.appendChild(hintEl);
 
     if (d.issueCount > 0) head.appendChild(el('span', 'opt-dim-badge', `${d.issueCount} 项`));
     // analyzing 时分数位换成转圈，等 SSE 送来结果再变成数字
@@ -125,18 +263,25 @@ function renderDims(report) {
     else head.appendChild(el('span', 'opt-dim-score', d.scoreText));
 
     // 点头部展开问题清单；勾选框自己的点击不该触发展开
+    const expandable = d.issueCount > 0 || !!d.plan;
     head.addEventListener('click', (e) => {
       if (e.target === cb) return;
-      if (d.issueCount > 0) card.classList.toggle('is-open');
+      if (expandable) card.classList.toggle('is-open');
     });
 
     card.appendChild(head);
 
-    if (d.issueCount > 0) {
+    if (expandable) {
       const box = el('div', 'opt-issues');
-      renderIssues(box, d.issues);
+      // 计划在前、逐条 issue 在后：计划是「先做哪件」，issue 是「哪里有问题」。
+      // 反序会让用户先读完 17 条问题才看到该从哪下手
+      if (d.plan) renderPlan(box, d.plan);
+      if (d.issueCount > 0) renderIssues(box, d.issues);
       card.appendChild(box);
     }
+
+    // 整体评估默认展开：它是「先看哪儿」的答案，要用户多点一下才看到就白搭了
+    if (d.plan) card.classList.add('is-open');
 
     host.appendChild(card);
   }
@@ -174,7 +319,16 @@ function refreshFixButton() {
     selected: selectedKeys(),
     running: fixRunning || !!checkupBusy,
   });
-  btn.textContent = fixButtonLabel(fixRunning);
+  // 三态文案收在 optimize-fix.logic.js 里（可单测），这里只负责取值
+  btn.textContent = fixButtonLabel(fixRunning, checkupBusy);
+
+  // 中高风险按钮与主按钮同一套可用性判据（同一个后端闸、同一批勾选），
+  // 只是不共享「优化中」文案——两个按钮同时显示「优化中」会让人不知道在跑哪一档
+  const elevated = $('#optFixElevated');
+  if (elevated) {
+    elevated.disabled = btn.disabled;
+    elevated.textContent = '中高风险优化';
+  }
 
   // 「停止」只在跑的时候露出来：没在跑时摆一个禁用的停止按钮纯属噪声。
   // 地图维度是全量生成，十几个模块可能跑十几分钟，必须给用户一个退出口。
@@ -204,31 +358,95 @@ function normalizeStaleReport(report) {
   return report;
 }
 
-async function loadReport(dir) {
-  closeCheckupStream();
-  closeFixStream();
-  // 换目录 = 换项目，上一个项目的勾选和优化结果都不该跟过来
-  deselectedDims = new Set();
-  fixRunning = false;
-  const progress = $('#optProgress');
-  const result = $('#optResult');
-  if (progress) { progress.textContent = ''; progress.hidden = true; }
-  if (result) { result.textContent = ''; result.hidden = true; }
+/**
+ * 载入某个目录的报告。
+ *
+ * @param {string} dir
+ * @param {object} [opts]
+ * @param {boolean} [opts.switching] 是否在**换项目**。
+ *   这个区分是必须的：本函数既被「换目录」调用，也被「每次打开面板」调用
+ *   （`initOptimizePanel`），而两者对已有 SSE 连接的处置完全相反。
+ *   原实现一律 `closeCheckupStream()`，于是「体检跑到一半切去别的页面再回来」
+ *   会把活着的订阅退掉、`checkupBusy` 清空——界面看不到 loading，
+ *   点体检又被后端的串行闸 409 挡住（「该项目正在体检或优化中」），而任务其实还在跑。
+ */
+async function loadReport(dir, { switching = true } = {}) {
+  if (switching) {
+    // 换项目：上一个项目的流、勾选、优化结果都不该跟过来
+    closeCheckupStream();
+    closeFixStream();
+    deselectedDims = new Set();
+    fixRunning = false;
+    const progress = $('#optProgress');
+    const result = $('#optResult');
+    if (progress) { progress.textContent = ''; progress.hidden = true; }
+    if (result) { result.textContent = ''; result.hidden = true; }
+  }
 
   if (!dir) { currentReport = null; render(); return; }
   try {
     const r = await fetch(`/api/optimize/report?dir=${encodeURIComponent(dir)}`);
     const data = await r.json();
     currentReport = normalizeStaleReport(data.report);
+    render();
+    await resumeIfBusy(dir, data.busy);
+    return;
   } catch {
     currentReport = null;
   }
   render();
 }
 
+/**
+ * 后端说这个项目正被占用时，决定是「重连」还是「解锁」。
+ *
+ * 两种情况外观相同、处置完全相反，靠后端给的 `alive` 区分：
+ *   - `alive: true`  → 任务真在跑，接回它的 SSE，loading 与逐维度回填都恢复
+ *   - `alive: false` → 占用记录还在但任务已死（服务重启过），请求解锁，
+ *                      否则用户会被这条记录挡在门外最多一小时
+ *
+ * 已经有本地活跃流时直接返回：那说明是本页面自己发起的，不必重复接。
+ */
+async function resumeIfBusy(dir, busy) {
+  if (!busy) return;
+
+  if (!busy.alive) {
+    try {
+      const r = await fetch('/api/optimize/busy/heal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dir }),
+      });
+      const out = await r.json();
+      // 只在真解锁了才提示：没解锁的原因是「任务其实活着」，那不是用户要知道的事
+      if (out.healed) toast.info('上次的体检/优化没跑完（服务可能重启过），已解锁，可以重新开始');
+    } catch { /* 解锁失败不影响看报告；下次打开面板会再试一次 */ }
+    return;
+  }
+
+  if (busy.kind === 'checkup' && busy.jobId && !checkupStream) {
+    // 不必在这里 render：openCheckupStream 内部会置状态并整体渲染
+    openCheckupStream(busy.jobId);
+  } else if (busy.kind === 'fix' && busy.jobId && !fixStream) {
+    fixRunning = true;
+    render();
+    openFixStream(busy.jobId);
+  }
+}
+
 function closeCheckupStream() {
   checkupBusy = '';
-  refreshButtons();
+  dimProgress = new Map();
+  // 必须整体 render()，不能只 refreshButtons()。
+  //
+  // 实测事故：体检跑完后进度环永远停在 loading，用户重开面板才刷新。原因是
+  // `renderScore` 依赖 `checkupBusy` 决定画 loading 还是分数，而 done 事件的处理顺序是
+  // `applyCheckupDone()`（内部 render，此刻 checkupBusy 还是 'analyzing' → 画 loading）
+  // → `closeCheckupStream()`（清空 checkupBusy，但只刷按钮）。于是环再没被重画过。
+  //
+  // 教训：**凡是参与渲染的状态变量，清理它的地方就必须触发渲染**。
+  // 只刷按钮是这个函数的历史行为——那时 checkupBusy 只影响按钮，现在不是了。
+  render();
   if (!checkupStream) return;
   checkupStream.close();
   checkupStream = null;
@@ -262,7 +480,9 @@ function openCheckupStream(checkupId) {
   checkupStream = es;
   // closeCheckupStream 刚把状态清空，这里再置回分析中（顺序不能反）
   checkupBusy = 'analyzing';
-  refreshButtons();
+  // render() 而不是 refreshButtons()：checkupBusy 现在还决定分数环画 loading 还是画分数，
+  // 只刷按钮的话环不会切成 loading（与 closeCheckupStream 里记的是同一个教训）
+  render();
 
   es.addEventListener('replay', (ev) => {
     let d;
@@ -277,7 +497,20 @@ function openCheckupStream(checkupId) {
   es.addEventListener('dim', (ev) => {
     let d;
     try { d = JSON.parse(ev.data); } catch { return; }
+    dimProgress.delete(d.key); // 维度已落地，进度信息没用了
     applyDimResult(d.key, d.result);
+  });
+
+  // 批级进度：一个维度要全部批次跑完才落地（deadcode 有 19 批、每批约 55 秒），
+  // 没有这条事件，卡片会转圈二十多分钟且界面零变化——实测已被误判成「任务死了」
+  es.addEventListener('progress', (ev) => {
+    let p;
+    try { p = JSON.parse(ev.data); } catch { return; }
+    dimProgress.set(p.dim, { done: p.done, total: p.total });
+    // 定点改这一个节点而不是 render()：进度事件每批一次，全量重建 17 张卡片
+    // 会把用户正在展开的问题清单反复折叠掉
+    const hint = document.querySelector(`[data-dim-hint="${p.dim}"]`);
+    if (hint) hint.textContent = `AI 分析中… 第 ${p.done}/${p.total} 批`;
   });
 
   es.addEventListener('done', (ev) => {
@@ -329,7 +562,7 @@ async function runCheckup() {
   if (!dir) { toast.error('请先选择项目目录'); return; }
 
   checkupBusy = 'posting';
-  refreshButtons();
+  render(); // 同上：环要立刻切成 loading，不能只刷按钮
 
   try {
     const r = await fetch('/api/optimize/checkup', {
@@ -350,7 +583,7 @@ async function runCheckup() {
   } finally {
     // 已经进入 SSE 阶段的话由 closeCheckupStream 负责收尾，这里不能抢着清
     if (checkupBusy === 'posting') checkupBusy = '';
-    refreshButtons();
+    render();
   }
 }
 
@@ -419,6 +652,9 @@ function renderFileResult(host, r) {
   const head = el('div', 'opt-res-head');
   head.appendChild(el('span', `opt-res-badge sev-${r.status}`, STATUS_LABEL[r.status] || r.status));
   head.appendChild(el('span', 'opt-res-file-name', r.file));
+  // kind 必须露出来：不显示的话「重构了源码」和「只写了清单」在列表里长得一样，
+  // 而这正是风险分级要让用户看清的东西
+  if (r.kind) head.appendChild(el('span', 'opt-res-kind', kindLabel(r.kind)));
   card.appendChild(head);
 
   const body = el('div', 'opt-res-body');
@@ -539,12 +775,20 @@ async function postJson(url, body) {
   return { ok: r.ok, status: r.status, data: await r.json().catch(() => ({})) };
 }
 
-async function runFix(force = false) {
+/**
+ * 跑一次优化。
+ *
+ * @param {object} [opts]
+ * @param {'low'|'elevated'} [opts.risk] 风险档位。默认 `'low'`——这是个会改代码的操作，
+ *   缺省就该做最保守的那件事（后端 `risksFor` 也 fail-closed 到 low）
+ * @param {boolean} [opts.force] 跳过脏工作区确认
+ */
+async function runFix({ risk = 'low', force = false } = {}) {
   const dir = currentDir;
   if (!dir) { toast.error('请先选择项目目录'); return; }
 
   fixRunning = true;
-  refreshButtons();
+  render();
   $('#optProgress').textContent = '';
   $('#optProgress').hidden = true;
   $('#optResult').hidden = true;
@@ -553,17 +797,18 @@ async function runFix(force = false) {
     const { ok, data } = await postJson('/api/optimize/fix', {
       dir,
       dimensions: selectedKeys(),
+      risk,
       force,
     });
 
     if (!ok) {
       fixRunning = false;
-      refreshButtons();
+      render();
       // 409 = 串行闸挡下，多半是自己另开了一个标签页；带回来的 jobId 可以直接接上去看进度
       if (data.busy?.jobId) {
         toast.error('该项目已有一次优化在跑，已切换到它的进度');
         fixRunning = true;
-        refreshButtons();
+        render();
         openFixStream(data.busy.jobId);
         return;
       }
@@ -573,30 +818,60 @@ async function runFix(force = false) {
 
     if (data.needsConfirm) {
       fixRunning = false;
-      refreshButtons();
+      render();
       const go = await confirmDialog({
         title: '工作区有未提交的改动',
         message: dirtyConfirmMessage(data),
         confirmText: '仍然优化',
         danger: true,
       });
-      if (go) await runFix(true);
+      // 必须把 risk 带下去：丢了它会让「确认后重试」降级成低风险，
+      // 用户点的是中高风险按钮却只跑了低风险，而界面会说优化完成
+      if (go) await runFix({ risk, force: true });
       return;
     }
 
     if (data.nothing) {
       fixRunning = false;
-      refreshButtons();
-      renderFixResult({ results: [], blocked: data.blocked, notes: ['没有可自动优化的项。'] });
+      render();
+      renderFixResult({
+        results: [],
+        blocked: data.blocked,
+        notes: [risk === 'low'
+          ? '本轮（低风险）没有可自动处理的项。改文档与改源码的改动请点「中高风险优化」。'
+          : '没有可自动优化的项。'],
+      });
       return;
     }
 
     openFixStream(data.jobId);
   } catch (e) {
     fixRunning = false;
-    refreshButtons();
+    render();
     toast.error('优化请求失败：' + (e?.message || e));
   }
+}
+
+/**
+ * 中高风险优化的二次确认。
+ *
+ * 这个确认不是形式：它是用户唯一一次被明确告知「接下来会改既有文档与源码」的时机。
+ * 文案要说清三件事——改什么、有什么兜底、出问题怎么办；只写「确定继续？」等于没确认。
+ */
+async function runElevatedFix() {
+  const go = await confirmDialog({
+    title: '中高风险优化',
+    message: '接下来会「改动既有文件」：\n\n'
+      + '· 改写既有文档（CLAUDE.md / README 等）\n'
+      + '· 重构既有源码（复杂度 / 重复 / 死代码 / 错误处理 / 注释）\n'
+      + '· 规则降级会删除规则文件并改写全仓引用\n\n'
+      + '兜底：开工前会打全量快照；源码改动逐个文件跑测试，测试变红立即回滚该文件；'
+      + '项目没有可跑的测试时，源码维度会自动降级为只出清单、不改代码。\n\n'
+      + '出问题可以用「还原」撤销本次全部改动。',
+    confirmText: '我了解，开始优化',
+    danger: true,
+  });
+  if (go) await runFix({ risk: 'elevated' });
 }
 
 async function rollbackFix(dirName) {
@@ -624,7 +899,8 @@ export function initOptimizePanel() {
   if (!inited) {
     inited = true;
     $('#optRunCheckup')?.addEventListener('click', runCheckup);
-    $('#optFix')?.addEventListener('click', () => runFix(false));
+    $('#optFix')?.addEventListener('click', () => runFix({ risk: 'low' }));
+    $('#optFixElevated')?.addEventListener('click', runElevatedFix);
     $('#optFixCancel')?.addEventListener('click', cancelFix);
     $('#optDirBtn')?.addEventListener('click', pickDir);
 
@@ -632,5 +908,8 @@ export function initOptimizePanel() {
   }
 
   refreshDirLabel(); // 面板每次打开都同步一次标签，避免 DOM 被重建后文案回退
-  loadReport(currentDir);
+  // switching:false —— 这是「重新打开面板」而不是「换项目」。传 true 会把正在跑的
+  // 体检 / 优化的 SSE 退掉并清空 loading，而后端任务还在跑、串行闸还占着，
+  // 用户回来就会看到「没有 loading 但点体检被拒」
+  loadReport(currentDir, { switching: false });
 }

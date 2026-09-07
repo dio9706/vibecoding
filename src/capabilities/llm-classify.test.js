@@ -1,6 +1,33 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractFirstJsonObject, classifyOutcome } from './llm-classify.js';
+import {
+  extractFirstJsonObject,
+  classifyOutcome,
+  extractJsonObjects,
+  pickJsonObject,
+  resolveEffort,
+  DEFAULT_EFFORT,
+} from './llm-classify.js';
+
+// —— effort 档位（2026-09-04）：本骨架全部调用点都是浅层任务，统一默认 low。
+// 三态区分是契约的关键：undefined（没传）≠ null（显式关闭）。
+test('resolveEffort：没传 → 默认档', () => {
+  assert.equal(resolveEffort(undefined), DEFAULT_EFFORT);
+  assert.equal(DEFAULT_EFFORT, 'low');
+});
+
+test('resolveEffort：显式档位原样透传', () => {
+  assert.equal(resolveEffort('high'), 'high');
+  assert.equal(resolveEffort('medium'), 'medium');
+});
+
+test('resolveEffort：null 表示显式关闭 → 调用方不传该键，退回 SDK 默认', () => {
+  assert.equal(resolveEffort(null), null);
+});
+
+test('resolveEffort：空串等假值按关闭处理，绝不把 "" 传给 SDK', () => {
+  assert.equal(resolveEffort(''), null);
+});
 
 // 只测纯函数：runClassifierOnce 会发起真实 LLM 调用（烧额度），单测一律不碰。
 // 提取逻辑正是 2026-08-19 埋点统计冒烟暴露的故障点，抽出来单独钉死。
@@ -141,4 +168,53 @@ test('classifyOutcome：脏输入不炸', () => {
     assert.equal(r.data, null);
     assert.ok(typeof r.reason === 'string');
   }
+});
+
+// ---------- 多轮工具调用的 JSON 抽取（回归：整体评估抓到中途那个对象，白跑 6.3 分钟） ----------
+
+test('extractJsonObjects 按顺序扫出全部顶层配平块', () => {
+  const text = '先看一下 {"a":1} 然后 {"b":{"c":2}} 结束';
+  assert.deepEqual(extractJsonObjects(text), ['{"a":1}', '{"b":{"c":2}}']);
+});
+
+test('extractJsonObjects 遇到配不平就停（截断的尾块不交给下游）', () => {
+  assert.deepEqual(extractJsonObjects('{"a":1} 然后 {"b":'), ['{"a":1}']);
+  assert.deepEqual(extractJsonObjects('没有对象'), []);
+});
+
+test('extractJsonObjects 不被字符串里的花括号带偏', () => {
+  assert.deepEqual(extractJsonObjects('{"s":"} 假的 {"}'), ['{"s":"} 假的 {"}']);
+});
+
+test('extractFirstJsonObject 行为一字未变（单轮分类点的校准依赖它）', () => {
+  assert.equal(extractFirstJsonObject('前言 {"a":1} 后记'), '{"a":1}');
+  assert.equal(extractFirstJsonObject('{"a":'), null, '截断一律返回 null');
+  assert.equal(extractFirstJsonObject('没有'), null);
+});
+
+test('pickJsonObject 按必须含的键从后往前挑，跳过中途叙述里的对象', () => {
+  // 这是实测事故的形状：模型探索时引用了一段代码，最后才给出计划
+  const out = '我先读一下配置 {"port":3000}\n再看看 {"deps":{"a":"^1"}}\n'
+    + '最终结论：{"score":72,"topActions":[{"title":"断开反向依赖"}]}';
+  const got = pickJsonObject(out, ['topActions']);
+  assert.equal(got.score, 72);
+  assert.equal(got.topActions[0].title, '断开反向依赖');
+});
+
+test('pickJsonObject 一个都匹配不上时退回最后一个能解析的（而不是第一个）', () => {
+  const got = pickJsonObject('{"a":1} 然后 {"b":2}', ['topActions']);
+  assert.deepEqual(got, { b: 2 }, '最后那个更可能是答案，对不对交给调用方的校验层判');
+});
+
+test('pickJsonObject 不传 requireKeys 时取最后一个能解析的', () => {
+  assert.deepEqual(pickJsonObject('{"a":1} {"b":2}'), { b: 2 });
+});
+
+test('pickJsonObject 跳过解析失败的块（模型贴的代码片段常常不是合法 JSON）', () => {
+  const out = 'function f() { return 1; }\n{"topActions":[{"title":"x"}]}';
+  assert.deepEqual(pickJsonObject(out, ['topActions']), { topActions: [{ title: 'x' }] });
+});
+
+test('pickJsonObject 全是坏块时返回 null', () => {
+  assert.equal(pickJsonObject('function f() { if (a) { b(); } }', ['topActions']), null);
 });

@@ -12,21 +12,42 @@ export const MAX_LEN = 2000;
 /** 机器人可配文案 key（per-bot）；welcome/materialAck/execNewChat 不可配，恒用默认 */
 export const BOT_MESSAGE_KEYS = ['ackBug', 'ackFeature', 'ackQuestion', 'ackAction', 'execProcessing'];
 
+/**
+ * welcome 的核心能力条目 —— **三处文案（REGISTRY 默认值 / buildWelcomeText / buildWelcomeCard）
+ * 共用这一份**。此前是三份手抄副本，改一处漏两处只是时间问题。
+ *
+ * ⚠️ 每条「例:」都不是随手举例，而是**必须真能触发对应功能**的说法（有单测守着）：
+ * - 前三条走 `app/intent-keywords.js` 的 L1 强前缀。特别地「提个bug」中间**不能加空格** ——
+ *   词表里是无空格字面量，'提个 bug: xxx' 会掉出快路，等于教用户说一句识别不了的话。
+ * - 第四条走 `plugins/tracking-stats` 的前缀 match（`TRACKING_PREFIX`，必须在**句首**），
+ *   它是插件型 feature、不走 action-configs，所以下面的「已配置功能」段永远列不到它 ——
+ *   不写在这里用户就永远不知道有这个功能（生产近 4 天未识别兜底触发 109 次）。
+ *   架构阶段会改成插件自声明能力条目，届时这份硬编码清单应当退场。
+ *
+ * 缩进用空格而非 Tab：飞书文本消息里 Tab 在桌面端/移动端渲染宽度不一致。
+ */
+const CORE_CAPABILITIES = [
+  { title: '提交需求', example: '提个需求: 把背景改成蓝色' },
+  { title: '提交故障', example: '提个bug: 聊天主页面语音有问题' },
+  { title: '问个问题', example: '问个问题: 我要在聊天页加个弹框, 这个功能复杂吗?' },
+  { title: '统计埋点', example: '帮我统计埋点: 最近7天分享功能的点击' },
+];
+
+const WELCOME_HEAD = '没有识别到你的意图，我可以进行这些操作：\n';
+
+/** 渲染能力条目；sep 决定条目间是否空行（纯文本紧凑，卡片留白） */
+function renderCapabilities(sep) {
+  return CORE_CAPABILITIES.map((c) => `· ${c.title}\n    例: ${c.example}`).join(sep);
+}
+
+/** 纯文本形态的核心段（末尾带换行，便于直接拼动作段） */
+const WELCOME_CORE_TEXT = WELCOME_HEAD + renderCapabilities('\n') + '\n';
+
 export const REGISTRY = {
   welcome: {
     label: '未识别意图兜底提示',
-    // ⚠️ 三条「例:」不是随手举例，是**必须能被 intent-keywords.js 的强前缀识别**的说法
-    //（intent.test.js 有断言守着）。特别地「提个bug」中间**不能加空格** —— 词表里是
-    // 无空格字面量，'提个 bug: xxx' 会掉出 L1 前缀快路，等于教用户说一句识别不了的话。
-    // 缩进用空格而非 Tab：飞书文本消息里 Tab 在桌面端/移动端渲染宽度不一致。
     defaultText:
-      '没有识别到你的意图，我可以进行这些操作：\n' +
-      '· 提交需求\n' +
-      '    例: 提个需求: 把背景改成蓝色\n' +
-      '· 提交故障\n' +
-      '    例: 提个bug: 聊天主页面语音有问题\n' +
-      '· 问个问题\n' +
-      '    例: 问个问题: 我要在聊天页加个弹框, 这个功能复杂吗?\n' +
+      WELCOME_CORE_TEXT +
       '\n' +
       '或其他已配置的功能，比如\n' +
       '    1. 给我小程序的二维码\n' +
@@ -48,8 +69,11 @@ export const REGISTRY = {
     label: '问询即时应答',
     defaultText: '请稍等，我先去翻阅代码再回来回答你的问题！',
   },
-  // 动作路径的槽位抽取要调一次 LLM（生产实测 6~12s），期间用户看不到任何反馈，
-  // 观感上就是「机器人死了」。发在抽取之前，让用户第一秒就知道消息收到了。
+  // 动作路径的槽位抽取**若真要调 LLM**（生产实测 8~17s），期间用户看不到任何反馈，
+  // 观感上就是「机器人死了」。这条就是为那段静默准备的。
+  // ⚠️ 只在真发起模型调用时才发（由 slot-filler 的 onLlmStart 回调驱动）——
+  // 变量声明了 enum/pattern 时本地亚毫秒抽完，此时再发这句，用户会紧接着看到
+  // 「⏳ 正在执行…」，两条挨在一起反而像卡了一下。别改回「有必填变量就发」。
   ackAction: {
     label: '动作即时应答',
     defaultText: '请稍等，我正在确认执行这个操作所需的信息！',
@@ -69,15 +93,8 @@ export const REGISTRY = {
  * @returns {string} 完整文案（包含动态获取的动作列表）
  */
 export function buildWelcomeText(botId, actions) {
-  // 1. 静态核心段
-  const core =
-    '没有识别到你的意图，我可以进行这些操作：\n' +
-    '· 提交需求\n' +
-    '    例: 提个需求: 把背景改成蓝色\n' +
-    '· 提交故障\n' +
-    '    例: 提个bug: 聊天主页面语音有问题\n' +
-    '· 问个问题\n' +
-    '    例: 问个问题: 我要在聊天页加个弹框, 这个功能复杂吗?\n';
+  // 1. 静态核心段（与 REGISTRY.welcome / buildWelcomeCard 同源，见 CORE_CAPABILITIES）
+  const core = WELCOME_CORE_TEXT;
 
   // 2. 读取该 bot 的已启用动作
   // 优先使用传入的 actions 参数，否则调用 getConfigs()
@@ -117,18 +134,8 @@ export function buildWelcomeText(botId, actions) {
  * @returns {object} Feishu schema 1.0 卡片 JSON
  */
 export function buildWelcomeCard(botId, actions) {
-  // 1. 操作说明段（Markdown 格式）
-  const headerText =
-    '没有识别到你的意图，我可以进行这些操作：\n' +
-    '\n' +
-    '· 提交需求\n' +
-    '    例: 提个需求: 把背景改成蓝色\n' +
-    '\n' +
-    '· 提交故障\n' +
-    '    例: 提个bug: 聊天主页面语音有问题\n' +
-    '\n' +
-    '· 问个问题\n' +
-    '    例: 问个问题: 我要在聊天页加个弹框, 这个功能复杂吗?';
+  // 1. 操作说明段（Markdown 格式；条目间留空行，与纯文本形态的唯一差别）
+  const headerText = WELCOME_HEAD + '\n' + renderCapabilities('\n\n');
 
   // 2. 读取该 bot 的已启用动作，最多 5 条
   // 优先使用传入的 actions 参数，否则调用 getConfigs()

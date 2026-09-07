@@ -142,6 +142,11 @@ export function handleSettings(req, res) {
         }
         // taskNotifyFeishu：布尔开关必须单独判——上面的 allowed 循环只认字符串（还会 .trim()），
         // 把它塞进那个数组会被 typeof 检查直接丢掉，开关永远存不下去
+        // projectMapIdleRefresh：同上，布尔值必须单独判，塞进 allowed 会被 typeof 丢掉。
+        // 它没有任何前置条件——纯本地定时扫描，不依赖飞书或外部服务，所以直接写盘。
+        if (typeof data.projectMapIdleRefresh === 'boolean') {
+          patch.projectMapIdleRefresh = data.projectMapIdleRefresh;
+        }
         let notifyBlocked = null;
         if (typeof data.taskNotifyFeishu === 'boolean') {
           // 只校验「开启」方向：关闭必须在任何配置状态下都能生效，否则飞书配置一旦被清空/机器人被停用，

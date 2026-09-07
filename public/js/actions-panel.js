@@ -3,8 +3,26 @@
 import { $, escapeHtml } from './util.js';
 import { toast, confirmDialog } from './ui.js';
 import { getJson, postJson, putJson, delJson } from './api.js';
+import { parseAliasLines, formatAliasLines, buildVarDecl } from './actions-panel.logic.js';
 
       let currentBotId = null; // 当前编辑中的机器人（动作归属）
+
+      /**
+       * 变量预置表（后端 /api/action-presets）。
+       * **不在前端抄一份** —— 这次改造的起因之一就是同一张 env 别名表在 Node 侧与
+       * get_qrcode.py 各存一份并已分叉。前端只读展示，真相仍只有 var-presets.js 一份。
+       */
+      let presetTable = {};
+
+      async function loadPresets() {
+        try {
+          const { data } = await getJson('/api/action-presets');
+          if (data && typeof data === 'object') presetTable = data;
+        } catch (e) {
+          console.error('加载变量预置表失败（不影响手写 enum/aliases）', e);
+        }
+      }
+
 
       /** bots-panel 注入机器人上下文；null = 关闭动作区 */
       export function setActionsBot(botId) {
@@ -104,6 +122,8 @@ import { getJson, postJson, putJson, delJson } from './api.js';
           </div>
         `;
 
+        // 预置表只用于「展开为可编辑」按钮，拉不到也不影响手写 enum/aliases，故不 await 失败路径
+        if (!Object.keys(presetTable).length) await loadPresets();
         renderVariablesTable(action?.variables || []);
 
         // 脚本以上传方式提供：用闭包变量承载，保存时读取（编辑时默认沿用原值）
@@ -165,48 +185,177 @@ import { getJson, postJson, putJson, delJson } from './api.js';
         formPanel.style.display = 'block';
       }
 
+      /**
+       * 预置下拉的选项：**从已加载的 presetTable 现算**，不另存一份清单。
+       *
+       * 这里曾硬编码 `['', 'env', 'phone']` —— 后端 var-presets.js 加一个预置，前端就选不到，
+       * 而这正是本次改造要消灭的「同一份知识存两处」的模式（抽取器已经不认变量名了，
+       * 前端不该再认预置名）。
+       *
+       * 两个边界：
+       * - presetTable 为空（loadPresets 失败）时只剩「（无）」，是**正确的降级** ——
+       *   宁可让用户选不到，也不要给出一个后端不认、保存必被 422 拒的选项。
+       * - 编辑既有变量时把它当前的 preset 值也并进来（哪怕后端已经删了这个预置），
+       *   否则下拉会静默把它洗成「（无）」，用户一保存就丢配置。
+       */
+      function presetOptionsFor(current) {
+        const known = Object.keys(presetTable);
+        const cur = typeof current === 'string' ? current : '';
+        return [...new Set(['', ...known, cur])];
+      }
+
+      /**
+       * 一个变量渲染成**两行**：主行（基础字段）+ 折叠的规则行（抽取契约）。
+       * 之所以折叠：字段从 5 个涨到 10 个，全铺在一行会宽到没法用，而抽取规则
+       * 对多数变量是可选的（不填 = 自由文本，走 LLM，行为与改造前一致）。
+       */
+      function variableRows(v = {}) {
+        const body = $('#variablesBody');
+        const main = document.createElement('tr');
+        main.className = 'varRow';
+        main.innerHTML = `
+          <td><input type="text" class="varName" value="${escapeHtml(v.name || '')}" /></td>
+          <td><input type="text" class="varLabel" value="${escapeHtml(v.label || '')}" /></td>
+          <td><input type="text" class="varPrompt" value="${escapeHtml(v.prompt || '')}" /></td>
+          <td><input type="checkbox" class="varRequired" ${v.required ? 'checked' : ''} /></td>
+          <td><input type="checkbox" class="varPersistent" ${v.persistent ? 'checked' : ''} /></td>
+          <td>
+            <select class="varPreset">
+              ${presetOptionsFor(v.preset)
+                .map((p) => {
+                  const selected = (v.preset || '') === p ? ' selected' : '';
+                  const unknown = p && !presetTable[p] ? '（未知）' : '';
+                  return `<option value="${escapeHtml(p)}"${selected}>${escapeHtml(p) || '（无）'}${unknown}</option>`;
+                })
+                .join('')}
+            </select>
+          </td>
+          <td style="white-space:nowrap;">
+            <button type="button" class="toggleVarRuleBtn btn">规则</button>
+            <button type="button" class="deleteVarBtn btn">删除</button>
+          </td>
+        `;
+
+        const detail = document.createElement('tr');
+        detail.className = 'varRuleRow';
+        detail.style.display = 'none';
+        detail.innerHTML = `
+          <td colspan="7" style="padding:8px 12px;background:var(--panel,#f7f7f8);">
+            <div style="font-size:12px;color:var(--faint);margin-bottom:6px;">
+              抽取规则决定这个变量<b>怎么被识别</b>。填了「合法值」或「正则」就走本地零成本抽取；
+              都不填则视为自由文本，每次都要调模型（慢 8~17 秒）。选了预置且这里留空，即沿用预置内容。
+            </div>
+            <label style="display:block;margin:4px 0;">合法值（逗号分隔，与正则二选一）：
+              <input type="text" class="varEnum" value="${escapeHtml((v.enum || []).join(', '))}" />
+            </label>
+            <label style="display:block;margin:4px 0;">别名（每行一条 <code>别名=合法值</code>）：
+              <textarea class="varAliases" rows="3">${escapeHtml(formatAliasLines(v.aliases))}</textarea>
+            </label>
+            <label style="display:block;margin:4px 0;">歧义别名（仅在机器人追问时才识别，格式同上）：
+              <textarea class="varWeakAliases" rows="2">${escapeHtml(formatAliasLines(v.weakAliases))}</textarea>
+            </label>
+            <label style="display:block;margin:4px 0;">正则（<b>不要写 ^ 和 $</b>，系统校验时自动加）：
+              <input type="text" class="varPattern" value="${escapeHtml(v.pattern || '')}" />
+            </label>
+            <label style="display:block;margin:4px 0;">示例值（喂给模型看的）：
+              <input type="text" class="varExample" value="${escapeHtml(v.example || '')}" />
+            </label>
+            <button type="button" class="expandPresetBtn btn" style="margin-top:6px;">展开预置为可编辑</button>
+            <span style="font-size:12px;color:var(--faint);margin-left:8px;">
+              把预置内容填进上面各框，之后可自由增删（填了就不再跟随预置更新）
+            </span>
+          </td>
+        `;
+
+        body.appendChild(main);
+        body.appendChild(detail);
+
+        main.querySelector('.deleteVarBtn').addEventListener('click', () => {
+          detail.remove();
+          main.remove();
+        });
+        main.querySelector('.toggleVarRuleBtn').addEventListener('click', () => {
+          detail.style.display = detail.style.display === 'none' ? '' : 'none';
+        });
+        detail.querySelector('.expandPresetBtn').addEventListener('click', () => {
+          const p = presetTable[main.querySelector('.varPreset').value];
+          if (!p) return toast('请先选择一个预置类型');
+          // 只在目标框为空时填，避免一键抹掉用户已经写好的内容；
+          // 跳过了哪些要**明确告诉用户**，否则他会以为预置内容已经全进来了，
+          // 而实际上那几个框还是他自己的旧值 —— 保存后行为与预期不符且很难查。
+          const skipped = [];
+          const fill = (sel, label, val) => {
+            const el = detail.querySelector(sel);
+            if (String(el.value || '').trim()) {
+              if (val) skipped.push(label);
+              return;
+            }
+            el.value = val;
+          };
+          fill('.varEnum', '合法值', (p.enum || []).join(', '));
+          fill('.varAliases', '别名', formatAliasLines(p.aliases));
+          fill('.varWeakAliases', '歧义别名', formatAliasLines(p.weakAliases));
+          fill('.varPattern', '正则', p.pattern || '');
+          fill('.varExample', '示例值', p.example || '');
+          // 标记「已实体化」：此后各框即真相，清空某个框就是「删掉它」，
+          // buildVarDecl 会如实下发空值而不是省略（省略会让浅覆盖把预置内容补回来）。
+          detail.dataset.expanded = '1';
+          toast(
+            skipped.length
+              ? `预置内容已填入；${skipped.join('、')}已有内容，保留了你填的值`
+              : '预置内容已填入，之后可自由增删',
+          );
+        });
+
+        return main;
+      }
+
       function renderVariablesTable(variables) {
         const table = $('#variablesTable');
         table.innerHTML = `
           <table style="width: 100%; border-collapse: collapse;">
             <thead>
               <tr>
-                <th>名称</th><th>标签</th><th>追问文案</th><th>必填</th><th>永久存储</th><th>删除</th>
+                <th>名称</th><th>标签</th><th>追问文案</th><th>必填</th><th>永久存储</th><th>预置</th><th>操作</th>
               </tr>
             </thead>
             <tbody id="variablesBody">
             </tbody>
           </table>
         `;
-        const body = $('#variablesBody');
-        variables.forEach((v) => {
-          const row = document.createElement('tr');
-          row.innerHTML = `
-            <td><input type="text" class="varName" value="${escapeHtml(v.name || '')}" /></td>
-            <td><input type="text" class="varLabel" value="${escapeHtml(v.label || '')}" /></td>
-            <td><input type="text" class="varPrompt" value="${escapeHtml(v.prompt || '')}" /></td>
-            <td><input type="checkbox" class="varRequired" ${v.required ? 'checked' : ''} /></td>
-            <td><input type="checkbox" class="varPersistent" ${v.persistent ? 'checked' : ''} /></td>
-            <td><button type="button" class="deleteVarBtn btn">删除</button></td>
-          `;
-          body.appendChild(row);
-          row.querySelector('.deleteVarBtn').addEventListener('click', () => row.remove());
-        });
+        variables.forEach((v) => variableRows(v));
       }
 
       function addVariableRow() {
-        const body = $('#variablesBody');
-        const row = document.createElement('tr');
-        row.innerHTML = `
-          <td><input type="text" class="varName" /></td>
-          <td><input type="text" class="varLabel" /></td>
-          <td><input type="text" class="varPrompt" /></td>
-          <td><input type="checkbox" class="varRequired" /></td>
-          <td><input type="checkbox" class="varPersistent" /></td>
-          <td><button type="button" class="deleteVarBtn btn">删除</button></td>
-        `;
-        body.appendChild(row);
-        row.querySelector('.deleteVarBtn').addEventListener('click', () => row.remove());
+        variableRows({});
+      }
+
+      /**
+       * 读一行变量的声明。
+       *
+       * 规则行是主行的**下一个兄弟节点**（variableRows 成对 append，删除也成对）。
+       * 取不到时 val() 回落空串，等价于「规则全部留空」—— 退化成沿用 preset / 自由文本，
+       * 不会产出脏声明。拼装逻辑在 actions-panel.logic.js（纯函数，有单测）。
+       */
+      function readVarRow(main) {
+        const detail = main.nextElementSibling?.classList.contains('varRuleRow')
+          ? main.nextElementSibling
+          : null;
+        const val = (sel) => detail?.querySelector(sel)?.value || '';
+        return buildVarDecl({
+          name: main.querySelector('.varName').value,
+          label: main.querySelector('.varLabel').value,
+          prompt: main.querySelector('.varPrompt').value,
+          required: main.querySelector('.varRequired').checked,
+          persistent: main.querySelector('.varPersistent').checked,
+          preset: main.querySelector('.varPreset').value,
+          enumText: val('.varEnum'),
+          aliasesText: val('.varAliases'),
+          weakAliasesText: val('.varWeakAliases'),
+          pattern: val('.varPattern'),
+          example: val('.varExample'),
+          expanded: detail?.dataset.expanded === '1',
+        });
       }
 
       async function saveAction(actionId, scriptInfo) {
@@ -214,13 +363,8 @@ import { getJson, postJson, putJson, delJson } from './api.js';
           toast('请先上传脚本文件');
           return;
         }
-        const variables = Array.from(document.querySelectorAll('#variablesBody tr')).map((row) => ({
-          name: row.querySelector('.varName').value,
-          label: row.querySelector('.varLabel').value,
-          prompt: row.querySelector('.varPrompt').value,
-          required: row.querySelector('.varRequired').checked,
-          persistent: row.querySelector('.varPersistent').checked,
-        }));
+        // 只取主行（.varRow）；每个变量还有一条折叠的规则行，由 readVarRow 顺着读
+        const variables = Array.from(document.querySelectorAll('#variablesBody tr.varRow')).map(readVarRow);
 
         const payload = {
           botId: currentBotId, // 新建时归属当前机器人；更新时服务端剥离（归属不可改）
@@ -244,7 +388,9 @@ import { getJson, postJson, putJson, delJson } from './api.js';
             await renderActionsList();
             toast('已保存');
           } else {
-            toast('保存失败');
+            // 422 = 变量声明校验没过，后端给的是能直接读的中文说明（哪个变量的哪个字段）。
+            // 必须原样透出：吞掉只留一句「保存失败」会让用户完全不知道该改哪。
+            toast(res.data?.error ? `保存失败：${res.data.error}` : '保存失败');
           }
         } catch (e) {
           toast('保存失败: ' + e.message);

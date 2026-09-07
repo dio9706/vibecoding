@@ -6,7 +6,7 @@
  * 错误策略：读不存在的文件返回 null（不抛错），其他错误才抛错。
  */
 
-import { mkdir, readFile, writeFile, unlink, rename as fsRename } from 'node:fs/promises'
+import { mkdir, readdir, readFile, writeFile, unlink, rename as fsRename } from 'node:fs/promises'
 import path from 'node:path'
 import { appDataPath } from '../../shared/app-paths.js'
 
@@ -134,4 +134,43 @@ export async function deleteProjectMap(projectId) {
       throw err
     }
   }
+}
+
+/**
+ * 列出所有已落盘的项目地图（供凌晨闲时批量刷新用）。
+ *
+ * 只读 projectId / projectPath / generatedAt 这几个字段就够定位与判断，
+ * 但地图文件本身可能几百 KB，逐个全量 parse 在项目多时是笔冤枉开销——
+ * 这里仍整份读入是因为 JSON 没有部分解析的标准手段，宁可慢也不引第三方流式解析器。
+ *
+ * 单个文件坏掉（写到一半掉电、手工编辑出错）只跳过它，不能让整批刷新失败。
+ *
+ * @returns {Promise<Array<{projectId, projectPath, generatedAt}>>}
+ */
+export async function listProjectMaps() {
+  const dir = appDataPath('project-maps')
+  let names
+  try {
+    names = await readdir(dir)
+  } catch {
+    return [] // 目录还不存在 = 一张地图都没生成过
+  }
+
+  const out = []
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue
+    const projectId = name.slice(0, -'.json'.length)
+    try {
+      const raw = await readFile(path.join(dir, name), 'utf-8')
+      const data = JSON.parse(raw)
+      out.push({
+        projectId,
+        projectPath: data?.projectPath || '',
+        generatedAt: data?.generatedAt || data?.scanAt || '',
+      })
+    } catch {
+      // 坏文件跳过：一份损坏的地图不该挡住其它项目的刷新
+    }
+  }
+  return out
 }

@@ -13,9 +13,19 @@ export function canFix({ hasReport, selected, running } = {}) {
   return hasReport === true && Array.isArray(selected) && selected.length > 0 && running !== true;
 }
 
-/** 按钮文案随运行状态切换，运行中要明确告知用户「正在处理」防止误以为卡死。 */
-export function fixButtonLabel(running) {
-  return running ? '优化中…' : '一键优化';
+/**
+ * 主优化按钮的文案。三态，缺一个用户就会误判：
+ *   优化中   —— 不说就会以为卡死了，然后反复点
+ *   体检中   —— 按钮此时是禁用的，**光禁不说理由，用户只会以为按钮坏了**
+ *   空闲     —— 标出「低风险」，让人知道这个按钮不会碰既有代码
+ *
+ * @param {boolean} running 优化在跑
+ * @param {string} [checkupBusy] 体检忙碌态（`''` / `'posting'` / `'analyzing'`）
+ */
+export function fixButtonLabel(running, checkupBusy = '') {
+  if (running) return '优化中…';
+  if (checkupBusy) return '体检中…';
+  return '一键优化（低风险）';
 }
 
 /**
@@ -33,6 +43,17 @@ const STEP_LABEL = {
   'replace-refs': '改写文档引用',
   'dead-link': '修复地图死链',
   'gen-map': '生成项目地图',
+  // 测试闸：源码重构的准入检查。用户看到这一步在跑几分钟测试时得知道为什么
+  'test-gate': '检查测试安全网',
+  // 五种修复策略。原样露出策略名而不是笼统写「修复中」——
+  // 用户据此知道这一步是在真改代码（refactor/rewrite）还是只在出清单（advisory）
+  deterministic: '机械修复（无 AI 参与）',
+  'llm-refactor': '重构源码（改完立刻跑测试）',
+  'llm-rewrite': '修订文档',
+  'llm-create': '生成测试文件',
+  advisory: '生成整改清单',
+  degrade: '缺少测试安全网，改为只出清单',
+  'plan-file': '写出整体行动计划',
   cancelling: '正在停止',
   abort: '已中止',
 };
@@ -40,6 +61,32 @@ const STEP_LABEL = {
 export function stepLabel(phase) {
   const key = typeof phase === 'string' ? phase : '';
   return STEP_LABEL[key] || key;
+}
+
+/**
+ * 结果条目的 `kind` → 给用户看的「这条做了什么」。
+ *
+ * 必须展示：风险分级的全部意义就是让用户知道**哪些改了代码、哪些只写了清单**。
+ * 结果列表只有文件名和一句 reason 的话，「重构了 src/a.js」和「为 src/a.js 写了条清单」
+ * 看起来一模一样——那用户就没法判断这次优化到底动了什么。
+ */
+const KIND_LABEL = {
+  advisory: '整改清单',
+  refactor: '重构源码',
+  rewrite: '修订文档',
+  'create-test': '新建测试',
+  ignore: '改 .gitignore',
+  untrack: '脱离 git 索引',
+  dedupe: '删重复条目',
+  'gen-map': '生成地图',
+  'stale-audit': '地图核对块',
+  'dead-link': '修复死链',
+};
+
+export function kindLabel(kind) {
+  const k = typeof kind === 'string' ? kind : '';
+  // 未知 kind 原样回显：后端加新策略时用户至少看得到标识，而不是一片空白
+  return KIND_LABEL[k] || k;
 }
 
 /**

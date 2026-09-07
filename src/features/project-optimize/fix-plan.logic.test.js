@@ -56,13 +56,54 @@ test('只认 .claude/rules/ 下的文件', () => {
 
 // ---------- buildFixNotes ----------
 
-test('勾选了尚不支持的维度要如实说明', () => {
-  // 静默忽略最糟：用户勾了「注释合理性」，看到「优化完成」，以为注释也处理过了
-  // 注意：map 已进入 SUPPORTED_DIMENSIONS，这里改用 comments/tests 举例
-  const notes = buildFixNotes({ requested: ['rules', 'comments', 'tests'], results: [] });
+test('注册表里的维度全部有修复策略（所以「不支持」的提示不该再出现）', () => {
+  // 这条断言从「勾了不支持的维度要如实说明」改写而来。原来只有 rules/map 能自动修，
+  // 其余维度只得到一句「暂无自动修复能力」；现在每个维度都至少有 advisory 兜底
+  // （产出带定位、带依据、带改法的整改清单），「勾了却什么都没发生」不再可能。
+  // 保留反向断言是为了钉住这个不变式：注册表新增维度时忘了写 fix 会在这里报出来
+  const notes = buildFixNotes({ requested: ['rules', 'comments', 'tests', 'security'], results: [] });
+  assert.deepEqual(notes, []);
+});
+
+test('真出现未登记的维度时仍要如实说明（兜底告知不能丢）', () => {
+  const notes = buildFixNotes({ requested: ['rules', '还没实现的维度'], results: [] });
   assert.equal(notes.length, 1);
-  assert.match(notes[0], /comments/);
-  assert.match(notes[0], /tests/);
+  assert.match(notes[0], /还没实现的维度/);
+});
+
+test('产出整改清单时要指路，否则清单等于没产出', () => {
+  const notes = buildFixNotes({
+    requested: ['security'],
+    results: [{ status: 'done', kind: 'advisory', file: '.claude/optimize/security.md', reason: '已生成 3 项整改清单' }],
+  });
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /\.claude\/optimize\//);
+  assert.match(notes[0], /PLAN\.md/);
+});
+
+test('源码维度被测试闸挡下时必须显式否认「代码已改过」', () => {
+  const notes = buildFixNotes({
+    requested: ['complexity'],
+    results: [{
+      status: 'done',
+      kind: 'advisory',
+      file: '.claude/optimize/complexity.md',
+      reason: '已生成 5 项整改清单（未改动代码）',
+    }],
+  });
+  // 两条：一条指路清单，一条说明「没改代码」
+  assert.equal(notes.length, 2);
+  assert.ok(notes.some((n) => /没有改动任何代码/.test(n)));
+  assert.ok(notes.some((n) => /测试健康度/.test(n)), '要告诉用户怎样才能解锁自动修复');
+});
+
+test('动过 git 索引要提醒还原不管索引', () => {
+  const notes = buildFixNotes({
+    requested: ['hygiene'],
+    results: [{ status: 'done', kind: 'untrack', file: 'run.log', reason: '已从 git 索引移除' }],
+  });
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /git add/);
 });
 
 test('只勾选支持的维度时不产生该提示', () => {

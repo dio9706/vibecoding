@@ -1,20 +1,46 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DIM_META, dimListFrom, severityRank, sortIssues } from './optimize-view.logic.js';
+import {
+  DIM_META, CATEGORY_META, dimListFrom, severityRank, sortIssues, groupDims, groupSummary,
+  checkupAge, STALE_CHECKUP_DAYS,
+} from './optimize-view.logic.js';
+import { displayDimensions, CATEGORIES } from '../../src/features/project-checkup/dimensions/registry.js';
 
-test('维度元信息覆盖六个维度且顺序固定', () => {
-  // tests 紧随 map（两者都是高权重的健壮性信号），hygiene 收尾；
-  // 原先恒为 disabled 的 deadcode 已由 hygiene 取代
+test('前端维度表与后端注册表逐项一致（漂移护栏）', () => {
+  // 前端不能直接 import 注册表（那是 node 端模块，还会把整条召回器依赖链拖进浏览器），
+  // 所以 DIM_META 是手抄的镜像。这条测试是那份手抄的唯一保障——
+  // 后端加了维度而前端忘了加，会在这里报失败，而不是变成一个「算出来但不显示」的静默 bug
+  const backend = displayDimensions();
   assert.deepEqual(
-    DIM_META.map((d) => d.key),
-    ['map', 'tests', 'prompts', 'rules', 'comments', 'hygiene'],
+    DIM_META.map((d) => d.key).sort(),
+    backend.map((d) => d.id).sort(),
+    '前后端维度集合必须完全相同',
   );
+
+  const byId = new Map(backend.map((d) => [d.id, d]));
+  for (const d of DIM_META) {
+    assert.equal(d.label, byId.get(d.key).label, `${d.key} 的 label 与后端不一致`);
+    assert.equal(d.category, byId.get(d.key).category, `${d.key} 的 category 与后端不一致`);
+  }
+});
+
+test('分组表与后端的域定义一致', () => {
+  assert.deepEqual(
+    CATEGORY_META.map((c) => c.key).sort(),
+    CATEGORIES.map((c) => c.key).sort(),
+  );
+});
+
+test('holistic 排在最前（它就是「先看哪儿」的答案，放末尾没人会滚到）', () => {
+  assert.equal(DIM_META[0].key, 'holistic');
+  assert.equal(CATEGORY_META[0].key, 'holistic');
 });
 
 test('每个维度都有中文标签和说明', () => {
   for (const d of DIM_META) {
     assert.ok(d.label && d.label.length > 0, `${d.key} 缺 label`);
     assert.ok(d.hint && d.hint.length > 0, `${d.key} 缺 hint`);
+    assert.ok(d.category && d.category.length > 0, `${d.key} 缺 category`);
   }
 });
 
@@ -30,10 +56,10 @@ test('从报告生成维度列表,带上可勾选状态', () => {
     },
   };
   const list = dimListFrom(report);
-  assert.equal(list[0].key, 'map');
-  assert.equal(list[0].scoreText, '80');
-  assert.equal(list[0].selectable, true);
-  assert.equal(list[0].issueCount, 1);
+  const map = list.find((d) => d.key === 'map');
+  assert.equal(map.scoreText, '80');
+  assert.equal(map.selectable, true);
+  assert.equal(map.issueCount, 1);
 
   // na 维度：无分数、不可勾选，但要把原因透出来
   const hygiene = list.find((d) => d.key === 'hygiene');
@@ -99,19 +125,20 @@ test('error 维度不可勾选且不转圈', () => {
 test('score 为 0 时不能显示成 --', () => {
   // 0 分是合法分数（比如项目根本没有 CLAUDE.md），不是「无结果」
   const list = dimListFrom({ dims: { map: { score: 0, status: 'done', issues: [] } } });
-  assert.equal(list[0].scoreText, '0');
-  assert.equal(list[0].selectable, true);
+  const map = list.find((d) => d.key === 'map');
+  assert.equal(map.scoreText, '0');
+  assert.equal(map.selectable, true);
 });
 
 test('报告为空时全部维度显示 --', () => {
   const list = dimListFrom(null);
-  assert.equal(list.length, 6);
+  assert.equal(list.length, DIM_META.length);
   assert.ok(list.every((d) => d.scoreText === '--' && d.selectable === false));
 });
 
 test('报告缺 dims 键时不崩', () => {
   const list = dimListFrom({});
-  assert.equal(list.length, 6);
+  assert.equal(list.length, DIM_META.length);
   assert.ok(list.every((d) => d.scoreText === '--'));
 });
 
@@ -148,4 +175,56 @@ test('sortIssues 接受空值', () => {
 
 test('severityRank 未知值排最后', () => {
   assert.ok(severityRank('unknown') > severityRank('info'));
+});
+
+test('dimListFrom 把 holistic 的行动计划带出来（卡片要单独渲染成一块）', () => {
+  const plan = { score: 68, verdict: 'v', topActions: [{ title: 't', priority: 'now', files: [], why: '', done: '' }] };
+  const list = dimListFrom({ dims: { holistic: { score: 68, status: 'done', issues: [], plan } } });
+  assert.deepEqual(list.find((d) => d.key === 'holistic').plan, plan);
+  assert.equal(list.find((d) => d.key === 'map').plan, null, '别的维度没有 plan');
+});
+
+test('groupDims 按域切分并丢掉空组（空标题只是噪声）', () => {
+  const groups = groupDims(dimListFrom(null));
+  assert.deepEqual(groups.map((g) => g.key), CATEGORY_META.map((c) => c.key));
+  for (const g of groups) assert.ok(g.dims.length > 0);
+  assert.deepEqual(
+    groupDims([{ key: 'map', category: 'ai' }]).map((g) => g.key),
+    ['ai'],
+    '只有一个维度时只该出一个组',
+  );
+});
+
+test('groupSummary 折叠后仍能看出这个域好不好', () => {
+  const dims = [
+    { score: 80, issueCount: 2 },
+    { score: 60, issueCount: 1 },
+    { score: null, issueCount: 0 },
+  ];
+  const s = groupSummary(dims);
+  assert.match(s, /2\/3 已出结果/);
+  assert.match(s, /均分 70/);
+  assert.match(s, /3 个问题/);
+});
+
+test('groupSummary 在全部待分析时不硬算均分', () => {
+  assert.equal(groupSummary([{ score: null, issueCount: 0 }, { score: null, issueCount: 0 }]), '2 项待分析');
+});
+
+// ---------- 报告新鲜度（超过一个月要标红 + 挂「长时间未体检」） ----------
+
+test('checkupAge 按天数判超期，阈值取 30 天', () => {
+  const now = Date.parse('2026-09-03T12:00:00Z');
+  const at = (d) => new Date(now - d * 86400000).toISOString();
+
+  assert.deepEqual(checkupAge(at(0), now), { days: 0, stale: false });
+  assert.deepEqual(checkupAge(at(29), now), { days: 29, stale: false });
+  assert.deepEqual(checkupAge(at(30), now), { days: 30, stale: true }, '刚好 30 天就该提示');
+  assert.equal(checkupAge(at(200), now).stale, true);
+  assert.equal(STALE_CHECKUP_DAYS, 30);
+});
+
+test('checkupAge 拿不到时间就不指责用户没体检', () => {
+  assert.deepEqual(checkupAge(undefined), { days: null, stale: false });
+  assert.deepEqual(checkupAge('不是时间'), { days: null, stale: false });
 });

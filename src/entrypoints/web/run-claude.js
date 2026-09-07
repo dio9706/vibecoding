@@ -107,7 +107,7 @@ export function startClaudeRun(run, { prompt, cwd, addDirs, session, model, effo
     onInputHandle: (h) => {
       run._input = h; // 插话入口：/api/run/msg/* 经此注入/打断运行中的 query
     },
-    settings: { autoCompactEnabled: true }, // 长会话自动压缩，抑制上下文膨胀 → 省额度
+    settings: { autoCompactEnabled: true, outputStyle: 'concise' }, // 长会话自动压缩省额度；简洁输出模式直给结果跳前言
     // 只声明查得到实据的 kind。CLI 把「未声明」当作「宿主渲染不了」并 fail closed
     //（sdk.d.ts:3369），所以多声明不会让 dialog 多发出来，只会让人误以为已经适配过。
     // 核查结论（SDK 0.3.210 bundle + claude.exe 字符串）：

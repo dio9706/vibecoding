@@ -14,7 +14,7 @@ import {
 } from '../../../integrations/lark.js';
 import { runClassifierOnce } from '../../../capabilities/llm-classify.js';
 import { reviewTask } from '../review/index.js';
-import { requestAutoDevelop } from '../auto-dev/index.js';
+import { requestAutoDevelop } from '../auto-dev/queue.js';
 import { createTask } from '../../../store/tasks.js';
 import { getMyFeishuOpenId } from '../../../store/settings.js';
 import { resolveTrustedOpenIds, isTrustedSubmitter } from '../../../shared/trusted-ids.js';

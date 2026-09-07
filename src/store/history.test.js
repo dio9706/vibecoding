@@ -2,7 +2,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { getHistoryDir, getHistorySession, listHistorySessions } from './history.js';
+import {
+  getHistoryDir,
+  getHistorySession,
+  listHistorySessions,
+  parseCleanupWindow,
+  inCleanupWindow,
+  countHistorySessions,
+  previewCleanup,
+  deleteHistorySessions,
+} from './history.js';
 
 // 用带 pid 的假 cwd 隔离出专用 project 目录，测完整体删除
 const FAKE_CWD = 'C:\\__history-test-' + process.pid;
@@ -108,4 +117,122 @@ test('mtime 缓存：新增文件能被发现', async (t) => {
   writeSession('second', [{ type: 'ai-title', aiTitle: '第二个' }]);
   const list = await listHistorySessions(100, 0, FAKE_CWD);
   assert.ok(list.some((s) => s.sessionId === 'second'), '新增的会话未出现在列表里');
+});
+
+// ── 会话清理：纯逻辑（parseCleanupWindow / inCleanupWindow）────────────────
+
+test('parseCleanupWindow：合法预设天数返回 range', () => {
+  for (const r of [7, 14, 30, 90]) {
+    assert.deepEqual(parseCleanupWindow({ range: r }), { range: r });
+  }
+  // 字符串数字也接受（来自 query string）
+  assert.deepEqual(parseCleanupWindow({ range: '30' }), { range: 30 });
+});
+
+test('parseCleanupWindow：非预设天数不走 range，回落到自定义/无效', () => {
+  // 15 不在预设集合、又无自定义日期 → null
+  assert.equal(parseCleanupWindow({ range: 15 }), null);
+  // 完全空 → null
+  assert.equal(parseCleanupWindow({}), null);
+});
+
+test('parseCleanupWindow：自定义日期得到 [fromMs, toMs]，止=当日 23:59:59.999', () => {
+  const win = parseCleanupWindow({ fromDate: '2026-08-01', toDate: '2026-08-31' });
+  assert.equal(win.fromMs, new Date('2026-08-01T00:00:00').getTime());
+  assert.equal(win.toMs, new Date('2026-08-31T23:59:59.999').getTime());
+  // 单边也允许
+  assert.equal(parseCleanupWindow({ toDate: '2026-08-31' }).fromMs, null);
+  assert.equal(parseCleanupWindow({ fromDate: '2026-08-01' }).toMs, null);
+});
+
+test('parseCleanupWindow：非法输入返回 null', () => {
+  assert.equal(parseCleanupWindow({ fromDate: '不是日期', toDate: '2026-08-31' }), null);
+  assert.equal(parseCleanupWindow({ fromDate: '2026-09-30', toDate: '2026-08-31' }), null); // 起晚于止
+});
+
+test('inCleanupWindow：range 删除早于 now-N 天的，边界外的保留', () => {
+  const now = Date.parse('2026-09-04T12:00:00Z');
+  const day = 24 * 60 * 60 * 1000;
+  const win = parseCleanupWindow({ range: 7 });
+  assert.equal(inCleanupWindow(now - 8 * day, now, win), true); // 8 天前 → 删
+  assert.equal(inCleanupWindow(now - 6 * day, now, win), false); // 6 天前 → 留
+  assert.equal(inCleanupWindow(now, now, win), false); // 刚动过 → 留
+});
+
+test('inCleanupWindow：自定义区间为闭区间，两端命中、区间外保留', () => {
+  const win = parseCleanupWindow({ fromDate: '2026-08-01', toDate: '2026-08-31' });
+  const now = Date.now();
+  assert.equal(inCleanupWindow(new Date('2026-08-15T10:00:00').getTime(), now, win), true);
+  assert.equal(inCleanupWindow(new Date('2026-08-01T00:00:00').getTime(), now, win), true); // 下界含
+  assert.equal(inCleanupWindow(new Date('2026-08-31T23:59:59').getTime(), now, win), true); // 上界含
+  assert.equal(inCleanupWindow(new Date('2026-07-31T23:00:00').getTime(), now, win), false);
+  assert.equal(inCleanupWindow(new Date('2026-09-01T00:30:00').getTime(), now, win), false);
+});
+
+test('inCleanupWindow：无效窗（null）一律不删', () => {
+  assert.equal(inCleanupWindow(0, Date.now(), null), false);
+});
+
+// ── 会话清理：IO（previewCleanup / deleteHistorySessions / count）──────────
+
+const CLEAN_CWD = 'C:\\__cleanup-test-' + process.pid;
+
+/** 写一个会话文件并把它的 mtime 设成 daysAgo 天前 */
+function writeAged(sid, daysAgo) {
+  const dir = getHistoryDir(CLEAN_CWD);
+  fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, sid + '.jsonl');
+  fs.writeFileSync(f, JSON.stringify({ type: 'ai-title', aiTitle: sid }) + '\n');
+  const t = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
+  fs.utimesSync(f, t, t);
+  return dir;
+}
+
+test('previewCleanup / deleteHistorySessions：range 只清早于阈值的旧会话', async (t) => {
+  const dir = getHistoryDir(CLEAN_CWD);
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  writeAged('old20', 20); // 应删
+  writeAged('old10', 10); // 应删
+  writeAged('fresh2', 2); // 应留
+
+  assert.equal(await countHistorySessions(CLEAN_CWD), 3);
+
+  const preview = await previewCleanup(CLEAN_CWD, { range: 7 });
+  assert.equal(preview.willDeleteCount, 2);
+  assert.ok(preview.oldestSession && preview.newestSession);
+
+  const res = await deleteHistorySessions(CLEAN_CWD, { range: 7 });
+  assert.equal(res.deletedCount, 2);
+  assert.ok(res.freedBytes > 0);
+  assert.equal(await countHistorySessions(CLEAN_CWD), 1); // 只剩 fresh2
+  assert.ok(fs.existsSync(path.join(dir, 'fresh2.jsonl')));
+});
+
+test('deleteHistorySessions：protectedIds 中的会话不删', async (t) => {
+  const dir = getHistoryDir(CLEAN_CWD);
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  writeAged('running', 30);
+  writeAged('idle', 30);
+
+  const res = await deleteHistorySessions(CLEAN_CWD, { range: 7, protectedIds: ['running'] });
+  assert.equal(res.deletedCount, 1);
+  assert.ok(fs.existsSync(path.join(dir, 'running.jsonl')), '受保护会话被误删');
+  assert.ok(!fs.existsSync(path.join(dir, 'idle.jsonl')));
+});
+
+test('deleteHistorySessions：无效窗不删任何文件（fail-closed）', async (t) => {
+  const dir = getHistoryDir(CLEAN_CWD);
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  writeAged('keep', 100);
+  const res = await deleteHistorySessions(CLEAN_CWD, { range: 15 }); // 15 非预设 → null 窗
+  assert.equal(res.deletedCount, 0);
+  assert.ok(fs.existsSync(path.join(dir, 'keep.jsonl')));
+});
+
+test('previewCleanup / count：目录不存在时返回 0，不抛错', async () => {
+  const NOPE = 'C:\\__cleanup-nonexist-' + process.pid;
+  assert.equal(await countHistorySessions(NOPE), 0);
+  const preview = await previewCleanup(NOPE, { range: 7 });
+  assert.equal(preview.willDeleteCount, 0);
+  assert.equal(preview.oldestSession, null);
 });

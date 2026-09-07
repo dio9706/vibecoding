@@ -96,7 +96,9 @@ test('POST /fix 没有可自动修的项 → 200 且如实说明被挡下的原�
   const dir = project([
     { code: 'R2_DEMOTE_UNCERTAIN', file: '.claude/rules/x.md', fixable: false, message: '请人工确认' },
   ]);
-  const r = await post('/api/optimize/fix', { dir });
+  // 显式传 elevated：这个用例验的是「确实没有可修项」，
+  // 不传的话会因为默认只做低风险而同样得到 nothing——那就测不出原本的意图了
+  const r = await post('/api/optimize/fix', { dir, risk: 'elevated' });
   assert.equal(r.status, 200);
   assert.equal(r.json.nothing, true);
   assert.equal(r.json.blocked.length, 1);
@@ -105,7 +107,7 @@ test('POST /fix 没有可自动修的项 → 200 且如实说明被挡下的原�
 
 test('POST /fix 脏工作区 → 200 + needsConfirm', async () => {
   const dir = project([ghostIssue], { git: true, dirty: true });
-  const r = await post('/api/optimize/fix', { dir });
+  const r = await post('/api/optimize/fix', { dir, risk: 'elevated' });
   assert.equal(r.status, 200);
   assert.equal(r.json.needsConfirm, true);
   assert.ok(r.json.dirtyCount >= 1);
@@ -114,7 +116,7 @@ test('POST /fix 脏工作区 → 200 + needsConfirm', async () => {
 
 test('POST /fix 带 force 可跳过脏工作区确认', async () => {
   const dir = project([ghostIssue], { git: true, dirty: true });
-  const r = await post('/api/optimize/fix', { dir, force: true });
+  const r = await post('/api/optimize/fix', { dir, risk: 'elevated', force: true });
   assert.equal(r.status, 200);
   assert.ok(r.json.jobId, '应当直接开跑');
   await waitFixDone(r.json.jobId);
@@ -122,7 +124,7 @@ test('POST /fix 带 force 可跳过脏工作区确认', async () => {
 
 test('POST /fix 正常开跑 → 200 + jobId', async () => {
   const dir = project([ghostIssue]);
-  const r = await post('/api/optimize/fix', { dir, dimensions: ['rules'] });
+  const r = await post('/api/optimize/fix', { dir, dimensions: ['rules'], risk: 'elevated' });
   assert.equal(r.status, 200);
   assert.match(r.json.jobId, /^fix_/);
   await waitFixDone(r.json.jobId);
@@ -132,7 +134,10 @@ test('POST /fix 项目被占用 → 409，且带上正在跑的 jobId', async ()
   // 409 而不是 200：前端要能区分「被挡下」和「跑完了但没结果」
   const dir = project([ghostIssue]);
   acquireBusy(dir, 'fix', 'fix_running_x');
-  const r = await post('/api/optimize/fix', { dir });
+  // 必须传 elevated：「无可修项」的早返回在抢闸**之前**（那是既有顺序），
+  // 而 rules 维度是高风险的。默认低风险档位下这个项目无事可做，
+  // 会先返回 200 + nothing 而根本走不到闸——那就测不出 409 了
+  const r = await post('/api/optimize/fix', { dir, risk: 'elevated' });
   assert.equal(r.status, 409);
   assert.equal(r.json.busy.jobId, 'fix_running_x');
   releaseBusy(dir);
@@ -141,7 +146,7 @@ test('POST /fix 项目被占用 → 409，且带上正在跑的 jobId', async ()
 test('POST /fix 的 dimensions 传成非数组不会污染下游', async () => {
   // fail-closed：HTTP 边界收到什么形状都不该让编排层拿到脏数据
   const dir = project([ghostIssue]);
-  const r = await post('/api/optimize/fix', { dir, dimensions: 'rules' });
+  const r = await post('/api/optimize/fix', { dir, dimensions: 'rules', risk: 'elevated' });
   assert.equal(r.status, 200);
   await waitFixDone(r.json.jobId);
 });
@@ -163,7 +168,7 @@ test('GET /fix-stream 拿体检的 jobId 也要 404', async () => {
 
 test('GET /fix-stream 已完成的任务回放完整结果并收尾', async () => {
   const dir = project([ghostIssue]);
-  const { json } = await post('/api/optimize/fix', { dir });
+  const { json } = await post('/api/optimize/fix', { dir, risk: 'elevated' });
   const r = await waitFixDone(json.jobId);
 
   assert.equal(r.status, 200);

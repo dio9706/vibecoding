@@ -162,6 +162,10 @@ ${body}
  */
 export async function understandRequest(body, dict, now = new Date()) {
   const { date } = beijingNow(now);
+  // effort 未传 → 用 llm-classify 的 DEFAULT_EFFORT='low'。
+  // ⚠️ 观察点：本阶段（自然语言 → 时间区间 + 检索目标）比其余分类点略深，是全部调用点里
+  // 最可能因降档而掉质量的一个。若出现「区间解析错位 / 检索词跑偏」，在这里单点传
+  // `effort: null`（退回 SDK 默认）即可，不必动 llm-classify 的全局默认。
   const { data, reason } = await runClassifierDetailed({
     prompt: buildUnderstandPrompt(body, dict, date),
     model: config.intent.classifyModel,

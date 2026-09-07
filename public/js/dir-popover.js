@@ -38,6 +38,25 @@ function restoreDefaults() {
 }
 
 /**
+ * 应用选中目录，并顺手记进「常用」。
+ *
+ * 为什么自动收藏而不是让用户去点 ＋常用：选过一次的工程目录几乎必然还要再选，
+ * 手动收藏是道多余的仪式。后端 addSavedDir 本身幂等（同路径先滤后前插），
+ * 所以重复选中只会把它顶到列表最前形成 LRU 序，不会堆出重复项，也不必前端再去重。
+ *
+ * 刻意不 await：收藏是副作用，落盘慢或失败都不该拖住目录切换；且 chat 宿主选新目录时
+ * 会走 openProjectWindow 开新窗（当前页不卸载，请求照常完成）。postJsonQuiet 静默吞错，
+ * 最坏情况是常用列表少一条，不值得为此打断用户。
+ *
+ * 收口在这里而非各按钮：借用宿主（optimize 面板）选的同样是工程目录，语义一致该一并记；
+ * 常用列表内点选也走这条路，效果是把该项顶到最前。
+ */
+function applySelectedDir(p) {
+  if (p) postJsonQuiet('/api/dirs/saved', { action: 'add', path: p });
+  _selectDir(p);
+}
+
+/**
  * 供其它面板临时借用目录弹层。
  *
  * 为什么需要它：_getCwd/_selectDir 是模块级单例，chat.js 已经占用；
@@ -73,7 +92,7 @@ export function openDirPickerFor({ getCwd, selectDir }) {
           const { data } = await getJson('/api/dirs/saved');
           const dirs = data?.dirs;
           if (!dirs || !dirs.length) {
-            list.replaceChildren(hintRow('（暂无，浏览到某目录后点＋常用）', { pad: '0' }));
+            list.replaceChildren(hintRow('（暂无，选过的目录会自动记在这里）', { pad: '0' }));
             return;
           }
           for (const p of dirs) {
@@ -82,8 +101,8 @@ export function openDirPickerFor({ getCwd, selectDir }) {
             row.innerHTML =
               '<span class="folder">📁</span><span class="path"></span><button class="rm">✕</button>';
             row.querySelector('.path').textContent = p;
-            row.querySelector('.path').onclick = () => _selectDir(p);
-            row.querySelector('.folder').onclick = () => _selectDir(p);
+            row.querySelector('.path').onclick = () => applySelectedDir(p);
+            row.querySelector('.folder').onclick = () => applySelectedDir(p);
             row.querySelector('.rm').onclick = async (ev) => {
               ev.stopPropagation();
               await postJson('/api/dirs/saved', { action: 'remove', path: p });
@@ -235,7 +254,7 @@ export function openDirPickerFor({ getCwd, selectDir }) {
       $('#pathInput').addEventListener('keydown', (e) => {
         if (e.key === 'Enter') browse($('#pathInput').value.trim());
       });
-      $('#pickBtn').addEventListener('click', () => _selectDir(browsePath));
+      $('#pickBtn').addEventListener('click', () => applySelectedDir(browsePath));
       /**
        * 系统文件夹选择框（调 /api/dirs/pick，弹在本机桌面）。
        *
@@ -252,7 +271,7 @@ export function openDirPickerFor({ getCwd, selectDir }) {
         btn.disabled = true;
         try {
           const { data: r } = await getJson('/api/dirs/pick');
-          if (r?.path) _selectDir(r.path); // 选中即应用并关闭
+          if (r?.path) applySelectedDir(r.path); // 选中即应用并关闭
           else if (r?.error) toastApi.error(r.error);
           // r.path=null：用户点了取消，忽略
         } catch {

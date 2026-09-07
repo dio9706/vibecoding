@@ -283,3 +283,147 @@ export async function searchHistorySessions(query, limit = 100, cwd = '') {
     session.sessionId.toLowerCase().includes(q)
   ).slice(0, limit);
 }
+
+// ============================================================================
+// 会话清理（按时间范围物理删除历史 jsonl）—— 设计见
+// docs/superpowers/specs/2026-09-04-session-cleanup-design.md
+// ============================================================================
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const CLEANUP_PRESETS = new Set([7, 14, 30, 90]); // 快捷选项允许的天数
+
+/**
+ * 解析并校验清理时间窗（纯函数，供预览 / 删除共用，便于单测）。
+ * 两种互斥口径，range 优先于自定义日期：
+ *   - range（快捷）：删除「N 天前就没再动过」的旧会话
+ *   - fromDate/toDate（自定义）：删除 mtime 落在 [fromDate 00:00, toDate 23:59:59.999] 闭区间内的会话
+ * 自定义日期按本机时区解释（用户填的是日历日，mtime 也是本机文件时间）。
+ * @param {{range?:number|string, fromDate?:string, toDate?:string}} [opts]
+ * @returns {{range:number}|{fromMs:number|null, toMs:number|null}|null} 无效条件返回 null
+ */
+export function parseCleanupWindow({ range, fromDate, toDate } = {}) {
+  const r = Number(range);
+  if (CLEANUP_PRESETS.has(r)) return { range: r };
+  // 自定义日期：显式拼时间，避免 'YYYY-MM-DD' 被当成 UTC 零点导致跨时区偏移一天
+  const fromMs = fromDate ? new Date(`${fromDate}T00:00:00`).getTime() : null;
+  const toMs = toDate ? new Date(`${toDate}T23:59:59.999`).getTime() : null;
+  if (fromMs === null && toMs === null) return null; // 既非预设也无自定义日期
+  if (Number.isNaN(fromMs) || Number.isNaN(toMs)) return null; // 日期串非法
+  if (fromMs !== null && toMs !== null && fromMs > toMs) return null; // 起晚于止，无意义
+  return { fromMs, toMs };
+}
+
+/**
+ * 判定会话文件是否落入清理窗（纯函数）。
+ * @param {number} mtimeMs 会话文件修改时间
+ * @param {number} now 当前时间戳（注入便于测试）
+ * @param {{range:number}|{fromMs:number|null, toMs:number|null}} win parseCleanupWindow 的结果
+ * @returns {boolean}
+ */
+export function inCleanupWindow(mtimeMs, now, win) {
+  if (!win) return false;
+  if (typeof win.range === 'number') return mtimeMs < now - win.range * DAY_MS;
+  if (win.fromMs !== null && mtimeMs < win.fromMs) return false;
+  if (win.toMs !== null && mtimeMs > win.toMs) return false;
+  return true;
+}
+
+/**
+ * 扫描历史目录，对每个会话 jsonl 取 stat（只 stat 不解析内容，远比 listHistorySessions 轻）。
+ * @param {string} [cwd]
+ * @returns {Promise<Array<{ sessionId, fullPath, mtimeMs, size }>>} 目录不存在 → []
+ */
+async function statSessions(cwd = '') {
+  const dir = getHistoryDir(cwd);
+  let files;
+  try {
+    files = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch (e) {
+    if (e.code === 'ENOENT') return [];
+    throw e;
+  }
+  const out = [];
+  for (const file of files) {
+    if (!file.isFile() || !file.name.endsWith('.jsonl')) continue;
+    const fullPath = path.join(dir, file.name);
+    try {
+      const st = await fs.promises.stat(fullPath);
+      out.push({
+        sessionId: file.name.replace(/\.jsonl$/, ''),
+        fullPath,
+        mtimeMs: st.mtimeMs,
+        size: st.size,
+      });
+    } catch {
+      // 扫描与 stat 之间文件被删/占用：跳过，不影响其余
+    }
+  }
+  return out;
+}
+
+/**
+ * 统计当前目录的会话总数（只数文件，不解析内容）。
+ * @param {string} [cwd]
+ * @returns {Promise<number>}
+ */
+export async function countHistorySessions(cwd = '') {
+  return (await statSessions(cwd)).length;
+}
+
+/**
+ * 预计算待删会话（无副作用）。
+ * @param {string} [cwd] 工作目录（定位对应 project，空=服务目录）
+ * @param {{range?:number, fromDate?:string, toDate?:string}} [opts]
+ * @returns {Promise<{ willDeleteCount:number, oldestSession:string|null, newestSession:string|null }>}
+ */
+export async function previewCleanup(cwd = '', opts = {}) {
+  const win = parseCleanupWindow(opts);
+  if (!win) return { willDeleteCount: 0, oldestSession: null, newestSession: null };
+  const now = Date.now();
+  const hit = (await statSessions(cwd)).filter((s) => inCleanupWindow(s.mtimeMs, now, win));
+  if (hit.length === 0) return { willDeleteCount: 0, oldestSession: null, newestSession: null };
+  let oldest = Infinity;
+  let newest = -Infinity;
+  for (const s of hit) {
+    if (s.mtimeMs < oldest) oldest = s.mtimeMs;
+    if (s.mtimeMs > newest) newest = s.mtimeMs;
+  }
+  return {
+    willDeleteCount: hit.length,
+    oldestSession: new Date(oldest).toISOString(),
+    newestSession: new Date(newest).toISOString(),
+  };
+}
+
+/**
+ * 物理删除命中时间窗的会话文件。幂等（先判存在再删，ENOENT 视为已删）；
+ * 单个文件被占用（EPERM/EBUSY）时跳过并继续删其余，最后汇总。
+ * @param {string} [cwd]
+ * @param {{range?:number, fromDate?:string, toDate?:string, protectedIds?:string[]}} [opts]
+ *        protectedIds：不删的 sessionId（如正在运行的 run 对应 session），安全兜底
+ * @returns {Promise<{ deletedCount:number, freedBytes:number, skippedCount:number }>}
+ */
+export async function deleteHistorySessions(cwd = '', opts = {}) {
+  const win = parseCleanupWindow(opts);
+  if (!win) return { deletedCount: 0, freedBytes: 0, skippedCount: 0 };
+  const now = Date.now();
+  const protectedIds = new Set(opts.protectedIds || []);
+  const hit = (await statSessions(cwd)).filter(
+    (s) => inCleanupWindow(s.mtimeMs, now, win) && !protectedIds.has(s.sessionId),
+  );
+  let deletedCount = 0;
+  let freedBytes = 0;
+  let skippedCount = 0;
+  for (const s of hit) {
+    try {
+      await fs.promises.unlink(s.fullPath);
+      deletedCount++;
+      freedBytes += s.size;
+    } catch (e) {
+      if (e.code === 'ENOENT') continue; // 并发已删：幂等，不计入
+      skippedCount++; // 占用/无权限：跳过，保证其余照删
+      console.warn(`[history] 删除会话失败（跳过）${s.sessionId}:`, e.message);
+    }
+  }
+  return { deletedCount, freedBytes, skippedCount };
+}

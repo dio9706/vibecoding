@@ -192,9 +192,9 @@ test('memoryBank：默认值完整', () => {
   const s = normalizeSettings({});
   assert.deepEqual(s.memoryBank, {
     enabled: false,
-    nightStart: '03:00',
-    nightEnd: '08:00',
-    minIntervalHours: 6,
+    nightStart: '00:00',
+    nightEnd: '00:00',
+    minIntervalHours: 1,
     model: '',
     maxItems: 40,
     maxChars: 3000,
@@ -208,12 +208,12 @@ test('memoryBank：局部覆盖时其余字段回落默认', () => {
   const s = normalizeSettings({ memoryBank: { enabled: true, nightStart: '02:30' } });
   assert.equal(s.memoryBank.enabled, true);
   assert.equal(s.memoryBank.nightStart, '02:30');
-  assert.equal(s.memoryBank.nightEnd, '08:00');
+  assert.equal(s.memoryBank.nightEnd, '00:00');
 });
 
 test('memoryBank：非对象/数组输入回落全默认，不抛错', () => {
   assert.equal(normalizeSettings({ memoryBank: null }).memoryBank.enabled, false);
-  assert.equal(normalizeSettings({ memoryBank: [] }).memoryBank.nightEnd, '08:00');
+  assert.equal(normalizeSettings({ memoryBank: [] }).memoryBank.nightEnd, '00:00');
 });
 
 test('memoryBank：默认关闭 —— 功能要用户显式开启后才跑', () => {

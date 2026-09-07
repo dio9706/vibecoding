@@ -24,13 +24,6 @@ const CLASSIFY_TEXT_MAX = 500;
 /** LLM 消歧的动作候选上限 */
 const ACTION_POOL_MAX = 20;
 
-export function extractEnv(text) {
-  const t = text.toLowerCase();
-  if (/\btest\b|测试环境|test\s*环境/.test(t)) return 'test';
-  if (/\bdev\b|开发环境|dev\s*环境/.test(t)) return 'dev';
-  return null;
-}
-
 // —— 寒暄 / 闲聊本地快路：整条消息仅由「问候词 + 标点 / 表情 / 语气助词」组成时判为闲聊，
 //    直接落 other（免一次分类模型调用）。保守匹配：宁可漏判（退化为走分类），绝不误吞真实请求。
 //    正则不加 g flag（.test() 有状态会让重复调用结果不确定，本项目踩过）。

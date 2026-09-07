@@ -121,9 +121,12 @@ test('没有可抽样文件时标 na', () => {
   assert.equal(r.score, null);
 });
 
-test('注释类问题不可自动修复', () => {
+test('注释类问题标为可自动修（走带测试闸的重构策略）', () => {
+  // 原断言是 fixable:false，理由是「改注释要动源码，改错了比不改更误导人」。
+  // 现在 llm-refactor 补上了当初缺的那道保证：改前测试全绿 → 改完重跑 → 红了回滚该文件，
+  // 项目没有可跑的测试时整个策略降级为只出清单。「改错了」有机制发现了，所以放行
   const r = evaluateComments({ sampledFiles: 10, findings: [{ type: 'stale', file: 'a.js', line: 3, message: 'm' }] });
-  assert.equal(r.issues[0].fixable, false);
+  assert.equal(r.issues[0].fixable, true);
 });
 
 // —— verdictLog：判定层可审计 ——

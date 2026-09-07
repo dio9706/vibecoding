@@ -196,6 +196,26 @@ test('GET /search-modules 地图文件损坏 → 500（区别于「不存在」�
   assert.equal(r.status, 500);
 });
 
+// ==================== safeProjectId ====================
+
+test('safeProjectId 对同一目录的不同书写形态得出同一个 id', () => {
+  // 存的时候前端传反斜杠、取的时候某条路径传正斜杠 —— 若不归一化，
+  // 两次算出不同文件名，地图就"生成完却读不到"，前端退回「未生成」。
+  const base = path.resolve(os.tmpdir(), 'pm-norm-check');
+  const withFwd = base.replace(/\\/g, '/');
+  const withTrail = base + path.sep;
+
+  assert.equal(safeProjectId(withFwd), safeProjectId(base), '正斜杠与反斜杠须同 id');
+  assert.equal(safeProjectId(withTrail), safeProjectId(base), '尾部分隔符不该改变 id');
+  assert.equal(safeProjectId(path.join(base, 'sub', '..')), safeProjectId(base), '含 .. 的等价路径须同 id');
+});
+
+test('safeProjectId 对不同目录仍然区分得开', () => {
+  const a = path.resolve(os.tmpdir(), 'pm-norm-a');
+  const b = path.resolve(os.tmpdir(), 'pm-norm-b');
+  assert.notEqual(safeProjectId(a), safeProjectId(b));
+});
+
 // ==================== 兜底 ====================
 
 test('未知路径 → 404', async () => {

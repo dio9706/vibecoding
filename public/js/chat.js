@@ -13,6 +13,7 @@ import {
   convSetTitle, convSetMeta, convDelete, convSetDraft,
 } from './conv-store.js';
 import { bindDirPopover, closeDirModal } from './dir-popover.js';
+import { ContextProgress } from './context-progress.js';
 import { AnimeAnimations } from './anim.js';
 import { registerDropZone } from './drag-bus.js';
 import { setIconText, PIN_ICON_SVG, REFRESH_ICON_SVG, WAITING_ICON_SVG } from './icons.js';
@@ -140,6 +141,12 @@ export function openMarkdownFile(path) {
       // 持久化与还原完全照 chatMode 的流程：recordMessage 快照 / persistPrefsToConv 写穿 / applySessionPrefs 还原。
       let chatUltracode = false;
       let chatActiveTokenLabel = ''; // 当前激活 token 的名称，由 initUiPrefs 从服务端填充
+
+      // 额度状态圆点（topbar 右侧，替代原 #ratelimit）
+      const _cpContainer = document.getElementById('contextProgress');
+      const contextProgress = _cpContainer
+        ? new ContextProgress(_cpContainer)
+        : null;
 
       // ---- UI 偏好持久化（服务端 settings.json，跨重启/跨浏览器） ----
       let _saveUiPrefsTimer = null;
@@ -328,32 +335,31 @@ export function openMarkdownFile(path) {
         if (!bubble || bubble.classList.contains('msg-folded')) return;
         if (bubble.scrollHeight <= 240) return;
 
-        // 在气泡内顶部插入渐变遮罩（sticky 定位，跟随内容顶部）
+        // 遮罩容器（sticky 贴顶，纯 CSS 渐变，不依赖 backdrop-filter 避免渲染层异常）
         const overlay = document.createElement('div');
-        overlay.className = 'msg-fold-overlay';
-        bubble.prepend(overlay);
+        overlay.className = 'msg-blur-overlay';
 
-        // 应用折叠样式（必须在 scrollTop 赋值之前，否则 overflow-y:scroll 未生效，无法滚动）
-        bubble.classList.add('msg-folded');
+        const expandLabel = document.createElement('div');
+        expandLabel.className = 'msg-expand-label';
+        expandLabel.textContent = '展开全文';
+        overlay.appendChild(expandLabel);
 
-        // 滚动到底部，显示末尾内容
-        bubble.scrollTop = bubble.scrollHeight;
+        // 折叠时禁止 wheel/touch 滚动（overflow:scroll 保留让 scrollTop 可设，但阻断用户操作）
+        const preventScroll = (e) => { e.preventDefault(); };
+        bubble.addEventListener('wheel', preventScroll, { passive: false });
+        bubble.addEventListener('touchmove', preventScroll, { passive: false });
 
-        // 展开按钮：插在 .bubble-row 之后（作为 .msg 的直接子元素）
-        const bubbleRow = bubble.closest('.bubble-row');
-        // 气泡不在标准 .bubble-row 结构中时（如折叠消息等特殊场景）直接跳过，避免 parentNode 为 null 崩溃
-        if (!bubbleRow) return;
-        const expandBtn = document.createElement('button');
-        expandBtn.className = 'msg-expand-btn';
-        expandBtn.textContent = '展开全文 ▼';
-        expandBtn.addEventListener('click', (e) => {
+        overlay.addEventListener('click', (e) => {
           e.stopPropagation();
           bubble.classList.remove('msg-folded');
+          bubble.removeEventListener('wheel', preventScroll);
+          bubble.removeEventListener('touchmove', preventScroll);
           overlay.remove();
-          expandBtn.remove();
         });
-        // 插在 bubbleRow 后面（作为 .msg 的直接子元素）
-        bubbleRow.parentNode.insertBefore(expandBtn, bubbleRow.nextSibling);
+
+        bubble.prepend(overlay);
+        bubble.classList.add('msg-folded');
+        bubble.scrollTop = bubble.scrollHeight;
       }
 
       // 对消息区所有消息（除最后一条）检测并应用气泡折叠
@@ -368,13 +374,13 @@ export function openMarkdownFile(path) {
         });
       }
 
-      // 更新"加载更早消息"按钮（显示/隐藏及文案）
+      // 更新"加载更早消息"按钮内容；显示时机由滚动监听控制（滚到顶才露出）
       function _updateLoadMoreMsgsBtn() {
         if (_msgPagingOffset >= _msgPagingTotal) {
           _loadMoreMsgsEl.style.display = 'none';
+          _loadMoreMsgsEl.innerHTML = '';
           return;
         }
-        _loadMoreMsgsEl.style.display = 'flex';
         _loadMoreMsgsEl.innerHTML = '';
         const btn = document.createElement('button');
         btn.className = 'load-more-msgs-btn';
@@ -382,7 +388,15 @@ export function openMarkdownFile(path) {
         btn.textContent = `加载更早消息（还有 ${remaining} 条）`;
         btn.addEventListener('click', _loadEarlierMsgs);
         _loadMoreMsgsEl.appendChild(btn);
+        // 初始隐藏，等滚动到顶部才显示
+        _loadMoreMsgsEl.style.display = 'none';
       }
+
+      // 滚动到顶（scrollTop < 50px）时才展示"加载更早消息"按钮
+      messagesEl.addEventListener('scroll', () => {
+        if (_msgPagingOffset >= _msgPagingTotal) return;
+        _loadMoreMsgsEl.style.display = messagesEl.scrollTop < 50 ? 'flex' : 'none';
+      }, { passive: true });
 
       // 向前加载30条历史消息，prepend 到消息区顶部
       async function _loadEarlierMsgs() {
@@ -507,17 +521,6 @@ export function openMarkdownFile(path) {
         titleText.textContent = e.title;
         title.appendChild(titleText);
         titleText.dataset.convId = e.convId; // 便于后续查找
-        // running 时对 titleText 启动扫描 cursor 动画。
-        // 全局 ticker 架构：重渲染时旧元素离 DOM 会被 _scanTick 自动清理，
-        // 新元素注册后按全局时钟相位续扫，无需手动转移状态。
-        if (e.running) {
-          if (typeof AnimeAnimations !== 'undefined') {
-            AnimeAnimations.startCursorLoop(titleText);
-          } else {
-            // 首帧渲染时 AnimeAnimations（脚本尾部定义）可能还不存在，标记待绑定
-            titleText._pendingCursor = true;
-          }
-        }
         // onclick 挂 row（整行），与 cursor:pointer 语义一致——任何位置点击都切换会话，
         // 避免"点标题右侧空白区域无反应但光标已是手型"的视觉歧义（原挂 title 的问题）。
         row.onclick = () =>
@@ -566,9 +569,9 @@ export function openMarkdownFile(path) {
           for (const e of pinnedEntries) frag.appendChild(makeConvRow(e));
         }
 
-        // 本次会话：使用过 或 运行中（运行中始终保持可见），排除钉住 / 活跃
+        // 本次会话：使用过 或 运行中（运行中始终保持可见），排除钉住；活跃会话原地高亮，不额外置顶
         const usedEntries = allEntries.filter(
-          (e) => !e.pinned && !e.active && (isUsed(e) || e.running),
+          (e) => !e.pinned && (isUsed(e) || e.running),
         );
         // 按日期加载的历史：排除钉住 / 活跃 / 本次会话 / 运行中
         const dayEntries =
@@ -583,13 +586,7 @@ export function openMarkdownFile(path) {
                   isWithinDays(e.updatedAt, historyRange),
               );
 
-        // ── 第 1 段：当前活跃会话（未钉住时置顶）──
-        if (activeEntry && !activeEntry.pinned) {
-          const row = makeConvRow(activeEntry);
-          row.classList.add('pinned');
-          frag.appendChild(row);
-        }
-        // ── 第 2 段：本次使用过的会话 ──
+        // ── 第 1 段：本次使用过的会话（活跃会话原地高亮，不再单独置顶）──
         if (usedEntries.length) {
           frag.appendChild(makeSectionLabel('本次会话'));
           for (const e of usedEntries) frag.appendChild(makeConvRow(e));
@@ -1008,13 +1005,18 @@ export function renderConvListNow() {
 
       // ---- 会话消息模型 & 运行态操作（支持后台并行会话）----
       // 当前可见消息区中第 index 条消息的气泡（优先走 Map 缓存，O(1)）
+      // index 是存储索引；分页模式下存储索引≠DOM索引，需按"未渲染消息数"做偏移换算。
+      // _msgPagingTotal>0 表示分页激活；unrendered = total - offset 即未加载进 DOM 的消息数。
+      // 新发消息加入存储后 total/offset 未同步更新，但差值不变，换算仍然正确。
       function bubbleAt(index) {
+        const unrendered = _msgPagingTotal > 0 ? _msgPagingTotal - _msgPagingOffset : 0;
+        const domIndex = unrendered > 0 ? index - unrendered : index;
         if (currentConvId) {
-          const b = bubbleGet(currentConvId, index);
+          const b = bubbleGet(currentConvId, domIndex);
           if (b) return b;
         }
         // 降级：Map 未命中时回退线性扫描（兼容边界情况）
-        const msg = messagesEl.querySelectorAll('.msg')[index];
+        const msg = messagesEl.querySelectorAll('.msg')[domIndex];
         return msg ? msg.querySelector('.bubble') : null;
       }
       // 依据当前会话是否运行，切换发送/停止按钮；同步 Lottie 动画（任意会话运行中即播放）
@@ -1590,11 +1592,13 @@ export function renderConvListNow() {
           return; // 已到达极限，不处理
         }
 
-        // 保持鼠标指向处的图片像素不动：
-        // 新位移 = 旧位移 * 缩放比 + 鼠标位置 * (1 - 缩放比)
+        // 保持鼠标指向处的图片像素不动
+        // transform-origin:center → 缩放基准是 overlay 中心，坐标系须以中心为原点
         const ratio = newScale / oldScale;
-        lightboxState.translateX = lightboxState.translateX * ratio + mouseX * (1 - ratio);
-        lightboxState.translateY = lightboxState.translateY * ratio + mouseY * (1 - ratio);
+        const relX = mouseX - rect.width / 2;
+        const relY = mouseY - rect.height / 2;
+        lightboxState.translateX = lightboxState.translateX * ratio + relX * (1 - ratio);
+        lightboxState.translateY = lightboxState.translateY * ratio + relY * (1 - ratio);
 
         // 更新缩放
         lightboxState.scale = newScale;
@@ -2096,31 +2100,16 @@ export function renderConvListNow() {
 
       // ---- 额度状态 ----
       function renderRateLimit(d) {
-        const el = $('#ratelimit');
+        if (!contextProgress) return;
         const map = {
-          allowed: ['额度正常', 'var(--green)'],
-          allowed_warning: ['接近上限', 'var(--amber)'],
-          warning: ['接近上限', 'var(--amber)'],
-          rejected: ['已达上限', 'var(--red)'],
+          allowed: 'normal',
+          allowed_warning: 'warning',
+          warning: 'warning',
+          rejected: 'danger',
         };
-        const [label, color] = map[d.status] || [d.status || '未知', 'var(--muted)'];
-        let tip = '';
-        if (d.resetsAt) {
-          const t = new Date(d.resetsAt * 1000).toLocaleTimeString('zh-CN', {
-            hour: '2-digit',
-            minute: '2-digit',
-          });
-          const WIN_LABELS = {
-            five_hour: '5 小时额度',
-            seven_day: '7 天额度',
-            seven_day_opus: '7 天 Opus 额度',
-            seven_day_oauth: '7 天额度',
-          };
-          const win = WIN_LABELS[d.rateLimitType] || d.rateLimitType || '';
-          tip = ` · ${win} ${t} 重置`;
-        }
-        el.innerHTML = `<span class="dot" style="background:${color}"></span>${label}${tip}`;
-        el.hidden = false;
+        const state = map[d.status] || 'normal';
+        contextProgress.updateRatelimitState(state, d.resetsAt || null);
+        contextProgress.show();
 
         // 按额度状态调整对话输入框边框：接近上限=黄橙渐变，已用完=红色
         promptEl.classList.remove('limit-warn', 'limit-full');
@@ -2273,7 +2262,10 @@ export function renderConvListNow() {
           // 改为把现有占位气泡（含工具日志）挪到排队消息之后继续接收输出。
           // 存储与 DOM 必须同步移动，维持「存储索引=DOM 索引」不变量
           const oldIndex = job.asstIndex;
-          const msgEl = visible ? messagesEl.querySelectorAll('.msg')[oldIndex] : null;
+          // 分页模式下存储索引≠DOM索引，查 DOM 元素需换算（与 bubbleAt 同逻辑）
+          const _oldUnrendered = _msgPagingTotal > 0 ? _msgPagingTotal - _msgPagingOffset : 0;
+          const oldDomIndex = _oldUnrendered > 0 ? oldIndex - _oldUnrendered : oldIndex;
+          const msgEl = visible ? messagesEl.querySelectorAll('.msg')[oldDomIndex] : null;
           const newIndex = moveMessageToEnd(convId, oldIndex); // 存储+_bubbleMap 两侧在 conv-store 内同步搬移
           if (newIndex >= 0) {
             if (msgEl) messagesEl.appendChild(msgEl);
@@ -2976,7 +2968,7 @@ export function renderConvListNow() {
               chatDisabledTools = chatDisabledTools.filter((t) => t !== id);
             } else {
               if (!chatDisabledTools.includes(id)) chatDisabledTools.push(id);
-              // 关掉工作流工具时同步熄掉 ⚡ ultracode：两行并排在同一弹层，不允许「开关亮着但工具已禁」的矛盾
+              // 关掉工作流工具时同步熄掉 ✨ Ultracode：两行并排在同一弹层，不允许「开关亮着但工具已禁」的矛盾
               if (id === 'Workflow' && chatUltracode) {
                 chatUltracode = false;
                 persistPrefsToConv();
@@ -3051,7 +3043,7 @@ export function renderConvListNow() {
       const effortSlider = $('#effortSlider');
       const ultracodeToggle = $('#ultracodeToggle');
       const ultracodeRow = $('#ultracodeRow');
-      /** ⚡ ultracode 行：勾选态跟会话级状态；openai-compat 下整行灰掉（别家模型没有 Workflow 工具） */
+      /** ✨ Ultracode 行：勾选态跟会话级状态；openai-compat 下整行灰掉（别家模型没有 Workflow 工具） */
       function syncUltracodeRow() {
         if (!ultracodeToggle || !ultracodeRow) return;
         ultracodeToggle.checked = chatUltracode;
@@ -3319,6 +3311,24 @@ export function renderConvListNow() {
       // 「📂 系统选择」的绑定已移入 dir-popover.js：它是弹层自己的控件，
       // 绑在这里会绕过弹层的宿主指针，导致其它面板借用弹层时选完目录不回填。
 
+      // FAB 行随 composer 高度同步上移，composer 变高时 bottom 随之增大
+      {
+        const fabRow = document.getElementById('fabRow');
+        const composerEl = document.querySelector('.composer');
+        if (fabRow && composerEl) {
+          const syncFabBottom = () => {
+            fabRow.style.bottom = (composerEl.offsetHeight + 10) + 'px';
+          };
+          // jsdom（单元测试环境）没有 ResizeObserver，生产是 Chromium webview 必然有。
+          // 同 req-chat.js 的 observeRailTop：退化为「只同步一次」，
+          // 不能让测试环境把 mount 整条链炸掉。
+          if (typeof ResizeObserver !== 'undefined') {
+            new ResizeObserver(syncFabBottom).observe(composerEl);
+          }
+          syncFabBottom(); // 初始同步一次
+        }
+      }
+
 
 
       // ---- 额度用尽待续跑：轮询 + 等待横幅 + 续跑自动接流 ----
@@ -3463,14 +3473,8 @@ export function renderConvListNow() {
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
 
-      // AnimeAnimations 初始化完成，补救首帧渲染时被标记为待绑定的 cursor 动画
+      // AnimeAnimations 初始化完成后补播空态吉祥物动画（脚本尾部定义，首帧时还不存在）
       requestAnimationFrame(() => {
-        document.querySelectorAll('.title-text[data-conv-id]').forEach((titleEl) => {
-          if (titleEl._pendingCursor) {
-            AnimeAnimations.startCursorLoop(titleEl);
-            delete titleEl._pendingCursor;
-          }
-        });
         if (emptyEl && emptyEl.style.display !== 'none') {
           AnimeAnimations.playVibeAnimation();
         }

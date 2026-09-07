@@ -414,9 +414,10 @@ export function evaluatePrompts({ candidates = [], oversizedFiles = [], duplicat
         file: v.file ?? c.file ?? null,
         line: v.line,
         message: v.reason ?? (isConflict ? '与其它规则冲突' : '规则过度宽泛，缺少适用边界'),
-        // 提示词是 AI 全部行为的输入源，改错一个字就可能让整个项目的协作方式跑偏，
-        // 属高危维度：一律只给建议，不自动改写。
-        fixable: false,
+        // 提示词是 AI 全部行为的输入源，改错一个字就可能让整个项目的协作方式跑偏。
+        // 原先据此一律只给建议；现在交给 llm-rewrite，护栏是：只改 `.md`（扩展名白名单）、
+        // 定点修订不许重写段落、全量备份可还原。改动面被限制在文档层，不碰源码
+        fixable: true,
         fixHint: v.suggestion ?? '建议补充适用范围或例外说明',
         meta: { verdict: v.verdict, text: c.text ?? null },
       });
@@ -446,6 +447,9 @@ export function evaluatePrompts({ candidates = [], oversizedFiles = [], duplicat
       message: lines
         ? `提示词文件 ${lines} 行，超过 ${OVERSIZE_LINES} 行阈值，建议拆分或下沉为按需加载的 skill`
         : `提示词文件超过 ${OVERSIZE_LINES} 行，建议拆分或下沉为按需加载的 skill`,
+      // 唯一仍然否决的一类：拆分要**新建文件**（拆出的子文档、下沉成的 skill），
+      // 而单文件写权限的安全模型不允许（写入范围必须等于回滚范围）。
+      // 标 false 让它直接进整改清单，而不是白跑一次注定会 skip 的 LLM 调用
       fixable: false,
       fixHint: '按主题拆分，把低频内容改为 skill 按需调用',
       meta: { lines },
@@ -460,7 +464,8 @@ export function evaluatePrompts({ candidates = [], oversizedFiles = [], duplicat
       file: g.file,
       line: g.lines?.[0] ?? 1,
       message: `重复条目出现在第 ${(g.lines ?? []).join('、')} 行：${String(g.text ?? '').slice(0, 60)}`,
-      fixable: false,
+      // 纯机械：按行号倒序删除、保留第一处，删前核对内容。交给确定性策略
+      fixable: true,
       fixHint: '保留一处，其余删除',
       meta: { lines: g.lines ?? [], text: g.text ?? null },
     });

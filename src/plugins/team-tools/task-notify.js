@@ -20,7 +20,9 @@ import { getTask, updateTask } from '../../store/tasks.js';
 import { getUiPrefs, getMyFeishuOpenId, getActiveBot, getPluginEnabled } from '../../store/settings.js';
 import { sendCardToUser, sendTextToUser, updateCard } from '../../integrations/lark.js';
 import { mergeTaskById, discardTaskById, isAwaitingMerge, isDiscardable } from './task-actions.js';
-import { requestAutoDevelop } from './auto-dev/index.js';
+// 必须从 queue.js 引，不能从 auto-dev/index.js 引：后者会 import 本文件去发完成卡片，
+// 两边就成了 import 环（2026-09-04 检出，详见 queue.js 文件头）
+import { requestAutoDevelop } from './auto-dev/queue.js';
 import { buildTaskDoneCard, taskResultCard, parseTaskCardAction, TASK_CARD_KIND } from './task-notify.logic.js';
 
 /** 当前启用机器人的私聊发送凭证；不全返回 null（调用方据此跳过，不硬发） */

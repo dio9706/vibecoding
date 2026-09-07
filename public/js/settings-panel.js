@@ -546,6 +546,100 @@ const SUBSCRIPTION_TYPES = [
         }
       }
 
+      // ==== 会话清理 tab ====
+      // 当前工作目录：与 chat.js 一致，优先 window.__PROJECT_CWD__（打包版），否则读 localStorage。
+      function cleanupCwd() {
+        const w = window.__PROJECT_CWD__;
+        return typeof w === 'string' ? w : (localStorage.getItem('claude_cwd') || '');
+      }
+
+      // 读当前选中的时间窗：range 优先，其次自定义日期。无有效选择返回 null。
+      function cleanupWindow() {
+        const checked = document.querySelector('input[name="cleanupRange"]:checked');
+        if (checked) return { range: checked.value };
+        const from = $('#cleanupFrom')?.value || '';
+        const to = $('#cleanupTo')?.value || '';
+        if (from || to) return { fromDate: from, toDate: to };
+        return null;
+      }
+
+      // 拉当前目录统计并刷新面板；重置选择与按钮态
+      async function loadCleanupStats() {
+        const cwd = cleanupCwd();
+        $('#cleanupCwd').textContent = cwd || '（服务目录）';
+        try {
+          const r = await fetch('/api/cleanup/stats?cwd=' + encodeURIComponent(cwd));
+          const d = await r.json();
+          $('#cleanupTotal').textContent = d.error ? '不可用' : d.totalCount;
+        } catch {
+          $('#cleanupTotal').textContent = '读取失败';
+        }
+        $('#cleanupWillDelete').textContent = '0';
+        $('#cleanupExecBtn').disabled = true;
+      }
+
+      // 预计算待删数（选择变化时触发），并据此启用/禁用清理按钮
+      async function previewCleanup() {
+        const win = cleanupWindow();
+        const willDelete = $('#cleanupWillDelete');
+        const btn = $('#cleanupExecBtn');
+        if (!win) { willDelete.textContent = '0'; btn.disabled = true; return; }
+        const params = new URLSearchParams({ cwd: cleanupCwd() });
+        if (win.range) params.set('range', win.range);
+        if (win.fromDate) params.set('fromDate', win.fromDate);
+        if (win.toDate) params.set('toDate', win.toDate);
+        try {
+          const r = await fetch('/api/cleanup/preview?' + params.toString());
+          const d = await r.json();
+          const n = d.willDeleteCount || 0;
+          willDelete.textContent = n;
+          btn.disabled = n === 0; // 无命中不允许执行
+        } catch {
+          willDelete.textContent = '?';
+          btn.disabled = true;
+        }
+      }
+
+      // 执行清理：危险操作，先确认再 POST
+      async function executeCleanup() {
+        const win = cleanupWindow();
+        if (!win) return;
+        const count = $('#cleanupWillDelete').textContent;
+        const ok = await confirmDialog({
+          title: '⚠️ 危险操作',
+          message: `确定删除 ${count} 个会话？此操作不可恢复。`,
+          danger: true,
+          confirmText: '确认删除',
+        });
+        if (!ok) return;
+        try {
+          const r = await fetch('/api/cleanup/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cwd: cleanupCwd(), ...win, confirmed: true }),
+          });
+          const d = await r.json();
+          if (!r.ok || d.error) return toast(d.error || '清理失败');
+          const skipped = d.skippedCount ? `，跳过 ${d.skippedCount} 个占用文件` : '';
+          toast(`✓ 已删除 ${d.deletedCount} 个会话${skipped}`);
+          await loadCleanupStats(); // 刷新总数并复位选择
+        } catch {
+          toast('网络错误，请重试');
+        }
+      }
+
+      // 绑定清理页交互（只绑一次，随 bindConfigTransfer 初始化）
+      function bindCleanup() {
+        $('#cleanupRanges')?.addEventListener('change', previewCleanup);
+        $('#cleanupFrom')?.addEventListener('change', previewCleanup);
+        $('#cleanupTo')?.addEventListener('change', previewCleanup);
+        $('#cleanupCustomToggle')?.addEventListener('click', () => {
+          const box = $('#cleanupCustom');
+          if (box) box.hidden = !box.hidden;
+        });
+        $('#cleanupExecBtn')?.addEventListener('click', executeCleanup);
+      }
+
       // 设置页内部 tab（纯显隐，不重复拉数据）
       const settingsTabs = $('#settingsTabs');
       [...settingsTabs.querySelectorAll('button')].forEach((b) => {
@@ -557,8 +651,11 @@ const SUBSCRIPTION_TYPES = [
           $('#panelView')
             .querySelectorAll('.set-tab')
             .forEach((p) => (p.hidden = p.dataset.tab !== b.dataset.tab));
+          // 清理页首次/每次打开时拉当前目录统计（数据依赖工作目录，不能只在 loadSettings 拉一次）
+          if (b.dataset.tab === 'cleanup') loadCleanupStats();
         });
       });
+      bindCleanup();
       $('#tokenAddBtn').addEventListener('click', addTokenUI);
       $('#credAddBtn')?.addEventListener('click', addCredentialUI);
       $('#mcpAddBtn')?.addEventListener('click', submitMcpForm);

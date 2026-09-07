@@ -47,12 +47,29 @@ function depsOf(extract, ran = []) {
  * 观感上就是「机器人死了」。意图确定后先回一句，与 feedback / bug-patrol 同款处理。
  */
 describe('action-runner 即时应答', () => {
-  it('新请求且有必填变量 → 先发即时应答，再发追问', async () => {
+  it('这次真的调了 LLM → 先发即时应答，再发追问', async () => {
+    // 新契约（2026-09-04）：判据是「本次是否真发起了 LLM 调用」，由 slot-filler 经
+    // opts.onLlmStart 通知。这里的替身模拟「本地抽不出、确实要等模型」。
     const { ctx, replies } = ctxOf('u_ack', '给我个二维码');
-    await handle(ctx, { actionId: CFG.id }, depsOf(async () => ({})));
+    const extract = async (_cfg, _text, _uid, opts) => {
+      opts?.onLlmStart?.();
+      return {};
+    };
+    await handle(ctx, { actionId: CFG.id }, depsOf(extract));
     assert.equal(replies.length, 2);
     assert.notEqual(replies[0], '要哪个环境？', '第一条必须是即时应答，不是追问');
     assert.equal(replies[1], '要哪个环境？');
+  });
+
+  it('本地抽取全命中（没调 LLM）→ 不发即时应答', async () => {
+    // 变量抽取契约上线后这是**主路径**：enum/pattern 变量亚毫秒抽完，直接执行。
+    // 此时再弹「请稍等，我正在确认所需信息」，用户会紧接着看到「正在执行」，反而像卡了一下。
+    const ran = [];
+    const { ctx, replies } = ctxOf('u_ack_local', '给我 test 的二维码 13800138000');
+    // 替身不调 onLlmStart —— 正是「本地就抽全了」的形态
+    await handle(ctx, { actionId: CFG.id }, depsOf(async () => ({ env: 'test', phone: '13800138000' }), ran));
+    assert.ok(!replies.some((t) => t.includes('稍等')), `不该有即时应答：${JSON.stringify(replies)}`);
+    assert.equal(ran.length, 1, '应当直接执行');
   });
 
   it('动作没有必填变量 → 不发即时应答（纯本地流程，不制造噪音）', async () => {
@@ -86,7 +103,11 @@ describe('action-runner 即时应答', () => {
         replies.push(t);
       },
     };
-    await handle(ctx, { actionId: CFG.id }, depsOf(async () => ({})));
+    const extract = async (_cfg, _text, _uid, opts) => {
+      opts?.onLlmStart?.();
+      return {};
+    };
+    await handle(ctx, { actionId: CFG.id }, depsOf(extract));
     assert.deepEqual(replies, ['要哪个环境？'], '即时应答挂了，追问仍要照发');
   });
 });

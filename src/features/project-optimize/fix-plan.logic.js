@@ -4,11 +4,19 @@
  */
 
 /**
- * 已具备自动修复能力的维度。
- * 维度④（无用代码）明确不做；②⑤ 是分析类维度，检测器把全部 issue 标成 fixable:false
- * （高危：改提示词/注释要动源码，改错了比不改更误导人），没有自动修法。
+ * 已具备自动修复能力的维度 —— 现在**全部**维度都有，所以这张表由注册表派生。
+ *
+ * 它原来是一份手写的 `['rules', 'map']`，配合下面的 `buildFixNotes` 产出一句
+ * 「勾选的 X 维度暂无自动修复能力，未做任何改动」。那句话诚实但产出为零。
+ *
+ * 现在的规则是：每个维度都至少有一种修法，最弱的一档是 `advisory`
+ * （产出带定位、带依据、带改法的整改清单）。所以「勾了却什么都没发生」不再可能，
+ * 这张表也退化成「注册表里声明过 fix 的维度」——保留它是因为
+ * `buildFixNotes` 仍需在**降级**时提醒用户（见下方第 4 条）。
  */
-export const SUPPORTED_DIMENSIONS = ['rules', 'map'];
+import { DIMENSIONS } from '../project-checkup/dimensions/registry.js';
+
+export const SUPPORTED_DIMENSIONS = DIMENSIONS.filter((d) => d.fix && !d.augments).map((d) => d.id);
 
 const RULES_PREFIX = '.claude/rules/';
 
@@ -57,10 +65,10 @@ export function selectFixableRules(report) {
 /**
  * 生成「机器做不了、需要你自己动手」的提示。
  *
- * 三条，每条都对应一种「不说就会被误以为已经处理好了」的情况：
+ * 每条都对应一种「不说就会被误以为已经处理好了」的情况：
  *
- * 1. **勾了不支持的维度**。静默忽略最糟——用户勾了注释维度，看到「优化完成」，
- *    合理地以为注释也处理过了。
+ * 1. **勾了不支持的维度**。理论上已不可能（每个维度都有 fix 策略），
+ *    但保留这条判断：注册表将来加了没写 fix 的维度时，它是唯一的兜底告知。
  * 2. **根 CLAUDE.md 里还留着旧文件名**。项目地图常有一张「规则文件 | 覆盖范围」的索引表，
  *    表格里写的是裸文件名（`design-system.md`）而不是带目录的路径，
  *    replaceRuleRefs 只认反引号包裹的完整路径，匹配不到它 —— 于是表里留下一行
@@ -113,6 +121,37 @@ export function buildFixNotes({ requested, results, rootClaudeMd } = {}) {
       `本次改写了 ${mapWrites.length} 份地图文件，它们的时间戳已刷新——` +
       '「地图过期」告警在下次体检时会消失，但这不代表地图正文已经跟上代码。' +
       '请以地图末尾的「⚠️ 自动核对」块为准，那里列出的差异仍需人工处理。',
+    );
+  }
+
+  // 4. **产出的是清单而不是改动**。用户看到「优化完成」不会自己去翻 `.claude/optimize/`，
+  //    不指路的话这些清单等于没产出——而它们是安全 / 架构 / 命名这几维的**全部**产出。
+  const advisories = list.filter((r) => r?.status === 'done' && r.kind === 'advisory');
+  if (advisories.length) {
+    notes.push(
+      `有 ${advisories.length} 份整改清单写在 \`.claude/optimize/\` 下（安全、架构、命名这类` +
+      '涉及跨文件设计决策的问题不自动改写，只给证据和方案）；' +
+      '总体行动计划见 `.claude/optimize/PLAN.md`。',
+    );
+  }
+
+  // 5. **源码维度被测试闸挡下了**。这是最容易被误解的一种情况：用户看到「优化完成」，
+  //    合理地以为源码已经改过。必须显式否认，并说清怎样才能解锁。
+  const degraded = list.filter((r) => r?.kind === 'advisory' && /未改动代码|测试/.test(r.reason || ''));
+  if (degraded.length) {
+    notes.push(
+      '部分源码维度因为缺少可用的测试安全网而**没有改动任何代码**，只产出了清单。' +
+      '让「测试健康度」维度先把测试补起来（或修好现有的失败用例），下一轮优化就能自动修复源码。',
+    );
+  }
+
+  // 6. **git 索引被动过，而还原只管文件内容**。这是实现层面的真实局限（备份层没有
+  //    「索引快照」这个概念），不说就会变成「用户以为还原了、其实文件又被 git add 回来」。
+  const untracked = list.filter((r) => r?.status === 'done' && r.kind === 'untrack');
+  if (untracked.length) {
+    notes.push(
+      `有 ${untracked.length} 个文件已从 git 索引移除（文件仍在磁盘上）。` +
+      '注意：「还原」只恢复文件内容，**不会**把它们加回索引——需要时请手工 `git add`。',
     );
   }
 

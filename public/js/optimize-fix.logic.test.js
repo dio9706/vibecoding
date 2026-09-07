@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  canFix, fixButtonLabel, summarizeResults, scoreDelta, stepLabel, dirtyConfirmMessage,
+  canFix, fixButtonLabel, summarizeResults, scoreDelta, stepLabel, dirtyConfirmMessage, kindLabel,
 } from './optimize-fix.logic.js';
 
 test('可优化条件：有报告 + 有勾选 + 不在跑', () => {
@@ -17,8 +17,11 @@ test('canFix 容忍缺省参数', () => {
 });
 
 test('按钮文案随状态变化', () => {
-  assert.equal(fixButtonLabel(false), '一键优化');
+  assert.equal(fixButtonLabel(false), '一键优化（低风险）');
   assert.equal(fixButtonLabel(true), '优化中…');
+  // 体检期间按钮是禁用的：光禁不说理由，用户只会以为按钮坏了
+  assert.equal(fixButtonLabel(false, 'analyzing'), '体检中…');
+  assert.equal(fixButtonLabel(true, 'analyzing'), '优化中…', '优化中优先：那才是当前正在做的事');
 });
 
 test('结果分组统计', () => {
@@ -120,4 +123,15 @@ test('地图相关阶段有中文文案', () => {
     assert.notEqual(label, phase, `${phase} 应有中文文案，实际回显了原始 phase`);
     assert.ok(label.length > 0);
   }
+});
+
+test('kindLabel 把结果类型翻成人话，未知类型原样回显', () => {
+  // 不显示 kind 的话，「重构了 src/a.js」和「为 src/a.js 写了条清单」在结果列表里长得一样，
+  // 而这正是风险分级要让用户看清的东西
+  assert.equal(kindLabel('refactor'), '重构源码');
+  assert.equal(kindLabel('advisory'), '整改清单');
+  assert.equal(kindLabel('create-test'), '新建测试');
+  assert.equal(kindLabel('untrack'), '脱离 git 索引');
+  assert.equal(kindLabel('将来加的新策略'), '将来加的新策略', '后端加新类型时至少看得到标识');
+  assert.equal(kindLabel(undefined), '');
 });

@@ -12,6 +12,7 @@
  * 放在 shared 里时，即便插件停用，处理器仍然注册着。
  */
 import { getConfig } from '../../store/action-configs.js';
+import { roleOf } from '../../shared/roles.js';
 import { updateCard, sendText } from '../../integrations/lark.js';
 import { createInfoCard } from '../../shared/card-confirm.js';
 import { logger } from '../../shared/logger.js';
@@ -59,7 +60,12 @@ export async function handleQuickAction(data) {
       user: {
         // 优先 userId（飞书内部 ID），回退 openId
         id: operatorUserId || operatorOpenId,
-        role: 'member',  // 卡片回调无法确定完整角色，默认 member（canRunAction 会再判权限）
+        // 角色必须走 shared/roles.js 这一份判定（与消息链路同源）。
+        // 这里曾写死 'member' 并注释「canRunAction 会再判权限」—— 那是错的：
+        // permission.js 的 ROLE_RANK 只认 guest/owner，'member' 落进「未知角色」分支被一律拒绝，
+        // 于是欢迎卡上的按钮对所有人都点不动（生产 4 次实证，见 shared/roles.js 文件头）。
+        // 注意判定只能用 open_id：ownerOpenIds 存的是 open_id，不是飞书内部 user_id。
+        role: roleOf(operatorOpenId),
       },
       text: `执行动作: ${actionConfig.name}`,
       sessionKey: chatId,

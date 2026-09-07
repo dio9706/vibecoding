@@ -322,8 +322,12 @@ export function evaluateComments({ sampledFiles, findings, verdicts = null, bloc
     file: f.file,
     line: f.line,
     message: f.message,
-    // 改注释要动源码，且改错了比不改更误导人；一律留给人工确认
-    fixable: false,
+    // 原先一律留给人工确认，理由是「改注释要动源码，改错了比不改更误导人」。
+    // 现在交给 llm-refactor，因为那条路径补上了当初缺的那道保证：
+    // 改前测试必须全绿、改完立刻重跑、红了回滚**该文件**；项目没有可跑的测试时
+    // 整个策略自动降级为只出清单（见 project-optimize/test-gate.logic.js）。
+    // 「改错了」现在有机制发现，而不是只靠人事后察觉
+    fixable: true,
     fixHint: '人工确认后修改：说明「为什么」而不是复述代码；死代码直接删除',
     meta: { type: f.type },
   }));

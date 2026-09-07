@@ -8,7 +8,9 @@ import { getBotLogs, clearBotLogs } from '../../store/bot-log.js';
 import { getTasks, getTask, updateTask } from '../../store/tasks.js';
 import { getPluginEnabled, getActiveBot } from '../../store/settings.js';
 import { analyze, develop } from '../../plugins/team-tools/task-ops.js';
-import { requestAutoDevelop, isOverrideStart } from '../../plugins/team-tools/auto-dev/index.js';
+// 只引入队 API（queue.js 是零重依赖叶子）。从 auto-dev/index.js 引会把 git / 编译 /
+// 飞书回发 / Claude 调用整条执行链拖进这个 HTTP 路由模块
+import { requestAutoDevelop, isOverrideStart } from '../../plugins/team-tools/auto-dev/queue.js';
 import { mergeTaskById, discardTaskById } from '../../plugins/team-tools/task-actions.js';
 import { recordOverride } from '../../plugins/team-tools/review/index.js';
 import {
@@ -195,6 +197,8 @@ export async function handleActionsPost(req, res) {
       if (!data.botId || !getBots().some((b) => b && b.id === data.botId)) {
         return sendJson(res, 400, { error: 'botId 无效：动作必须归属一个机器人' });
       }
+      const varErr = await checkVariables(data);
+      if (varErr) return sendJson(res, 422, { error: varErr });
       const { v4: uuidv4 } = await import('uuid');
       const { addConfig } = await import('../../store/action-configs.js');
       const config = {
@@ -207,6 +211,39 @@ export async function handleActionsPost(req, res) {
       sendJson(res, 400, { error: e.message });
     }
   });
+}
+
+/**
+ * GET /api/action-presets — 变量预置表（只读）。
+ *
+ * 存在的唯一理由是**防分叉**：设置页要让用户看见「选了 env preset 到底继承了什么」，
+ * 若前端自己抄一份别名表，那就又多了一份真相 —— 而这次改造正是为了消灭
+ * 「Node 侧与 get_qrcode.py 各存一份 ENV_ALIASES 且已经分叉」这个问题。
+ */
+export async function handleActionPresetsGet(res) {
+  try {
+    const { PRESETS } = await import('../../plugins/action-runner/feature/var-presets.js');
+    sendJson(res, 200, PRESETS);
+  } catch (e) {
+    sendJson(res, 500, { error: e.message });
+  }
+}
+
+/**
+ * 变量声明校验 —— 保存时拦，运行时不再校验。
+ *
+ * 返回中文错误串直接给用户看；**不做静默修正**：静默丢弃非法字段会让用户以为配置生效了，
+ * 而机器人行为却对不上（enum 写错一个字母就退化成自由文本走 LLM，从表象根本看不出来）。
+ *
+ * 动态 import 是本文件既有风格（handler 都在函数内按需 import，避免启动期拉起整条插件链）。
+ * @returns {Promise<string|null>} 错误说明；null = 合法或本次未涉及 variables
+ */
+async function checkVariables(data) {
+  if (!data || data.variables === undefined) return null;
+  const { validateActionVariables } = await import(
+    '../../plugins/action-runner/feature/var-contract.js'
+  );
+  return validateActionVariables(data);
 }
 
 /**
@@ -226,6 +263,8 @@ export async function handleActionsPut(req, res, url) {
   return withJsonBody(req, res, async (payload) => {
     try {
       const { botId: _ignored, ...data } = payload;
+      const varErr = await checkVariables(data);
+      if (varErr) return sendJson(res, 422, { error: varErr });
       const { updateConfig } = await import('../../store/action-configs.js');
       const updated = updateConfig(id, data);
       if (!updated) {
@@ -286,6 +325,18 @@ export async function initializeDefaults() {
     logger.warn('initialization', 'bots 迁移失败', { err: e?.message });
   }
 
+  // 0.5 变量抽取契约迁移：给存量 env/phone 变量补上 preset 声明。
+  // 不迁移不会坏（未声明的变量退化为「走 LLM」，行为仍正确），但会白丢本地快路的收益。
+  // 幂等靠动作条目上的 _varContractMigrated 标记，不是每次按变量名重扫 ——
+  // 后者会让用户手动删掉的 preset 一重启就被加回来（详见该模块文件头）。
+  try {
+    const { migrateVarContract } = await import('../../store/var-contract-migration.js');
+    const r = migrateVarContract();
+    if (r.migrated) console.log(`✓ 动作变量契约已迁移（${r.migrated}/${r.scanned} 条动作）`);
+  } catch (e) {
+    logger.warn('initialization', '变量契约迁移失败', { err: e?.message });
+  }
+
   // 1. 创建默认清理配置（如果不存在；动作 per-bot 独享 → 无启用机器人时跳过）
   const { getActiveBot } = await import('../../store/settings.js');
   const activeBot = getActiveBot();
@@ -314,6 +365,9 @@ export async function initializeDefaults() {
           prompt: '要清理哪个环境？开发版（dev）或 体验版（test）',
           required: true,
           persistent: false,
+          // preset 让这个变量走本地词表抽取（零 LLM）。不写也能用，但每次都要花 8~17s
+          // 调模型做查表 —— 契约见 plugins/action-runner/feature/var-presets.js
+          preset: 'env',
         },
         {
           name: 'phone',
@@ -321,6 +375,7 @@ export async function initializeDefaults() {
           prompt: '请提供要清理的用户手机号（11 位数字）',
           required: true,
           persistent: true,
+          preset: 'phone',
         },
       ],
     };

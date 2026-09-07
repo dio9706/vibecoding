@@ -19,6 +19,20 @@ import { checkHygiene } from '../../features/project-checkup/check-hygiene.js';
 import {
   runStaticCheckup, recomputeReport, analyzingDim, LLM_DIM_KEYS,
 } from '../../features/project-checkup/index.js';
+import { collectEvidence } from '../../features/project-checkup/evidence/collect.js';
+import { runAudit } from '../../features/project-checkup/audit-engine.js';
+import { mergeAugmentDim } from '../../features/project-checkup/audit-engine.logic.js';
+import { checkHolistic } from '../../features/project-checkup/check-holistic.js';
+import {
+  DIMENSIONS, auditDimensions, fixOrderedDimensions, dimensionById,
+} from '../../features/project-checkup/dimensions/registry.js';
+import {
+  planEngineEntries, runFixForDim, writeHolisticPlan, PLAN_PATH,
+} from '../../features/project-optimize/fix-engine.js';
+import {
+  selectFixableDims, needsTestGate, risksFor,
+} from '../../features/project-optimize/fix-engine.logic.js';
+import { openGate } from '../../features/project-optimize/test-gate.js';
 import { planDemote, demoteOne } from '../../features/project-optimize/fix-rules.js';
 import { createBackup, recordPostState, listBackups, restoreBackup } from '../../features/project-optimize/backup.js';
 import { checkWorkspace } from '../../features/project-optimize/git-guard.js';
@@ -29,15 +43,18 @@ import { selectFixableMap, planMapFix } from '../../features/project-optimize/fi
 import { generateRootMap, generateModuleMap } from '../../features/project-optimize/gen-map.js';
 import {
   getLlmCache, saveLlmCache, saveCheckup,
-  acquireBusy, releaseBusy, saveFixResult, getProjectRecord,
+  acquireBusy, releaseBusy, getBusy, saveFixResult, getProjectRecord, readOptimizeStore,
 } from '../../store/optimize.js';
 
 /**
- * 异步回填的维度表 —— 编排层的唯一驱动来源（新增维度只需在这里登记）。
- * prompts/comments 走 LLM；tests/hygiene 起子进程（跑测试命令 / git ls-files）。
- * 四者都不能放进同步的 runStaticCheckup：tests 最长可达 120s，会把体检请求整个挂住。
+ * 有专属检测器的异步维度。
+ *
+ * 只剩这四个：prompts/comments 走 LLM，tests/hygiene 起子进程（跑测试命令 / git ls-files）。
+ * 其余十个维度由 `audit-engine` 驱动，声明在 `dimensions/registry.js`——
+ * **新增维度请去注册表加一条声明，不要动这里**。这张表现在只承载「有历史包袱、
+ * 参数经过实测校准、不该套进通用引擎」的那几个。
  */
-const RUNNERS = {
+const LEGACY_RUNNERS = {
   prompts: checkPrompts,
   comments: checkComments,
   tests: checkTests,
@@ -48,10 +65,6 @@ const jobs = new Map(); // jobId -> job（体检和优化共用一张表，靠 j
 let seq = 0;
 const KEEP_MS = 30 * 60 * 1000; // 完成的 job 保留时长，供晚接入/重连的前端读取
 const MAX_DONE = 50;
-
-/** race 用的哨兵：拿到它表示该维度这一拍还没出结果（即冷跑，要走 SSE） */
-const TICK = Symbol('tick');
-const tick = () => new Promise((r) => setTimeout(r, 0, TICK));
 
 /**
  * 从 checkXxx 的返回里挑出「维度结果」那部分。
@@ -131,17 +144,109 @@ export async function startCheckup(dir, { force = false } = {}) {
   // 垃圾条目却已经落盘。实测残留过一条 key 为 'C:UsersDELLDesktop…'（反斜杠被吞）的项目条目。
   assertValidProjectDir(dir);
 
-  const gate = acquireBusy(dir, 'checkup');
-  if (!gate.ok) return { busy: gate.busy };
+  // job id 先生成再抢闸（与 startFix 同一个理由，但这里解决的是另一个问题）：
+  // 把它写进占用记录后，**前端切走再回来就能拿着它重连同一条 SSE**。
+  // 不带 jobId 的话，占用记录只能告诉前端「有人在跑」，却没法告诉它「去哪儿接」——
+  // 用户离开面板再回来会看到 loading 消失、点体检又被 409 挡住，而任务其实还在跑。
+  const jobId = `ckup_${Date.now().toString(36)}_${++seq}`;
+  const gate = acquireBusy(dir, 'checkup', jobId);
+  if (!gate.ok) {
+    // 被拒时把占用详情打出来：用户看到的只有「正在体检或优化中」，
+    // 而「真在跑」和「上次进程留下的死记录」在界面上长得一样
+    logger.warn('optimize', '体检被串行闸挡下', {
+      dir, want: jobId, holder: gate.busy, aliveHolder: hasLiveJob(gate.busy?.jobId),
+    });
+    return { busy: gate.busy };
+  }
+  logger.info('optimize', '体检：抢到闸，开始', { dir, job: jobId, force });
   try {
-    const out = await runCheckup(dir, { force, ownsBusy: true });
-    // 没有 checkupId = 没起后台 job，没人会替我们释放
+    const out = await runCheckup(dir, { force, ownsBusy: true, jobId });
+    // 没有 checkupId = 没起后台 job，没人会替我们释放。
+    // 现在恒会起 job（17 个维度里 15 个是异步的），所以这行是防御性兜底
     if (!out.checkupId) releaseBusy(dir);
     return out;
   } catch (e) {
     releaseBusy(dir);
     throw e;
   }
+}
+
+/**
+ * 某个 job 是否还活着（在本进程的注册表里且未终结）。
+ *
+ * 只能回答「本进程」——job 注册表是内存态。这个局限是下面 `getBusyState` 判 `alive`
+ * 的依据，也是它唯一的假设：本项目只有 web 进程会跑体检 / 优化
+ * （飞书进程不碰这套流程），所以「不在本进程」就等于「已经死了」。
+ */
+function hasLiveJob(id) {
+  const job = id ? jobs.get(id) : null;
+  return !!job && job.status === 'running';
+}
+
+/**
+ * 当前占用状态，供前端决定「重连」还是「解锁」。
+ *
+ * `alive` 是这里的关键字段：它把两种外观相同、处置完全不同的情况分开——
+ *   `alive: true`  → 任务真在跑，前端该拿 jobId 去重连 SSE
+ *   `alive: false` → 占用记录还在但任务已死（多半是服务重启过），前端该请求解锁
+ *
+ * 不分开的话，用户在服务重启后会被这条记录锁在门外最多一小时
+ * （`store/optimize.js` 的 BUSY_STALE_MS），而界面只会反复说「正在体检中」。
+ *
+ * @returns {{kind:string, jobId:string|null, at:string, alive:boolean}|null}
+ */
+export function getBusyState(dir) {
+  const busy = getBusy(dir);
+  if (!busy) return null;
+  return { ...busy, alive: hasLiveJob(busy.jobId) };
+}
+
+/**
+ * 释放一条已死的占用记录。
+ *
+ * **只在确认任务不在本进程注册表里时才释放**——不加这道校验就是给了外部一个
+ * 「随时打断正在跑的优化」的开关，而优化跑到一半被解锁后，第二个请求会和它交错写同一批文件。
+ *
+ * @returns {{healed:boolean, reason?:string, kind?:string}}
+ */
+export function healDeadBusy(dir) {
+  const busy = getBusy(dir);
+  if (!busy) return { healed: false, reason: 'idle' };
+  if (hasLiveJob(busy.jobId)) return { healed: false, reason: 'alive' };
+  releaseBusy(dir);
+  logger.warn('optimize', '释放了已死的占用记录（多半是服务重启过）', { dir, kind: busy.kind, jobId: busy.jobId });
+  return { healed: true, kind: busy.kind };
+}
+
+/**
+ * 启动时清掉全部残留占用 —— 由 `server.js` 的 listen 回调调用。
+ *
+ * ## 为什么这是安全的，而且必须做
+ *
+ * 占用记录落盘（跨进程文件锁需要），但 job 注册表是内存态。**一个刚起来的进程
+ * 必然没有任何在跑的体检 / 优化**，所以此刻盘上的每一条占用记录都是上一次进程
+ * 留下的尸体，无条件释放不会打断任何东西。
+ *
+ * 不做的后果是用户可见的死锁：进程在体检中途被杀（改代码重启、崩溃、关桌面端），
+ * 记录留在盘上，用户点体检只会反复得到「该项目正在体检或优化中，请稍候」，
+ * 而实际上什么都没在跑——要等 `BUSY_STALE_MS`（1 小时）才自然解开。
+ * 维度从 6 涨到 17、单次体检从几分钟涨到十几分钟之后，撞上这个窗口几乎是必然的。
+ *
+ * 前提假设与 `hasLiveJob` 相同：只有 web 进程跑这套流程（飞书进程不碰）。
+ * 这个假设一旦不成立（比如将来多开一个 web 实例共用数据目录），
+ * 这里就要改成像 `store/runs.js` 那样按属主 pid 判活。
+ *
+ * @returns {number} 释放了多少条
+ */
+export function healAllBusyOnStartup() {
+  let healed = 0;
+  for (const dir of Object.keys(readOptimizeStore().projects || {})) {
+    if (!getBusy(dir)) continue; // 已过期的记录 getBusy 就当没有，不必再写盘
+    releaseBusy(dir);
+    healed += 1;
+    logger.warn('optimize', '启动清理：释放了上次进程留下的占用记录', { dir });
+  }
+  return healed;
 }
 
 /**
@@ -153,47 +258,26 @@ export async function startCheckup(dir, { force = false } = {}) {
  * @param {object} opts
  * @param {boolean} [opts.ownsBusy] 起了后台 job 时，是否由该 job 负责释放闸
  */
-async function runCheckup(dir, { force = false, ownsBusy = false } = {}) {
+async function runCheckup(dir, { force = false, ownsBusy = false, jobId = null } = {}) {
   // 先跑静态维度：目录非法会在这里抛，早于任何 LLM 调用 —— 不会为一个打错的路径白烧额度
   const report = runStaticCheckup(dir);
-  const cache = getLlmCache(dir);
 
-  const runners = Object.entries(RUNNERS).map(([key, run]) => ({
-    key,
-    // 先把 rejection 收进结果对象。下面的 race 只 await 两个分支之一，
-    // 没被 await 到的那次 rejection 会升级成 unhandledRejection —— Node 默认把它当致命错误，
-    // 一次 LLM 调用失败就能打挂整个 web 服务。
-    p: Promise.resolve()
-      .then(() => run(dir, { cache: cache[key] || null, force }))
-      .then((r) => ({ ok: true, r }), (e) => ({ ok: false, message: e?.message || String(e) })),
-  }));
-
-  // 抢一拍，把「缓存命中」和「冷跑」分流。
-  // 命中指纹缓存时 checkXxx 全程同步（只做 fs stat + 指纹比对就 return），promise 在调用当刻
-  // 就已 resolve，必然先于 setTimeout(0) 到达 → 直接把最终结果并进同步返回，省掉一次 SSE 往返，
-  // 前端点体检就是秒回带分数。冷跑时 promise 还挂在 LLM 请求上 → 拿到 TICK → 标 analyzing 走 SSE。
-  // 万一将来 checkXxx 的缓存判定改成异步，这里只会退化成「缓存命中也走一次 SSE」，不会出错。
-  const raced = await Promise.all(runners.map((x) => Promise.race([x.p, tick()])));
-
-  const pending = [];
-  raced.forEach((out, i) => {
-    const { key } = runners[i];
-    if (out === TICK) {
-      report.dims[key] = analyzingDim();
-      pending.push(runners[i]);
-      return;
-    }
-    report.dims[key] = settleDim(dir, key, out);
-  });
-
+  // 全部异步维度先标 analyzing，让前端立刻有 15 张转圈的卡片。
+  //
+  // 原实现会先「抢一拍」把缓存命中的维度直接并进同步返回，省一次 SSE 往返。
+  // 现在去掉了那个优化，理由是维度从 6 涨到 17 后它已经不成立：判定缓存要先算指纹，
+  // 而指纹来自证据包（要跑 git ls-files + 读几百个文件，本仓库实测约 4s）。
+  // 为了省 100ms 的 SSE 往返，让 POST 挂 4 秒才返回，是把延迟挪到了更显眼的地方。
+  // 缓存命中的维度现在也走 SSE，但它们会在证据包就绪后的几十毫秒内全部落地。
+  for (const key of LLM_DIM_KEYS) report.dims[key] = analyzingDim();
   recomputeReport(report);
   saveCheckup(dir, report);
 
-  if (!pending.length) return { report, checkupId: null };
-
   gc();
   const job = {
-    id: `ckup_${Date.now().toString(36)}_${++seq}`,
+    // 用调用方给的 id：它已经被写进占用记录，前端靠它重连。
+    // 兜底自造只为覆盖 startCheckup 之外的调用路径（优化结束后的重跑）
+    id: jobId || `ckup_${Date.now().toString(36)}_${++seq}`,
     kind: 'checkup',
     dir,
     status: 'running',
@@ -207,8 +291,8 @@ async function runCheckup(dir, { force = false, ownsBusy = false } = {}) {
   jobs.set(job.id, job);
 
   // 不 await：立刻把 checkupId 还给前端去接 SSE
-  runPending(job, pending).catch((e) => {
-    logger.warn('optimize', '体检 LLM 维度编排异常', { dir, err: e?.message || String(e) });
+  runAsyncDims(job, { force }).catch((e) => {
+    logger.warn('optimize', '体检异步维度编排异常', { dir, err: e?.message || String(e) });
     finishJob(job);
   });
 
@@ -227,23 +311,129 @@ function settleDim(dir, key, out) {
   return toDim(out.r);
 }
 
-/** 逐个维度落地就推一次，全部落地后重算总分收尾 */
-async function runPending(job, pending) {
-  await Promise.all(pending.map(async ({ key, p }) => {
-    const dim = settleDim(job.dir, key, await p);
-    job.report.dims[key] = dim;
-    job.landed[key] = dim;
-    // 每落一个维度就重算并落盘：中途刷新页面的用户能看到已出的那一半，而不是空报告
-    recomputeReport(job.report);
-    saveCheckup(job.dir, job.report);
-    job.updatedAt = Date.now();
-    emit(job, 'dim', { key, result: dim });
+/** 把一个维度的结果写进报告、落盘并推给前端。每落一个就做一次，中途刷新页面能看到已出的那一半 */
+function land(job, key, dim) {
+  job.report.dims[key] = dim;
+  job.landed[key] = dim;
+  recomputeReport(job.report);
+  saveCheckup(job.dir, job.report);
+  job.updatedAt = Date.now();
+  emit(job, 'dim', { key, result: dim });
+}
+
+/**
+ * 异步维度总编排：取材 → 专属检测器与 audit 引擎并行 → 合并 augment → 最后跑整体评估。
+ *
+ * 三段的先后是硬性的：
+ *   1. 证据包必须先就绪——十个 audit 维度都从它取材，各自读一遍盘会把整个仓库读十遍，
+ *      而且会各自漂移出不同的文件集（同一个文件在 complexity 里算、在 duplication 里不算）；
+ *   2. augment 型条目要等宿主落地才能合并（它改的是宿主的分数和 issue 列表）；
+ *   3. holistic 读的是**其它维度的结论**，早跑只能看到一堆 pending。
+ */
+async function runAsyncDims(job, { force }) {
+  const { dir } = job;
+  const cache = getLlmCache(dir);
+
+  let evidence = null;
+  const tEvidence = Date.now();
+  logger.info('optimize', '体检：开始取材', { dir, job: job.id });
+  try {
+    evidence = await collectEvidence(dir);
+    logger.info('optimize', '体检：取材完成', {
+      dir,
+      ms: Date.now() - tEvidence,
+      files: evidence.files.length,
+      tracked: evidence.tracked.length,
+      exports: evidence.exports.length,
+      isRepo: evidence.isRepo,
+    });
+  } catch (e) {
+    // 取材失败只让 audit 维度失效，四个专属检测器不受影响——它们各自读盘，不依赖证据包
+    logger.warn('optimize', '证据包收集失败，audit 维度将全部标记失败', { dir, err: e?.message || String(e) });
+  }
+
+  // 把 rejection 立刻收进结果对象：下面分两轮 await，没被当轮 await 到的 rejection
+  // 会升级成 unhandledRejection —— Node 默认把它当致命错误，一次 LLM 失败就能打挂整个 web 服务
+  const wrap = (fn) => Promise.resolve()
+    .then(fn)
+    .then((r) => ({ ok: true, r }), (e) => ({ ok: false, message: e?.message || String(e) }));
+
+  const tasks = [];
+  for (const [key, run] of Object.entries(LEGACY_RUNNERS)) {
+    tasks.push({ key, settled: wrap(() => run(dir, { cache: cache[key] || null, force })) });
+  }
+  for (const dim of auditDimensions()) {
+    tasks.push({
+      key: dim.id,
+      augments: dim.augments || null,
+      settled: evidence
+        ? wrap(() => runAudit(dim, evidence, {
+          cache: cache[dim.id] || null,
+          force,
+          // 批级进度：维度要全部批次跑完才落地，19 批的维度会让卡片转圈二十多分钟。
+          // 不推这个事件，用户就只能靠等来猜「是在跑还是死了」——实测已经误判过一次
+          onProgress: (p) => emit(job, 'progress', p),
+        }))
+        : Promise.resolve({ ok: false, message: '项目取材失败，本维度未执行' }),
+    });
+  }
+
+  // 第一轮：非 augment 维度。它们互相独立，谁先出结果谁先落地
+  const plain = tasks.filter((t) => !t.augments);
+  const tRun = Date.now();
+  logger.info('optimize', '体检：开始跑异步维度', {
+    dir, job: job.id, dims: plain.map((t) => t.key).join(','),
+  });
+  await Promise.all(plain.map(async (t) => {
+    const t0 = Date.now();
+    const dim = settleDim(dir, t.key, await t.settled);
+    land(job, t.key, dim);
+    logger.info('optimize', '体检：维度落地', {
+      dir, dim: t.key, status: dim.status, score: dim.score,
+      issues: dim.issues?.length || 0, cached: !!dim.cached, ms: Date.now() - t0,
+    });
   }));
+  logger.info('optimize', '体检：异步维度全部落地', { dir, job: job.id, ms: Date.now() - tRun });
+
+  // 第二轮：augment 条目。它等的是**全部**第一轮而不只是自己的宿主——
+  // 多等一会儿换掉一套「按宿主 id 建 promise 映射」的簿记，而实际不慢：
+  // 它的 LLM 调用早在第一轮就并行发起了，这里等的只是「写进报告」这一步
+  for (const t of tasks.filter((x) => x.augments)) {
+    const out = await t.settled;
+    if (!out.ok) {
+      logger.warn('optimize', '维度深化分析失败', { dir, dim: t.key, err: out.message });
+    }
+    const aug = out.ok ? toDim(out.r) : null;
+    if (out.ok) saveLlmCache(dir, t.key, out.r.cacheEntry);
+    land(job, t.augments, mergeAugmentDim(job.report.dims[t.augments], aug));
+  }
+
+  // 第三轮：整体评估。必须最后跑，它读的就是上面两轮的结论
+  if (!job.report.dims.holistic) {
+    finishJob(job);
+    return;
+  }
+  const tHolistic = Date.now();
+  logger.info('optimize', '体检：开始整体评估', { dir, job: job.id });
+  try {
+    const h = await checkHolistic(dir, job.report, evidence || { files: [] });
+    logger.info('optimize', '体检：整体评估结束', {
+      dir, status: h.status, score: h.score, actions: h.plan?.topActions?.length || 0, ms: Date.now() - tHolistic,
+    });
+    land(job, 'holistic', h);
+  } catch (e) {
+    logger.warn('optimize', '整体评估异常', { dir, err: e?.message || String(e) });
+    land(job, 'holistic', failedDim(e?.message || String(e)));
+  }
+
   finishJob(job);
 }
 
 function finishJob(job) {
   if (job.status !== 'running') return;
+  logger.info('optimize', '体检：收尾', {
+    dir: job.dir, job: job.id, landed: Object.keys(job.landed).length,
+  });
   recomputeReport(job.report);
   saveCheckup(job.dir, job.report);
   job.status = 'done';
@@ -347,29 +537,49 @@ function pushEvent(job, event, data) {
  *
  * @param {string} dir
  * @param {object} opts
- * @param {string[]} [opts.dimensions] 用户勾选的维度（v1 只有 rules 会被处理）
+ * @param {string[]} [opts.dimensions] 用户勾选的维度
+ * @param {'low'|'elevated'|'all'} [opts.risk] 允许执行的风险档位。
+ *   缺省 `'low'`（fail-closed）——这是个会改代码的操作，拿不准就做最保守的那件事
  * @param {boolean} [opts.force] 跳过脏工作区确认
  * @returns {Promise<{jobId:string, backupPending:true}
  *   | {needsConfirm:true, dirtyCount:number, isRepo:boolean, files:string[]}
  *   | {nothing:true, blocked:Array}
  *   | {busy:object}>}
  */
-export async function startFix(dir, { dimensions = [], force = false } = {}) {
+export async function startFix(dir, { dimensions = [], risk = 'low', force = false } = {}) {
   const report = getProjectRecord(dir)?.lastCheckup;
   if (!report) throw new Error('请先跑一次体检，再执行优化');
+
+  const allowedRisks = risksFor(risk);
 
   // 维度勾选是**筛子**而不是摆设：用户只勾了 map 却把 rules 也改了，
   // 等于在没得到同意的情况下删文件。空数组视为「全都要」——那是老前端的行为，
   // 改成静默不做会让旧页面点了优化后毫无反应
   const want = (d) => !dimensions.length || dimensions.includes(d);
-  const rules = want('rules') ? selectFixableRules(report) : { files: [], blocked: [] };
-  const map = want('map')
+  // 专用流程维度的风险写在注册表上（策略表管不了它们，见 registry 的 risk 字段说明）：
+  // rules 是本功能唯一的破坏性操作（删文件 + 改写全仓引用）→ 高风险；
+  // map 会新建与改写各级 CLAUDE.md → 中风险
+  const allowBespoke = (id) => allowedRisks.includes(dimensionById(id)?.risk || 'high');
+
+  const rules = want('rules') && allowBespoke('rules')
+    ? selectFixableRules(report) : { files: [], blocked: [] };
+  const map = want('map') && allowBespoke('map')
     ? selectFixableMap(report)
     : { rootMap: false, modules: [], stale: [], deadLinks: [], blocked: [] };
 
+  // 通用引擎负责的维度（map / rules 除外，它们有各自校准过的专用流程）
+  const engineDims = selectFixableDims({
+    dimensions: fixOrderedDimensions(),
+    report,
+    requested: dimensions,
+    allowedRisks,
+  });
+
   const mapTaskCount = (map.rootMap ? 1 : 0) + map.modules.length + map.stale.length + map.deadLinks.length;
   const blocked = [...rules.blocked, ...map.blocked];
-  if (!rules.files.length && !mapTaskCount) return { nothing: true, blocked };
+  if (!rules.files.length && !mapTaskCount && !engineDims.length) {
+    return { nothing: true, blocked };
+  }
 
   // job id 先生成再抢闸：生成本身没有副作用，但把它写进占用记录后，
   // 被挡下的那个请求就能拿着 jobId 去接同一条 SSE，而不是只被告知「有人在跑」。
@@ -410,8 +620,11 @@ export async function startFix(dir, { dimensions = [], force = false } = {}) {
     runFix(job, {
       rules,
       map,
+      engineDims,
+      allowedRisks,
       blocked,
       dimensions,
+      report,
       rulesBefore: report.dims?.rules?.score ?? null,
       mapBefore: report.dims?.map?.score ?? null,
     }).catch((e) => {
@@ -433,10 +646,51 @@ export async function startFix(dir, { dimensions = [], force = false } = {}) {
  * recordPostState 必须在全部写完之后（它记的是「优化后的内容哈希」，
  * 还原时靠它区分「用户事后又手工改过」和「优化本身造成的差异」）。
  */
-async function runFix(job, { rules, map, blocked, dimensions, rulesBefore, mapBefore }) {
+async function runFix(job, {
+  rules, map, engineDims, allowedRisks, blocked, dimensions,
+  report: beforeReport, rulesBefore, mapBefore,
+}) {
   const dir = job.dir;
   const results = [];
   let backupDir = null;
+  // 测试闸只在真要跑源码重构时才开（开一次要跑几分钟测试），且**必须在补测试之后**开
+  // ——那正是 fixOrder 把 tests(20) 排在源码层(40+) 前面的原因
+  let gate = { allowed: true, reason: '' };
+  let gateOpened = false;
+
+  /** 跑一段 fixOrder 区间内的引擎维度。分段是为了插进既有的 map / rules 专用流程之间 */
+  const runEngineRange = async (lo, hi, evidence) => {
+    for (const sel of engineDims) {
+      if (job.signal?.aborted) break;
+      const order = sel.dim.fixOrder ?? 999;
+      if (order < lo || order >= hi) continue;
+
+      // 需要绿色基线的策略才值得为它开闸。判定统一交给 needsTestGate——
+      // 它同时覆盖 llm-refactor（改源码要能发现改坏）与 llm-create
+      // （靠跑全量测试判断生成的测试好不好，没基线就分不清「新测试坏」和「项目本来就红」）
+      if (!gateOpened && needsTestGate([sel], allowedRisks)) {
+        pushEvent(job, 'step', { phase: 'test-gate', text: '跑一遍测试建立基线（改坏了能立刻发现；也用于判断生成的测试是否真的通过）' });
+        gate = await openGate(dir);
+        gateOpened = true;
+        pushEvent(job, 'step', {
+          phase: 'test-gate',
+          text: gate.allowed ? '测试全绿，需要基线的修复已放行' : `未放行：${gate.reason}`,
+        });
+      }
+
+      results.push(...await runFixForDim({
+        dir,
+        dim: sel.dim,
+        issues: sel.issues,
+        evidence,
+        gate,
+        allowedRisks,
+        signal: job.signal,
+        onFile: (r) => pushEvent(job, 'file', r),
+        onStep: (s) => pushEvent(job, 'step', s),
+      }));
+    }
+  };
 
   try {
     // ---- M1 前置：没有根地图时，报告里 M2/M3/M4 根本不存在 ----
@@ -466,9 +720,20 @@ async function runFix(job, { rules, map, blocked, dimensions, rulesBefore, mapBe
 
     const mapEntries = planMapFix(mapPlan);
     const rulePlan = rules.files.length ? planDemote(dir, rules.files) : [];
+
+    // 引擎侧的备份条目一律按「测试闸会放行」来算。
+    //
+    // 为什么不按真实闸况算：闸要在补完测试之后才开（tests 维度可能刚把安全网建起来），
+    // 而备份必须在任何写操作之前打完。两个时序要求冲突，只能取「宁可多备份」——
+    // 多备份一份内容相同的快照代价可以忽略，少备份一个被改过的文件则彻底无法还原。
+    const engineEntries = planEngineEntries(dir, engineDims, { gateAllowed: true, allowedRisks });
+    // 整体计划文件单独登记：它由 writeHolisticPlan 写，不经过 planEngineEntries
+    if (beforeReport?.dims?.holistic?.plan) engineEntries.push({ path: PLAN_PATH, action: 'created' });
+
     pushEvent(job, 'step', {
       phase: 'plan',
-      text: `规划 ${rulePlan.length} 个规则文件、${mapEntries.length} 个地图文件的改动`,
+      text: `规划 ${rulePlan.length} 个规则文件、${mapEntries.length} 个地图文件、`
+        + `${engineDims.length} 个维度（${engineEntries.length} 个文件）的改动`,
     });
 
     // 根地图那份 created 条目要一并登记：它已经写下去了，还原时必须能把它删掉。
@@ -480,12 +745,27 @@ async function runFix(job, { rules, map, blocked, dimensions, rulesBefore, mapBe
     // 后果也仅仅是盘上多一个 CLAUDE.md 需要手删。
     // 为消除它而把备份拆成两次代价大得多：会产生两个备份目录、还原要按序还两次，
     // 而 backup.js 没有「向已有快照追加条目」的 API。
-    const allEntries = [...rulePlan, ...mapEntries];
+    const allEntries = [...rulePlan, ...mapEntries, ...engineEntries];
     if (map.rootMap) allEntries.unshift({ path: 'CLAUDE.md', action: 'created' });
 
     const backup = createBackup(dir, allEntries, { dimensions });
     backupDir = backup.dirName;
     pushEvent(job, 'step', { phase: 'backup', text: `已快照 ${allEntries.length} 个文件`, backupDir });
+
+    // ---- 引擎第一段（fixOrder < 30）：机械与配置层 + 补测试 ----
+    // 顺序理由见 registry.js 的 fixOrder 字段说明：这一段零源码风险且最快，
+    // 其中 tests 维度会为后面的源码重构建立安全网
+    let evidence = null;
+    if (engineDims.length) {
+      try {
+        // 只在真需要时取材（llm-create 要找参考测试文件）。取材失败不该让修复停下——
+        // 除了「找一份参考测试」之外没有别的地方用它
+        evidence = await collectEvidence(dir);
+      } catch (e) {
+        logger.warn('optimize', '修复期取材失败，生成测试将缺少写法参考', { dir, err: e?.message || String(e) });
+      }
+    }
+    await runEngineRange(0, 30, evidence);
 
     // ---- 死链修复：确定性、最快，先做完 ----
     if (mapPlan.deadLinks.length) {
@@ -536,6 +816,20 @@ async function runFix(job, { rules, map, blocked, dimensions, rulesBefore, mapBe
       }
     }
 
+    // ---- 引擎第二段（30~39）：文档层。放在源码之前，因为改源码会让地图与文档更过期 ----
+    await runEngineRange(30, 40, evidence);
+
+    // ---- 引擎第三段（40~89）：源码层（需测试闸放行）与只出清单的维度 ----
+    await runEngineRange(40, 90, evidence);
+
+    // ---- 收口：整体行动计划。必须最后写，它要反映前面各步的实际结果 ----
+    if (engineDims.some((s) => s.dim.id === 'holistic') || beforeReport?.dims?.holistic?.plan) {
+      pushEvent(job, 'step', { phase: 'plan-file', text: '写出整体行动计划 .claude/optimize/PLAN.md' });
+      const planRes = writeHolisticPlan(dir, beforeReport, DIMENSIONS);
+      results.push(planRes);
+      pushEvent(job, 'file', planRes);
+    }
+
     if (job.signal?.aborted) {
       pushEvent(job, 'step', { phase: 'abort', text: '已按你的要求停止；已完成的改动保留，可用「还原」撤销' });
     }
@@ -581,15 +875,18 @@ async function runFix(job, { rules, map, blocked, dimensions, rulesBefore, mapBe
 /**
  * 改过盘之后刷新体检报告（优化和还原都用）。
  *
- * 只重算静态维度，**不自动重跑 LLM 维度**：那要好几分钟、约 $0.9，而用户此刻只想看降级结果。
- * 但也不能把上一轮的 LLM 结论原样留着——那些 issue 指向的文件可能已经被移走了，
- * 展示出来就是在报不存在的问题。所以标成待分析，由用户自己决定要不要点「重新体检」。
- * 指纹缓存不受影响：注释维度的源码没动，重新体检时会直接命中缓存，不会重复计费。
+ * 只重算静态维度（map / rules），**不自动重跑另外十五个**：那要十几分钟、成本可观，
+ * 而用户此刻只想看这次优化的结果。但也不能把上一轮的结论原样留着——
+ * 那些 issue 指向的文件可能已经被改写甚至移走了，展示出来就是在报不存在的问题。
+ * 所以标成待分析，由用户自己决定要不要点「重新体检」。
+ *
+ * 指纹缓存让这件事不贵：只有真被改动过的文件所属的维度会失效
+ * （四份指纹按取材范围分组，见 evidence/collect.js），没动过的重新体检直接命中缓存。
  */
 function refreshStaticReport(dir) {
   const report = runStaticCheckup(dir);
   for (const key of LLM_DIM_KEYS) {
-    if (report.dims[key]) report.dims[key].reason = '规则已变动，请重新体检以刷新 AI 分析';
+    if (report.dims[key]) report.dims[key].reason = '代码已变动，请重新体检以刷新 AI 分析';
   }
   recomputeReport(report);
   saveCheckup(dir, report);

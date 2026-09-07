@@ -286,10 +286,11 @@ export async function compactSession(sessionId) {
 
   logger.info('claude', '触发上下文压缩', { sessionId });
 
+  // Windows 上 claude 是 .cmd shim，shell:false 找不到它；compact 参数固定无注入风险
   const result = await runScript(
     'claude',
     ['/compact', '--resume', sessionId],
-    { timeoutMs: 120_000 },
+    { timeoutMs: 120_000, shell: true },
   );
 
   if (!result.ok) {

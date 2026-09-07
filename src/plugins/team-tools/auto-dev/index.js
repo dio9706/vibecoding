@@ -12,6 +12,11 @@
  * 主工作区自始至终不被切分支；失败任务退回 analyzed（不进合并队列，可人工重试）。
  */
 import { getTask, getTasks, updateTask } from '../../../store/tasks.js';
+// 入队 API 拆到 queue.js（零重依赖叶子）：它原本住在本文件里，导致
+// task-notify 为了「点按钮入队」不得不 import 整个执行管线，从而与本文件成环。
+// 详细理由见 queue.js 文件头。**刻意不在这里 re-export**——留一条通往本文件的旧路径，
+// 只会让下一个人重新把重依赖链拖回去，环也会随之复活
+import { requestAutoDevelop } from './queue.js';
 import { develop } from '../task-ops.js';
 import { currentBranch, commitAll, ensureAutoWorktree, commitResidue, checkoutNewFromBaseArgs } from './git.js';
 import { taskBranchName, buildCommitMessage } from './logic.js';
@@ -30,22 +35,6 @@ import path from 'node:path';
 const POLL_MS = 5000;
 let pumpTimer = null;
 let running = false;
-
-/** owner 强行开始被评审质疑/拒绝的任务？（web 与 triage 入口共用，保证判例记录一致） */
-export function isOverrideStart(task) {
-  return task.status === 'challenged' || ['ask', 'reject'].includes(task.review?.verdict);
-}
-
-/**
- * 请求自动开发（任意进程可调）：锁内置 queued，web 泵按序执行。
- * 幂等：已在 queued/developing 的任务不重复入队。
- */
-export function requestAutoDevelop(taskId, event = '加入自动开发队列') {
-  const task = getTask(taskId);
-  if (!task) return null;
-  if (task.status === 'queued' || task.status === 'developing') return task; // 已排队/执行中
-  return updateTask(taskId, { status: 'queued', auto: true }, event);
-}
 
 /** 仅 principal-web 进程调用：启动恢复 + 轮询泵 */
 export function startAutoDevPump() {

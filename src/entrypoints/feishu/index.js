@@ -5,6 +5,7 @@
  */
 import { config } from '../../shared/config.js';
 import { migrateToBots } from '../../store/bots-migration.js';
+import { migrateVarContract } from '../../store/var-contract-migration.js';
 import { get as getChannel } from '../../channels/index.js';
 import { attachImageToRecentTask, attachMaterialToRecentTask } from '../../plugins/team-tools/task-ops.js';
 import { addMaterial, hasMaterials, saveTextMaterial } from '../../plugins/team-tools/material-pool.js';
@@ -19,16 +20,15 @@ import { dispatch, dispatchSafely } from '../../app/dispatch.js';
 import { logger } from '../../shared/logger.js';
 import { msg } from '../../shared/messages.js';
 import { getCardKindHandler } from '../../shared/card-actions.js';
+// 角色判定上移到 shared：卡片回调住在插件里，不能 import 本入口（分层单向依赖），
+// 而它此前因此写死了 role 导致按钮全废。判定只留一份，两条链路共用。
+import { roleOf } from '../../shared/roles.js';
 import { installProcessGuards } from '../../shared/process-guard.js';
 
 // 最后兜底：单条畸形消息/一次飞书 API 抛错不得打死长连接进程。详见 process-guard.js。
 installProcessGuards();
 
 const channel = getChannel('feishu');
-
-function roleOf(openId) {
-  return openId && config.lark.ownerOpenIds.includes(openId) ? 'owner' : 'guest';
-}
 
 /**
  * 全局卡片回调处理器
@@ -276,6 +276,14 @@ try {
   migrateToBots();
 } catch (e) {
   logger.warn('feishu', 'bots 迁移失败（等待 web 进程迁移）', { err: e?.message || String(e) });
+}
+
+// 变量抽取契约迁移，同样幂等 + 文件锁。飞书是**动作的主要入口**，只挂在 web 启动上不够：
+// 单跑 `node feishu.js` 时存量 env/phone 变量拿不到 preset，每次抽参都要多花 8~17s 调模型。
+try {
+  migrateVarContract();
+} catch (e) {
+  logger.warn('feishu', '变量契约迁移失败（等待 web 进程迁移）', { err: e?.message || String(e) });
 }
 
 /**

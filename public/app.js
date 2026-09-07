@@ -18,7 +18,7 @@ import { initReqView, refreshReqList, renderReqListLocal } from './js/req-view.j
 import { initReqChat } from './js/req-chat.js';
 import { initMemoryPanel, refreshMemBadge } from './js/memory-view.js';
 import { initOptimizePanel } from './js/optimize-view.js';
-import { openProjectMapPanel } from './js/project-map-panel.js';
+import { initProjectMapPanel, disposeProjectMapView } from './js/project-map-panel.js';
 import toast from './js/toast.js';
 import { hydrateIcons } from './js/icons.js';
 
@@ -50,6 +50,8 @@ setOverlayHandoff(maybeStartOnboarding);
       function showView(name) {
         if (activeView === name) return;
         if (activeView === 'behavior') stopTaskPolling(); // 离开行为视图停轮询
+        // 离开地图视图收 WebGL：面板只是 hidden，容器仍在 DOM 里，地球的 rAF 自检拦不住
+        if (activeView === 'project-map') disposeProjectMapView();
         activeView = name;
         const inChat = name === 'chat';
         appEl.classList.toggle('in-panel', !inChat);
@@ -58,6 +60,9 @@ setOverlayHandoff(maybeStartOnboarding);
         // 否则一滚动工具栏/目录大纲/搜索框会被整体推出可视区
         appEl.classList.toggle('in-markdown', name === 'markdown');
         appEl.classList.toggle('in-req', name === 'req'); // 需求文档模式（评审/归档期）无会话语义：隐藏底部输入框，防止误发消息跳回聊天视图
+        // 地图同 markdown：纯查看视图，隐藏输入框腾高度，并把滚动从 panel-view 收给画布自己
+        //（否则滚轮缩放会连带整页一起滚）
+        appEl.classList.toggle('in-project-map', name === 'project-map');
         panelView.hidden = inChat;
         panelView
           .querySelectorAll('.panel-page')
@@ -72,6 +77,7 @@ setOverlayHandoff(maybeStartOnboarding);
         else if (name === 'json-tool') initJsonTool();
         else if (name === 'memory') initMemoryPanel();
         else if (name === 'optimize') initOptimizePanel();
+        else if (name === 'project-map') initProjectMapPanel();
         refreshAskChip(); // 视图切换后重新判定顶栏审批徽标是否显示
         // 视图切换时清除对方列表的选中态
         if (name === 'chat') {
@@ -94,7 +100,7 @@ setOverlayHandoff(maybeStartOnboarding);
 
       // ---- 入口绑定 ----
       $('#behaviorBtn').addEventListener('click', () => toggleView('behavior'));
-      $('#projectMapBtn').addEventListener('click', openProjectMapPanel);
+      $('#projectMapBtn').addEventListener('click', () => toggleView('project-map'));
       $('#settingsBtn').addEventListener('click', () => toggleView('settings'));
 
       // ---- 行为面板内部 tab 切换（需求故障 / 访问日志） ----
@@ -192,9 +198,9 @@ setOverlayHandoff(maybeStartOnboarding);
 
           // 更新新建按钮文本和 title
           if (createBtn) {
-            const label = mode === 'conv' ? '＋ 新建对话' : '＋ 新建需求';
+            const label = mode === 'conv' ? '新建对话' : '新建需求';
             createBtn.textContent = label;
-            createBtn.title = mode === 'conv' ? '新建对话' : '新建需求';
+            createBtn.title = label;
           }
 
           // 保存用户偏好
@@ -239,9 +245,9 @@ setOverlayHandoff(maybeStartOnboarding);
           if (reqList) reqList.hidden = mode !== 'req';
           if (sidebarTitle) sidebarTitle.textContent = mode === 'conv' ? '对话' : '需求';
           if (createBtn) {
-            const label = mode === 'conv' ? '＋ 新建对话' : '＋ 新建需求';
+            const label = mode === 'conv' ? '新建对话' : '新建需求';
             createBtn.textContent = label;
-            createBtn.title = mode === 'conv' ? '新建对话' : '新建需求';
+            createBtn.title = label;
           }
         };
       })();

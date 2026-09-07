@@ -19,7 +19,8 @@ import { logger } from '../../../shared/logger.js';
 import { msg } from '../../../shared/messages.js';
 import { PASS } from '../../../app/signals.js';
 
-// pendingState: userId(open_id) → { actionId, collected: {...}, waitingFor: varName, ts: number }
+// pendingState: userId(open_id) → { actionId, collected: {...}, waitingFor: varName, ts: number,
+//                                    extracting?: boolean, inbox?: string[] }
 const pendingState = new Map();
 
 /**
@@ -106,15 +107,19 @@ export async function handle(ctx, intentResult, deps = DEFAULT_DEPS) {
 }
 
 /**
- * 即时应答 —— 只在**真会调 LLM** 时发（动作有必填变量），否则纯本地流程会凭空多出一条噪音。
+ * 即时应答 —— **只在真的要等模型时才发**，由 slot-filler 的 `onLlmStart` 回调驱动。
+ *
+ * 判据从「这个动作有必填变量」改成「这一次确实发起了 LLM 调用」（2026-09-04）：
+ * 变量抽取契约上线后，声明了 enum/pattern 的变量在本地亚毫秒抽完，绝大多数请求根本不碰模型。
+ * 仍按老判据发的话，用户会先收到「请稍等，我正在确认执行这个操作所需的信息！」，
+ * 紧接着立刻收到「⏳ 正在执行…」—— 两条挨在一起，反而像卡了一下。
+ * 现在这条文案只在真有 8~17s 等待时出现，它本来就是为那段静默准备的。
  *
  * 绝不 await（与 feedback / bug-patrol 同款）：飞书限流会让 reply 抛错，
  * 而这条只是「让用户知道消息收到了」的锦上添花，不该把整个动作带崩。
  * ctx.reply 可能同步抛也可能返回 rejected promise，两条路径都要吞。
  */
-function sendAck(ctx, actionConfig) {
-  const needsSlotFilling = (actionConfig.variables || []).some((v) => v.required);
-  if (!needsSlotFilling) return;
+function sendAck(ctx) {
   const swallow = (e) =>
     logger.warn('action-runner', '即时应答发送失败（不阻塞动作）', { err: e?.message || String(e) });
   try {
@@ -130,30 +135,71 @@ async function proceedWithAction(ctx, actionConfig, deps) {
   const userId = ctx.user.id;
   const text = ctx.text || '';
 
-  // 抽取前先应答：下面这一行 await 在生产实测要 6~12s。
-  // 追问轮（handlePendingResponse）刻意不发 —— 用户刚回答完，下一条马上就到，再来一条只是噪音。
-  sendAck(ctx, actionConfig);
+  // ⚠️ 占位必须写在**发起抽取之前**（事故驱动，勿挪到 await 之后）。
+  // 旧实现把 setPending 放在抽取结束后，于是抽取那 8~17s 里 hasPending 一直为 false：
+  // 用户等不及先答了「test环境」，这条消息绕过本 feature 走常规意图识别 → 判 other →
+  // 回一张「没有识别到你的意图」帮助卡，随后首轮才姗姗来迟地追问同一个字段
+  //（实证 app-2026-09-01.log:231-255）。占位后窗口内的消息由 handlePendingResponse 收进 inbox。
+  setPending(userId, { actionId: actionConfig.id, collected: {}, waitingFor: null, extracting: true, inbox: [] });
 
   try {
-    // 从消息提取变量 + 合并持久化
-    const extracted = await deps.extract(actionConfig, text, userId);
-    const missing = pickMissingVars(actionConfig, extracted);
+    // 从消息提取变量 + 合并持久化。
+    // 即时应答交给 onLlmStart：只有真要等模型（8~17s）才发，本地抽完就直接执行，不弹噪音。
+    // 追问轮（handlePendingResponse）一律不发 —— 用户刚回答完，下一条马上就到。
+    const extracted = await deps.extract(actionConfig, text, userId, { onLlmStart: () => sendAck(ctx) });
+
+    // 抽取那 8~17s 里用户可能已经打了「取消」（cancel 分支在 handle 开头，先于 getPending，
+    // 会把占位删掉）。占位不在了 = 这次动作已被放弃，绝不能照常往下执行 ——
+    // 破坏性脚本（清数据 / 退款）在用户明确喊停后仍然跑起来是不可接受的。
+    if (!pendingState.has(userId)) {
+      logger.info('action-runner', '抽取期间动作已被取消，放弃执行', { actionId: actionConfig.id, userId });
+      return;
+    }
+
+    const collected = await mergeQueuedAnswers(userId, actionConfig, extracted, deps);
+    const missing = pickMissingVars(actionConfig, collected);
 
     if (missing.length > 0) {
       // 保存到 pendingState 并追问第一个缺失变量
       const first = missing[0];
-      setPending(userId, { actionId: actionConfig.id, collected: extracted, waitingFor: first.name });
+      setPending(userId, { actionId: actionConfig.id, collected, waitingFor: first.name });
       return ctx.reply(first.prompt || `请提供 ${first.label || first.name}`);
     }
 
     // 所有必填变量已收集 → 执行脚本
     pendingState.delete(userId);
-    return executeAction(ctx, actionConfig, extracted, deps);
+    return executeAction(ctx, actionConfig, collected, deps);
   } catch (e) {
     pendingState.delete(userId);
     logger.error('action-runner', '槽位填充异常', { actionId: actionConfig.id, err: e?.message });
     return ctx.reply('处理请求时出错，请重试。');
   }
+}
+
+/**
+ * 并入竞态窗口内用户「抢答」的消息。
+ *
+ * 只在真的有抢答时才多跑一次抽取 —— 正常路径（inbox 空）零额外成本。
+ * 抢答文本按「这就是对第一个缺失字段的回答」处理（forVar），用户只回「体验」两个字也能认出来。
+ */
+async function mergeQueuedAnswers(userId, actionConfig, extracted, deps) {
+  const queued = pendingState.get(userId)?.inbox || [];
+  if (!queued.length) return extracted;
+
+  // 必填已经齐了 —— 抢答说的是别的事（「哦对了」「顺便问下」），与本次执行无关。
+  // 这里若不早退就会白烧一次 LLM 抽取，还可能把无关内容覆盖进已抽好的变量。
+  const missingNow = pickMissingVars(actionConfig, extracted);
+  if (!missingNow.length) return extracted;
+
+  const forVar = missingNow[0]?.name;
+  logger.info('action-runner', '并入抽取窗口内的抢答消息', {
+    actionId: actionConfig.id,
+    userId,
+    count: queued.length,
+    forVar: forVar || null,
+  });
+  const more = await deps.extract(actionConfig, queued.join('\n'), null, forVar ? { forVar } : {});
+  return { ...extracted, ...more };
 }
 
 /** 处理用户在追问中间态的回复 */
@@ -164,6 +210,14 @@ async function handlePendingResponse(ctx, pending, text, deps) {
   if (!actionConfig) {
     pendingState.delete(userId);
     return ctx.reply('动作不存在或已禁用。');
+  }
+
+  // 首轮抽取还在跑（竞态窗口）：这条是用户抢答，收进 inbox 交给 mergeQueuedAnswers，
+  // 此处**不回话** —— 首轮马上就要给出追问或执行结果，再插一句只会变成两轮自问自答。
+  if (pending.extracting) {
+    pending.inbox.push(text);
+    logger.info('action-runner', '抽取窗口内收到抢答，已暂存', { actionId: actionConfig.id, userId });
+    return;
   }
 
   // 追问中间态也要复检：pendingState 可能跨越管理员收紧权限的时刻，

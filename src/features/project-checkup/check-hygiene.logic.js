@@ -47,7 +47,9 @@ export function evaluateHygiene({ trackedFiles = null } = {}) {
         file: rel,
         line: 1,
         message: '运行期日志/数据文件被 git 追踪，会让工作区持续变脏，也可能把本地数据推上远端',
-        fixable: false,
+        // 修法是确定性的、可预测的：加 .gitignore + git rm --cached（文件留在磁盘上）。
+        // 没有判断空间，所以标 true 交给确定性策略
+        fixable: true,
         fixHint: `把它加入 .gitignore，并用 git rm --cached ${rel} 从索引里移除`,
       });
       continue;
@@ -62,7 +64,9 @@ export function evaluateHygiene({ trackedFiles = null } = {}) {
         file: rel,
         line: 1,
         message: '临时/调试脚本被 git 追踪，长期留在版本库里会被误当成正式代码',
-        fixable: false,
+        // 同 H1 走「加忽略 + 脱离索引」。刻意**不**自动删除文件——
+        // 「确认不再需要就删除」那一步要人判断，而脱离索引已经解决了「被误当成正式代码」
+        fixable: true,
         fixHint: '确认不再需要就删除；仍要用则移到 scripts/ 并起个正式名字',
       });
     }

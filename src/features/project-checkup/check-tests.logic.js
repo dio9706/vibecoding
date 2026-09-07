@@ -74,6 +74,9 @@ export function evaluateTests({
       file: 'package.json',
       line: 1,
       message: testRun.reason || '项目测试未通过',
+      // 修失败用例是真正的开发工作，不是机械变换。而且这条 issue 的 file 是
+      // `package.json`——它不是「要被修的文件」，只是测试命令的所在处。
+      // 不否决的话 llm-create 会认领它、把目标算成 `package.test.json`（实测过）
       fixable: false,
       fixHint: '本地跑一遍测试命令，修掉失败用例后再体检',
     });
@@ -88,6 +91,8 @@ export function evaluateTests({
       file: '.',
       line: 1,
       message: `项目里没有任何测试文件（扫到 ${sourceFileCount} 个源文件）`,
+      // 没有单一的修复目标（file 是 '.'）。零测试项目要先选框架、配跑测试的命令，
+      // 机器代定容易选错。下一轮体检会逐个报出 S2，那些才有明确目标
       fixable: false,
       fixHint: '从改动最频繁的模块开始补测试',
     });
@@ -101,7 +106,9 @@ export function evaluateTests({
         file: f.file,
         line: 1,
         message: `${f.lines} 行的源文件没有配对测试，改动风险高`,
-        fixable: false,
+        // 有明确目标（新建 `<源文件>.test.js`），且只新建不改源码，
+        // 产出物还要真跑通才保留。交给 llm-create
+        fixable: true,
         fixHint: `新建 ${String(f.file).replace(/\.js$/, '')}.test.js；文件过大时可先把纯逻辑拆到 .logic.js 再测`,
         meta: { lines: f.lines },
       });

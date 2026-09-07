@@ -27,7 +27,7 @@
  */
 import { runClaude } from '../integrations/claude.js';
 import { claudeAuthOpts, getTokens, isPoolExhausted } from './token-rotation.js';
-import { extractFirstJsonObject } from './llm-classify.js';
+import { pickJsonObject } from './llm-classify.js';
 import { logger } from '../shared/logger.js';
 
 /**
@@ -90,12 +90,15 @@ const FORCE_ASK_HOOKS = {
  * @param {number} [opts.timeoutMs]
  * @param {number} [opts.maxTurns]
  * @param {AbortSignal} [opts.signal] 外部取消（用户点「停止优化」）
+ * @param {string[]} [opts.requireKeys] 答案对象必须含的顶层键。
+ *   **多轮工具调用一定要传**：模型会边探索边叙述，中途引用的代码片段或中间结果对象
+ *   都是配平的 JSON，取「第一个」会抓错。实测因此白跑过一次 6.3 分钟的整体评估
  * @returns {Promise<{data:object|null, reason:'exhausted'|'cancelled'|'timeout'|'unparsable'|null,
  *   denied:string[]}>} denied 是被白名单拦下的工具名，用于排查模型是否在试图越权
  */
 export async function runReadonlyAgent({
   prompt, systemPrompt, cwd, model = null, logTag,
-  timeoutMs, maxTurns = DEFAULT_MAX_TURNS, signal,
+  timeoutMs, maxTurns = DEFAULT_MAX_TURNS, signal, requireKeys = [],
 } = {}) {
   // 额度耗尽 fail-fast：同 llm-classify.js 的理由——五小时限流窗口内
   // SDK 流可能永不结束，不发起注定失败的调用
@@ -151,10 +154,8 @@ export async function runReadonlyAgent({
   // 先尝试解析、再看是否超时：顺序同 llm-classify.js 的 classifyOutcome。
   // abort 只说明「流没按时结束」，模型常常早把答案吐完了而 SDK 流迟迟不收尾。
   // 此时手里已有完整结果还回一句失败，是白烧一次额度又骗了用户。
-  const block = extractFirstJsonObject(out);
-  if (block) {
-    try { return { data: JSON.parse(block), reason: null, denied }; } catch { /* 归因到下面 */ }
-  }
+  const data = pickJsonObject(out, requireKeys);
+  if (data) return { data, reason: null, denied };
   // cancelled 要先于 timeout 判：两者都表现为 abort，但对用户是完全不同的两件事
   // （「你点了停止」vs「跑太久了」），归错会让人以为系统出故障
   if (signal?.aborted) return { data: null, reason: 'cancelled', denied };

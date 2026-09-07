@@ -19,14 +19,14 @@ const DEFAULTS = {
   // taskProjectDir 已迁移为机器人的 projectDir（migrateLegacySettingsToBot）
   // taskNotifyFeishu：任务处理完成后推飞书私聊卡片的总开关。默认关——通知会主动打扰用户，
   // 且依赖 myFeishuOpenId / 启用中的机器人，必须由用户显式开启（task-notify 的第一道守卫读它）
-  uiPrefs: { defaultCwd: '', model: 'auto', effort: 'medium', mode: 'default', defaultModel: '', defaultEffort: '', defaultMode: '', disabledTools: [], taskNotifyFeishu: false },
+  uiPrefs: { defaultCwd: '', model: 'auto', effort: 'medium', mode: 'default', defaultModel: '', defaultEffort: '', defaultMode: '', disabledTools: [], taskNotifyFeishu: false, projectMapIdleRefresh: false },
   myFeishuOpenId: '', // 我的飞书 open_id：全局身份标识，测试期筛多维表格「属于我的 BUG」用
   // 记忆库：从会话转录提炼用户偏好的调度/预算配置
   memoryBank: {
     enabled: false,        // 默认关闭：提炼要花额度，必须用户显式开启
-    nightStart: '03:00',
-    nightEnd: '08:00',
-    minIntervalHours: 6,
+    nightStart: '00:00',   // 默认不限时段（nightStart === nightEnd 视为随时可跑）
+    nightEnd: '00:00',
+    minIntervalHours: 1,   // 空闲提炼默认 1 小时冷却，避免频繁重复
     model: '',             // 空 = 用 config 的分类模型（便宜档）
     maxItems: 40,
     maxChars: 3000,

@@ -44,6 +44,7 @@
 - `config-transfer.js` — 配置导入导出纯函数（无 I/O）：`buildExport`/`parseImport`，类型 + 版本校验。
 - `bots-migration.js` — bots 迁移编排：旧单凭证 → 机器人实体 + 收养孤儿动作，幂等。
 - `action-configs.js` — 通用动作配置 CRUD（`action-configs.json`），按 bot 归属。
+- `var-contract-migration.js` — 动作变量抽取契约的一次性迁移：给存量 `env`/`phone` 变量补 `preset`。**用条目上的 `_varContractMigrated` 标记位保证只跑一次**，不是每次按变量名重扫（后者会让用户手动删掉的 `preset` 一重启就被加回来）。
 
 ### 业务领域 store
 - `requirements.js` — 「新需求」全生命周期，含状态机 `PHASE_FLOW` + `canTransition`。

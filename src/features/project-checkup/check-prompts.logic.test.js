@@ -238,7 +238,9 @@ test('有 LLM 判定时按 verdict 扣分并标 done', () => {
   assert.equal(r.score, 92); // 100 - 8（只有 over-broad 扣分）
   assert.equal(r.issues.length, 1);
   assert.equal(r.issues[0].code, 'P1_OVER_BROAD');
-  assert.equal(r.issues[0].fixable, false); // 改提示词是高风险，不自动修
+  // P1/P2 改为可自动修：护栏是「只改 .md（扩展名白名单）+ 定点修订不许重写段落 + 全量备份」，
+  // 改动面被限制在文档层。P3（需新建文件）与整改清单仍走人工，见 check-prompts.logic.js 的注释
+  assert.equal(r.issues[0].fixable, true);
 });
 
 test('conflicting 扣 12 分', () => {

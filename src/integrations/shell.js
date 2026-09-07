@@ -40,9 +40,14 @@ function killTree(child) {
  * @param {boolean} [opts.shell] 覆盖默认 shell 行为。**默认 false**，见下方安全说明。
  *   仅当命令与全部参数都受信（如 owner 配置的 setupScript）且确实需要 shell 特性
  *   （.cmd/.bat shim、管道重定向）时才显式传 true。
+ * @param {string} [opts.input] 写入子进程 stdin 的内容，写完即关流。
+ *   **不传时行为与从前完全一致**（立刻 EOF，见下方 stdin 注释）。
+ *   用途：给脚本递不适合走命令行的载荷 —— 长文本会撞参数长度上限，
+ *   而含引号/换行的内容走 argv 要处理各平台不同的转义规则。
+ *   首个使用者是 tracking-stats 的 sql_exec.py（递一段 SQL）。
  * @returns {Promise<{ok:boolean, code?:number, out?:string, err?:string, msg?:string}>}
  */
-export function runScript(bin, args, { cwd, env, shell, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export function runScript(bin, args, { cwd, env, shell, input, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   return new Promise((resolve) => {
     let child;
     let settled = false;
@@ -69,10 +74,19 @@ export function runScript(bin, args, { cwd, env, shell, timeoutMs = DEFAULT_TIME
     } catch (e) {
       return done({ ok: false, msg: `无法启动 ${bin}：${e.message}` });
     }
-    // 立刻关闭子进程 stdin：我们从不向脚本喂输入，而**不关**会让任何读 stdin 的程序
-    // （git 问凭证、python input()）永远等下去。关掉后它们直接拿到 EOF、快速失败。
+    // stdin 必须**尽快关闭**：不关会让任何读 stdin 的程序（git 问凭证、python input()）
+    // 永远等下去。传了 input 就先写进去再关，没传就直接 EOF —— 两条路都保证「一定会关」。
+    //
+    // stdin 上的 error 必须单独吞掉：子进程若在我们写完之前就退出（比如 python 崩在
+    // import 阶段），这里会收到 EPIPE，未处理的 stream error 会直接打挂整个进程。
     try {
-      child.stdin?.end();
+      if (child.stdin) {
+        child.stdin.on('error', () => {
+          /* EPIPE：子进程已退出，输出/退出码由下面的 close 分支如实回报 */
+        });
+        if (input !== undefined && input !== null) child.stdin.end(String(input), 'utf8');
+        else child.stdin.end();
+      }
     } catch {
       /* stdio 未走管道时无 stdin */
     }

@@ -349,39 +349,65 @@ function shortPath(p) {
 export function initMemoryPanel() {
   refresh();
 
-  // 立即提炼按钮
+  // 立即提炼 / 暂停按钮
   const extractBtn = $('#memExtractBtn');
   if (extractBtn) {
+    function setExtracting(on) {
+      _extracting = on;
+      extractBtn.disabled = false;
+      extractBtn.textContent = on ? '暂停' : '立即提炼';
+      extractBtn.classList.toggle('mem-btn-stop', on);
+    }
+
+    function stopPolling() {
+      if (_pollTimer) { clearTimeout(_pollTimer); _pollTimer = null; }
+    }
+
+    function startPolling() {
+      let pollCount = 0;
+      const MAX_POLLS = 2000; // 2000 × 3s ≈ 100 min
+      const poll = async () => {
+        await refresh();
+        pollCount++;
+        const hasAnalyzing = _sessions.some((s) => s.status === 'analyzing');
+        if (hasAnalyzing && pollCount < MAX_POLLS && _extracting) {
+          _pollTimer = setTimeout(poll, 3000);
+        } else {
+          _pollTimer = null;
+          setExtracting(false);
+        }
+      };
+      _pollTimer = setTimeout(poll, 3000);
+    }
+
     extractBtn.onclick = async () => {
-      if (_extracting) return;
-      _extracting = true;
-      extractBtn.disabled = true;
-      extractBtn.textContent = '提炼中…';
+      // 暂停中
+      if (_extracting) {
+        extractBtn.disabled = true;
+        extractBtn.textContent = '暂停中…';
+        try {
+          await api('/api/memory/stop', {});
+          stopPolling();
+          setExtracting(false);
+          window.toast?.info('已暂停，本条分析完成后停止');
+          await refresh();
+        } catch (e) {
+          window.toast?.error(e.message);
+          extractBtn.disabled = false;
+          extractBtn.textContent = '暂停';
+        }
+        return;
+      }
+
+      // 开始提炼
+      setExtracting(true);
       try {
         await api('/api/memory/extract', {});
         window.toast?.info('已开始提炼，实时更新中…');
-        // 每 3s 轮询一次，直到没有「分析中」的会话为止（最多 5 分钟）
-        let pollCount = 0;
-        const MAX_POLLS = 100; // 100 × 3s = 5min
-        const poll = async () => {
-          await refresh();
-          pollCount++;
-          const hasAnalyzing = _sessions.some((s) => s.status === 'analyzing');
-          if (hasAnalyzing && pollCount < MAX_POLLS) {
-            _pollTimer = setTimeout(poll, 3000);
-          } else {
-            _pollTimer = null;
-            _extracting = false;
-            extractBtn.disabled = false;
-            extractBtn.textContent = '立即提炼';
-          }
-        };
-        _pollTimer = setTimeout(poll, 3000);
+        startPolling();
       } catch (e) {
         window.toast?.error(e.message);
-        _extracting = false;
-        extractBtn.disabled = false;
-        extractBtn.textContent = '立即提炼';
+        setExtracting(false);
       }
     };
   }

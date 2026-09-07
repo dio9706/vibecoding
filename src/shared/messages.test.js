@@ -90,6 +90,35 @@ test('sanitizeMessages：丢弃已下线的 feedbackAck，保留新 key', () => 
   assert.deepEqual(r.values, { ackBug: '稍等' });
 });
 
+/**
+ * 埋点统计是**插件型 feature**（tracking-stats，靠 `帮我统计埋点` 前缀 match 触发），
+ * 不走 action-configs，因此 welcome 的动作段永远列不到它 —— 用户不知道这个前缀，
+ * 功能等于不存在（生产近 4 天「没有识别到意图」兜底触发 109 次）。
+ * 这里把它钉进静态核心段；例句必须与 tracking-stats/logic.js 的 TRACKING_PREFIX 一致，
+ * 且前缀必须在**句首**，否则等于教用户说一句触发不了的话。
+ */
+test.describe('welcome 必须提到埋点统计', () => {
+  test('buildWelcomeText 含「帮我统计埋点」及可直接照抄的例句', async () => {
+    const { buildWelcomeText } = await import('./messages.js');
+    const text = buildWelcomeText('bot_x', []);
+    assert.match(text, /帮我统计埋点/, '缺少埋点统计能力说明');
+    assert.match(text, /例: 帮我统计埋点/, '例句必须以触发前缀开头');
+  });
+
+  test('buildWelcomeCard 同样含「帮我统计埋点」', async () => {
+    const { buildWelcomeCard } = await import('./messages.js');
+    const card = buildWelcomeCard('bot_x', []);
+    const header = card.elements[0].text.content;
+    assert.match(header, /帮我统计埋点/, '卡片缺少埋点统计能力说明');
+    assert.match(header, /例: 帮我统计埋点/, '例句必须以触发前缀开头');
+  });
+
+  test('REGISTRY.welcome 默认文案与两个构造函数保持同步', async () => {
+    const { REGISTRY } = await import('./messages.js');
+    assert.match(REGISTRY.welcome.defaultText, /帮我统计埋点/, '注册表默认文案漏了埋点统计');
+  });
+});
+
 test.describe('buildWelcomeText', () => {
   test('有已启用动作时应列出动作列表', async (t) => {
     // 模拟的已启用动作列表

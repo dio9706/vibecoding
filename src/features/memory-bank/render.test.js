@@ -122,3 +122,34 @@ test('无可渲染条目时返回空串 —— 调用方必须把 memory-bank.md
   assert.equal(text, '');
   assert.deepEqual(included, []);
 });
+
+// ── v2 memories 归一化路径 ────────────────────────────────────────────────────
+// v2 memory 对象来自 synthesize.js，缺少 v1 字段（status/inject/scope），
+// normalizeMem 负责补全，使其能正常通过 selectForInjection 过滤器并被渲染入 CLAUDE.md。
+
+const v2mem = (over = {}) => ({
+  id: 'v2_1',
+  category: 'code-style',
+  statement: 'v2 规则：注释写中文',
+  reasoning: '用户多次使用中文注释',
+  createdAt: NOW,
+  source: 'synthesized',
+  ...over,
+});
+
+test('v2 memory（无 status 字段）能被 normalizeMem 归一化并正常渲染到 Markdown', () => {
+  const items = [v2mem()];
+  const { text, included, truncated } = renderMarkdown(items, { scope: 'global', now: NOW });
+  assert.equal(included.length, 1, 'v2 memory 应能通过过滤器进入 included');
+  assert.equal(truncated, 0, '正常 v2 memory 不应被截断');
+  assert.match(text, /v2 规则：注释写中文/, '渲染结果里应包含 statement 文本');
+  assert.match(text, /## 代码风格/, '应按 category 分节，用中文节名');
+});
+
+test('v2 memory 含未知 category 时，必须计入 truncated 而非静默丢弃', () => {
+  const items = [v2mem({ category: 'unknown-cat', statement: '未知分类的 v2 规则' })];
+  const { text, included, truncated } = renderMarkdown(items, { scope: 'global', now: NOW });
+  assert.equal(included.length, 0, '未知 category 不应进入 included');
+  assert.equal(truncated, 1, '被挡掉的 v2 memory 必须诚实计入 truncated');
+  assert.equal(text, '', '无可渲染条目时 text 应为空串');
+});

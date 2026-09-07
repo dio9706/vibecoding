@@ -374,10 +374,54 @@
       .spacer {
         flex: 1;
       }
-      .ratelimit {
-        font-size: 11.5px;
+      /* ---- 额度状态圆点 ---- */
+      .context-progress {
+        display: flex;
+        align-items: center;
+        height: 28px;
+        padding: 0 4px;
+        position: relative;
+        cursor: default;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      .cp-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #4ade80;
+        flex-shrink: 0;
+        transition: background-color 0.3s ease;
+      }
+      .cp-dot.warning { background: #facc15; }
+      .cp-dot.danger { background: #ef4444; }
+      .cp-tooltip {
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 8px 12px;
+        font-size: 11px;
         color: var(--muted);
         white-space: nowrap;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.15s;
+        z-index: 1000;
+        line-height: 1.7;
+      }
+      .cp-tooltip.visible { opacity: 1; }
+      .cp-tooltip::after {
+        content: '';
+        position: absolute;
+        bottom: 100%;
+        left: 50%;
+        transform: translateX(-50%);
+        border: 5px solid transparent;
+        border-bottom-color: var(--border);
       }
       .pending-chip {
         font-size: 11.5px;
@@ -415,14 +459,6 @@
       }
       .pending-banner[hidden] {
         display: none;
-      }
-      .ratelimit .dot {
-        display: inline-block;
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        margin-right: 5px;
-        vertical-align: middle;
       }
       /* ---- 通用内联 SVG 图标（见 js/icons.js）----
          尺寸走 1em、颜色走 currentColor：图标换到横幅/槽位/弹框标题都不必各自补一条 CSS，
@@ -2042,6 +2078,17 @@
       .jt-number { color: var(--accent); }
       .jt-boolean { color: var(--amber); }
       .jt-null { color: var(--faint); font-style: italic; }
+
+      /* ---- 会话清理 tab ---- */
+      .cleanup-hint { font-size: 12px; color: var(--muted); margin: 6px 0 12px; line-height: 1.5; }
+      .cleanup-stats { font-size: 13px; color: var(--text); line-height: 1.9; margin-bottom: 14px; }
+      .cleanup-mono { font-family: var(--mono); color: var(--muted); word-break: break-all; }
+      .cleanup-danger { font-weight: 700; color: var(--red); }
+      .cleanup-ranges { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+      .cleanup-ranges label { font-size: 13px; color: var(--text); cursor: pointer; display: flex; align-items: center; gap: 6px; }
+      .cleanup-custom { display: flex; gap: 16px; margin: 10px 0; flex-wrap: wrap; }
+      .cleanup-custom label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+      .cleanup-actions { margin-top: 14px; }
 
       /* ---- 设置页 ---- */
       .set-sec { margin-bottom: 4px; }
@@ -3795,15 +3842,13 @@
   display: none !important;
 }
 
-/* ---- 项目地图弹框 ---- */
-.pm-modal { width: 860px; max-width: 93vw; max-height: 90vh; display: flex; flex-direction: column; }
-.pm-body { flex: 1; overflow-y: auto; padding: 0 4px 8px; }
-/* 通用空态（加载中 / 生成中 / 错误） */
-.pm-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 56px 24px; text-align: center; }
+/* ---- 项目地图：空态 ---- */
+/* margin:auto 在 flex 列里做双向居中：面板占满整个主区，空态若靠上会显得很空旷 */
+.pm-empty { margin: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 56px 24px; text-align: center; }
 .pm-empty-text { color: var(--text); font-size: 14px; }
 .pm-error { color: #e55; }
 /* 「未生成」状态：地球 + 文字 + 大按钮 */
-.pm-no-map { display: flex; flex-direction: column; align-items: center; padding: 28px 24px 40px; gap: 16px; text-align: center; }
+.pm-no-map { margin: auto; display: flex; flex-direction: column; align-items: center; padding: 28px 24px 40px; gap: 16px; text-align: center; }
 /* 半球效果：canvas 是 330×330 的完整球，这里只给 186px 高并裁掉下半截。
    186 略大于半径（165），所以球最宽处仍在可视区内，切口落在赤道稍下方 —— 呈现
    「地球从下方升起」的观感；给足 200px 反而会露出球底弧线，不再是半球。 */
@@ -3824,17 +3869,30 @@
 /* 生成中旋转圈 */
 .pm-spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: pm-spin 0.9s linear infinite; }
 @keyframes pm-spin { to { transform: rotate(360deg); } }
-/* ---- 项目地图：已生成态（画布模式） ---- */
-/* 画布自己滚动/缩放，外层 body 不再滚，否则滚轮缩放会带着整个弹框一起滚 */
-.pm-body--map { display: flex; flex-direction: column; gap: 10px; overflow: hidden; padding-bottom: 6px; }
+/* ---- 项目地图：平铺在对话区的整页面板 ---- */
+/* 同 in-markdown 的处理：纯查看视图，收掉输入框，滚动交给画布自己 */
+.app.in-project-map .composer { display: none; }
+.app.in-project-map .panel-view { overflow: hidden; display: flex; flex-direction: column; }
+.app.in-project-map .panel-page[data-view='project-map'] { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.app.in-project-map .panel-page[data-view='project-map'] > .panel-head { flex-shrink: 0; }
+/* 面板主体撑满剩余高度；min-height:0 是 flex 子项能收缩的前提，缺了画布会把页面顶出去 */
+.pm-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+/* ---- 已生成态（画布模式） ---- */
+.pm-body--map { gap: 10px; overflow: hidden; }
 .pm-map-bar { display: flex; align-items: center; gap: 10px; padding: 12px 6px 0; flex: 0 0 auto; }
 .pm-map-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
 .pm-map-path { font-family: var(--mono); font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pm-map-stat { font-size: 11.5px; color: var(--faint); }
 .pm-map-filter { width: 240px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 7px 10px; font-size: 12.5px; outline: none; }
 .pm-map-filter:focus { border-color: var(--accent); }
+.pm-idle-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.pm-idle-toggle input { cursor: pointer; }
+.pm-idle-toggle:hover { color: var(--text); }
 /* 给绝对定位的 .rq-canvas-host（inset:0）一个有高度的定位上下文；高度随视口收缩，小屏不把弹框顶出屏外 */
-.pm-map-canvas { position: relative; height: min(540px, calc(90vh - 190px)); min-height: 320px; border-radius: 12px; border: 1px solid var(--border-soft); overflow: hidden; flex: 0 0 auto; }
+/* 画布吃掉信息栏之外的全部高度。flex:1 + min-height:0 缺一不可：
+   没有 min-height:0 时 flex 子项的最小高度是内容高度，画布撑不下去反而会把页面顶长。 */
+.pm-map-canvas { position: relative; flex: 1; min-height: 0; border-radius: 12px; border: 1px solid var(--border-soft); overflow: hidden; }
 /* map-canvas 内部的 .rq-canvas-host / .rq-minimap 都是 absolute，显式给它们一个铺满的定位祖先，不靠隔代兜底 */
 .pm-map-mount { position: absolute; inset: 0; }
 /* 模块卡片。高度由 JS 按 layoutMap 的结果内联钉死，这里只管内部排布 */
@@ -3982,6 +4040,8 @@
   border: 1px solid #e0b0b0; color: #c44; background: transparent;
   cursor: pointer; white-space: nowrap; flex-shrink: 0; font-family: inherit; }
 .mem-remove-btn:hover { background: #fff0f0; }
+.mem-btn-stop { border-color: var(--accent) !important; color: var(--accent) !important; }
+.mem-btn-stop:hover { background: var(--accent-soft) !important; }
 
 /* 记忆库 v2 — 会话列表区 */
 .mem-session-item { padding: 4px 0; border-bottom: 1px solid var(--border, #eee); }
@@ -4112,7 +4172,84 @@
 .opt-grade { font-size: 15px; font-weight: 600; }
 .opt-issue-count, .opt-last-at { color: var(--muted); font-size: 12px; }
 
+/* 体检进行中：分数环换成转圈。此刻报告里还留着上一次的分数，
+   直接显示会让用户以为这次已经出结果了 */
+.opt-ring.is-loading {
+  border-color: var(--faint);
+  border-top-color: var(--accent-hi);
+  animation: opt-ring-spin .9s linear infinite;
+}
+@keyframes opt-ring-spin { to { transform: rotate(360deg); } }
+
+/* 超过一个月没体检：时间标红 + 挂标签。那时结论大概率指向已被改动的文件，
+   不只是旧，是会误导人 */
+.opt-last-at { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.opt-last-at.is-stale { color: var(--danger, var(--red)); }
+.opt-stale-badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--danger, var(--red));
+  border: 1px solid currentColor;
+  cursor: help;
+}
+
 .opt-dims { display: flex; flex-direction: column; gap: 8px; }
+
+/* 维度分组：17 个维度平铺是一面墙，按域分组后先定位「哪个方面有问题」再往下看 */
+.opt-group { display: flex; flex-direction: column; gap: 8px; }
+.opt-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px;
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid var(--faint);
+}
+.opt-group-head::before {
+  content: '▾';
+  color: var(--muted);
+  font-size: 10px;
+  transition: transform .15s;
+}
+.opt-group.is-folded .opt-group-head::before { transform: rotate(-90deg); }
+.opt-group-label { font-weight: 600; font-size: 13px; }
+/* 折叠后靠这行汇总仍能看出该域好不好——折叠不该等于把信息藏起来 */
+.opt-group-sum { color: var(--muted); font-size: 12px; flex: 1; text-align: right; }
+.opt-group-body { display: flex; flex-direction: column; gap: 8px; }
+.opt-group.is-folded .opt-group-body { display: none; }
+
+/* 整体评估的行动计划块。与逐条 issue 分开渲染：计划是「先做哪件」，issue 是「哪里有问题」 */
+/* 结果条目的类型标签：让「改了源码」与「只写了清单」在列表里一眼可分 */
+.opt-res-kind {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--faint);
+  white-space: nowrap;
+}
+
+.opt-plan-biz, .opt-plan-risks,
+.opt-plan-verdict, .opt-plan-strengths, .opt-plan-contra {
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--panel);
+  border-left: 3px solid var(--faint);
+  margin-bottom: 8px;
+}
+/* 业务理解用主色最重的一档：它是这一维「读懂了你的项目」的证明，也是判断后面建议是否可信的前提 */
+.opt-plan-biz { border-left-color: var(--accent, var(--accent-hi)); background: var(--panel-2); }
+.opt-plan-risks { border-left-color: var(--red, var(--danger)); }
+.opt-plan-verdict { border-left-color: var(--accent-hi); }
+.opt-plan-strengths { border-left-color: var(--green); }
+.opt-plan-contra { border-left-color: var(--amber); }
+.opt-plan-title { font-weight: 600; font-size: 12px; margin-bottom: 6px; }
+.opt-plan-text { font-size: 13px; line-height: 1.6; }
+.opt-plan-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
+.opt-plan-sub { color: var(--muted); font-size: 12px; }
 
 .opt-dim {
   border: 1px solid var(--faint);

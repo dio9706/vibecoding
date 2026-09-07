@@ -74,9 +74,7 @@ export function shouldRun({ now, settings, tokens, activeRunCount, lastExtractAt
     return { run: false, reason: 'exhausted', window: null };
   }
 
-  // 窗口① —— 距重置 <30 分钟且仍在可用额度内。
-  // I1：选号先按 providerId 过滤，不能拿其它 provider 的窗口重置时刻来判断这个 provider 该不该跑；
-  // I2：healthy 优先、退而取 warning（与 pickActive 对齐）——warning 反而是最该抓紧窗口①的时刻。
+  // 窗口① —— 距重置 <30 分钟且仍在可用额度内（边际成本最低，优先触发）。
   const active = pickActiveToken(tokens, providerId);
   const resetsAt = active && typeof active.windowResetsAt === 'number' ? active.windowResetsAt : null;
   if (resetsAt) {
@@ -84,14 +82,19 @@ export function shouldRun({ now, settings, tokens, activeRunCount, lastExtractAt
     if (left > 0 && left < WINDOW_END_LEAD_MS) return { run: true, reason: 'window-end', window: 'window-end' };
   }
 
-  // 窗口② —— 凌晨保底。
-  // M7：getHours() 取的是进程本地时区。服务若跑在 UTC 容器而人在 +08 时区，nightStart/nightEnd
-  // 按本地时间配的「凌晨」会与进程时区错位，长期不触发但报不出错，排查成本很高——部署时需确认进程时区。
+  // 窗口② —— 安静时段（如凌晨）：若用户配置了 nightStart/nightEnd，仅在该时段内运行。
+  // 若 nightStart === nightEnd（或解析失败），视为「不限时段」——任何空闲时刻均可运行。
+  // M7：进程本地时区，UTC 容器需注意时区偏差。
   const d = new Date(now);
   const minutes = d.getHours() * 60 + d.getMinutes();
-  if (inWindow(minutes, parseHm(s.nightStart), parseHm(s.nightEnd))) {
-    return { run: true, reason: 'night', window: 'night' };
+  const nightStartMin = parseHm(s.nightStart);
+  const nightEndMin = parseHm(s.nightEnd);
+
+  // nightStart === nightEnd 或任一解析失败 → 不限时段（随时可跑）
+  const hasWindow = nightStartMin !== null && nightEndMin !== null && nightStartMin !== nightEndMin;
+  if (hasWindow && !inWindow(minutes, nightStartMin, nightEndMin)) {
+    return { run: false, reason: 'out-of-window', window: null };
   }
 
-  return { run: false, reason: 'out-of-window', window: null };
+  return { run: true, reason: 'idle', window: hasWindow ? 'night' : 'anytime' };
 }
