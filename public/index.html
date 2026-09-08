@@ -242,6 +242,25 @@
           <span class="dir-label" id="dirLabel">服务目录</span>
           <span class="caret">▾</span>
         </button>
+
+        <button class="git-selector" id="gitBtn" title="选择项目分支" hidden>
+          <span class="branch-icon">🌿</span>
+          <span class="branch-name" id="gitLabel">main</span>
+          <span class="caret">▾</span>
+        </button>
+
+        <!-- 分支列表浮层 -->
+        <div class="git-dropdown" id="gitDropdown" hidden>
+          <div class="git-branches" id="gitBranches">
+            <!-- 动态生成分支列表 -->
+          </div>
+          <div class="git-footer">
+            <button class="git-refresh-btn" id="gitRefreshBtn" title="刷新分支列表">
+              <span>🔄</span> 刷新
+            </button>
+          </div>
+        </div>
+
         <div class="spacer" id="topbarDragArea" data-tauri-drag-region></div>
         <div class="context-progress" id="contextProgress" data-tauri-drag-region hidden></div>
         <span class="pending-chip" id="pendingChip" data-tauri-drag-region hidden></span>
