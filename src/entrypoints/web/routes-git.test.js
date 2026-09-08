@@ -81,3 +81,11 @@ test('parseBranchLines: 空输入返回空列表', (t) => {
   assert.deepStrictEqual(remote, []);
   assert.strictEqual(current, '');
 });
+
+test('parseBranchLines: 远程分支作为 current 时去除 remotes/ 前缀', (t) => {
+  const lines = ['remotes/origin/main|(SEP)|true'];
+  const { local, remote, current } = parseBranchLines(lines);
+  assert.deepStrictEqual(local, []);
+  assert.deepStrictEqual(remote, ['origin/main']);
+  assert.strictEqual(current, 'origin/main');
+});

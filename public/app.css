@@ -444,7 +444,7 @@
       }
 
       .git-branch-item.current {
-        background: var(--accent, #4f46e5);
+        background: var(--accent);
         color: #fff;
         font-weight: 500;
       }
