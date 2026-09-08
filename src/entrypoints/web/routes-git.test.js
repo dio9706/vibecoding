@@ -1,7 +1,7 @@
 /** src/entrypoints/web/routes-git.test.js */
 import { test } from 'node:test';
 import * as assert from 'node:assert';
-import { validateBranchName } from './routes-git.js';
+import { validateBranchName, parseBranchLines } from './routes-git.js';
 
 // ---- validateBranchName ----
 
@@ -35,44 +35,49 @@ test('validateBranchName: 路径遍历序列 (..) 被拒绝', (t) => {
   assert.strictEqual(validateBranchName('a..b'), false);
 });
 
-// ---- 分支排序（本地优先，各自字母序）----
+// ---- parseBranchLines ----
 
-test('分支列表排序：本地分支按字母序', (t) => {
-  const local = ['feature/api', 'main', 'dev', 'alpha'];
-  local.sort();
+test('parseBranchLines: 本地分支按字母序', (t) => {
+  const lines = [
+    'main|(SEP)|true',
+    'feature/api|(SEP)|false',
+    'dev|(SEP)|false',
+    'alpha|(SEP)|false',
+  ];
+  const { local, remote, current } = parseBranchLines(lines);
   assert.deepStrictEqual(local, ['alpha', 'dev', 'feature/api', 'main']);
+  assert.deepStrictEqual(remote, []);
+  assert.strictEqual(current, 'main');
 });
 
-test('分支列表排序：远程分支按字母序', (t) => {
-  const remote = ['origin/main', 'origin/develop', 'origin/beta'];
-  remote.sort();
+test('parseBranchLines: 远程分支按字母序', (t) => {
+  const lines = [
+    'remotes/origin/main|(SEP)|false',
+    'remotes/origin/develop|(SEP)|false',
+    'remotes/origin/beta|(SEP)|false',
+  ];
+  const { local, remote, current } = parseBranchLines(lines);
+  assert.deepStrictEqual(local, []);
   assert.deepStrictEqual(remote, ['origin/beta', 'origin/develop', 'origin/main']);
+  assert.strictEqual(current, '');
 });
 
-test('分支列表排序：本地在前，远程在后（分组顺序）', (t) => {
-  // 模拟 handleGitBranches 的分组逻辑
-  const allLines = [
+test('parseBranchLines: 本地在前、远程在后、current 正确识别', (t) => {
+  const lines = [
     'remotes/origin/main|(SEP)|false',
     'main|(SEP)|true',
     'dev|(SEP)|false',
     'remotes/origin/dev|(SEP)|false',
   ];
-  const local = [];
-  const remote = [];
-  let current = '';
-  for (const line of allLines) {
-    const [name, isCurrent] = line.split('|(SEP)|');
-    if (!name) continue;
-    if (isCurrent === 'true') current = name;
-    if (name.startsWith('remotes/')) {
-      remote.push(name.replace(/^remotes\//, ''));
-    } else {
-      local.push(name);
-    }
-  }
-  local.sort();
-  remote.sort();
+  const { local, remote, current } = parseBranchLines(lines);
   assert.deepStrictEqual(local, ['dev', 'main']);
   assert.deepStrictEqual(remote, ['origin/dev', 'origin/main']);
   assert.strictEqual(current, 'main');
+});
+
+test('parseBranchLines: 空输入返回空列表', (t) => {
+  const { local, remote, current } = parseBranchLines([]);
+  assert.deepStrictEqual(local, []);
+  assert.deepStrictEqual(remote, []);
+  assert.strictEqual(current, '');
 });

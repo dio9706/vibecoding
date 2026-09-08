@@ -55,6 +55,38 @@ export async function handleGitStatus(cwd, res) {
   });
 }
 
+/**
+ * 解析 git branch -a --format=... 的输出行，返回 { local, remote, current }。
+ * 纯函数，便于单元测试。
+ * @param {string[]} lines 每行格式：`<refname>|(SEP)|<true|false>`
+ * @returns {{ local: string[], remote: string[], current: string }}
+ */
+export function parseBranchLines(lines) {
+  const local = [];
+  const remote = [];
+  let current = '';
+
+  for (const line of lines) {
+    const [name, isCurrent] = line.split('|(SEP)|');
+    if (!name) continue;
+
+    if (isCurrent === 'true') {
+      current = name.startsWith('remotes/') ? name.replace(/^remotes\//, '') : name;
+    }
+
+    if (name.startsWith('remotes/')) {
+      remote.push(name.replace(/^remotes\//, ''));
+    } else {
+      local.push(name);
+    }
+  }
+
+  local.sort();
+  remote.sort();
+
+  return { local, remote, current };
+}
+
 /** GET /api/git/branches - 列出本地和远程分支，可选 refresh=1 触发 fetch */
 export async function handleGitBranches(cwd, refresh, res) {
   const cwdStr = str(cwd);
@@ -86,27 +118,7 @@ export async function handleGitBranches(cwd, refresh, res) {
   }
 
   const lines = branchResult.stdout.split('\n').filter((l) => l.trim());
-  const local = [];
-  const remote = [];
-  let current = '';
-
-  for (const line of lines) {
-    const [name, isCurrent] = line.split('|(SEP)|');
-    if (!name) continue;
-
-    if (isCurrent === 'true') {
-      current = name.startsWith('remotes/') ? name.replace(/^remotes\//, '') : name;
-    }
-
-    if (name.startsWith('remotes/')) {
-      remote.push(name.replace(/^remotes\//, ''));
-    } else {
-      local.push(name);
-    }
-  }
-
-  local.sort();
-  remote.sort();
+  const { local, remote, current } = parseBranchLines(lines);
 
   sendJson(res, 200, { data: { local, remote, current } });
 }
