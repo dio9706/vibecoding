@@ -39,10 +39,10 @@ test('validateBranchName: 路径遍历序列 (..) 被拒绝', (t) => {
 
 test('parseBranchLines: 本地分支按字母序', (t) => {
   const lines = [
-    'main|(SEP)|true',
-    'feature/api|(SEP)|false',
-    'dev|(SEP)|false',
-    'alpha|(SEP)|false',
+    'refs/heads/main|(SEP)|true',
+    'refs/heads/feature/api|(SEP)|false',
+    'refs/heads/dev|(SEP)|false',
+    'refs/heads/alpha|(SEP)|false',
   ];
   const { local, remote, current } = parseBranchLines(lines);
   assert.deepStrictEqual(local, ['alpha', 'dev', 'feature/api', 'main']);
@@ -52,9 +52,9 @@ test('parseBranchLines: 本地分支按字母序', (t) => {
 
 test('parseBranchLines: 远程分支按字母序', (t) => {
   const lines = [
-    'remotes/origin/main|(SEP)|false',
-    'remotes/origin/develop|(SEP)|false',
-    'remotes/origin/beta|(SEP)|false',
+    'refs/remotes/origin/main|(SEP)|false',
+    'refs/remotes/origin/develop|(SEP)|false',
+    'refs/remotes/origin/beta|(SEP)|false',
   ];
   const { local, remote, current } = parseBranchLines(lines);
   assert.deepStrictEqual(local, []);
@@ -64,10 +64,10 @@ test('parseBranchLines: 远程分支按字母序', (t) => {
 
 test('parseBranchLines: 本地在前、远程在后、current 正确识别', (t) => {
   const lines = [
-    'remotes/origin/main|(SEP)|false',
-    'main|(SEP)|true',
-    'dev|(SEP)|false',
-    'remotes/origin/dev|(SEP)|false',
+    'refs/remotes/origin/main|(SEP)|false',
+    'refs/heads/main|(SEP)|true',
+    'refs/heads/dev|(SEP)|false',
+    'refs/remotes/origin/dev|(SEP)|false',
   ];
   const { local, remote, current } = parseBranchLines(lines);
   assert.deepStrictEqual(local, ['dev', 'main']);
@@ -82,10 +82,35 @@ test('parseBranchLines: 空输入返回空列表', (t) => {
   assert.strictEqual(current, '');
 });
 
-test('parseBranchLines: 远程分支作为 current 时去除 remotes/ 前缀', (t) => {
-  const lines = ['remotes/origin/main|(SEP)|true'];
-  const { local, remote, current } = parseBranchLines(lines);
-  assert.deepStrictEqual(local, []);
+// origin/HEAD 是指向默认分支的符号引用；refname:short 会把它缩成一个
+// 看着像分支的 `origin`，曾导致列表里多出一条点不动的假分支。
+test('parseBranchLines: 过滤 origin/HEAD 符号引用', (t) => {
+  const lines = [
+    'refs/heads/main|(SEP)|true',
+    'refs/remotes/origin/HEAD|(SEP)|false',
+    'refs/remotes/origin/main|(SEP)|false',
+  ];
+  const { local, remote } = parseBranchLines(lines);
+  assert.deepStrictEqual(local, ['main']);
   assert.deepStrictEqual(remote, ['origin/main']);
-  assert.strictEqual(current, 'origin/main');
+});
+
+// 同名本地/远程分支必须落在各自的组里（refname:short 下二者都叫得出同一个名字，
+// 无从区分，这是改用 ref 全名分类的直接原因）。
+test('parseBranchLines: 同名本地与远程分支不混淆', (t) => {
+  const lines = [
+    'refs/heads/v1.0.0|(SEP)|true',
+    'refs/remotes/origin/v1.0.0|(SEP)|false',
+  ];
+  const { local, remote, current } = parseBranchLines(lines);
+  assert.deepStrictEqual(local, ['v1.0.0']);
+  assert.deepStrictEqual(remote, ['origin/v1.0.0']);
+  assert.strictEqual(current, 'v1.0.0');
+});
+
+test('parseBranchLines: 非 branch ref 被忽略', (t) => {
+  const lines = ['refs/tags/v1.0|(SEP)|false', 'refs/heads/main|(SEP)|true'];
+  const { local, remote } = parseBranchLines(lines);
+  assert.deepStrictEqual(local, ['main']);
+  assert.deepStrictEqual(remote, []);
 });

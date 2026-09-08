@@ -14,10 +14,16 @@ let _isOpen = false;
 let _isLoading = false;
 let _listenerController = null;
 
-/** 注入工作目录读取器，初始化分支选择器 */
+/**
+ * 注入工作目录读取器，初始化分支选择器。
+ *
+ * checkAndInit 延到微任务：本函数在 chat.js 模块顶部调用，而 `cwd` 在同文件
+ * 更后面才 `let` 声明——同步读会撞 TDZ，且因 checkAndInit 是 async，
+ * ReferenceError 会变成静默的 unhandled rejection（标签不更新、监听器不挂）。
+ */
 export function bindGitSelector({ getCwd }) {
   _getCwd = getCwd || (() => '');
-  checkAndInit();
+  queueMicrotask(checkAndInit);
 }
 
 /** 切换工作目录后重新检测 git 状态 */
@@ -144,11 +150,15 @@ async function loadBranches(refresh) {
   const url = '/api/git/branches?cwd=' + encodeURIComponent(cwd) + (refresh ? '&refresh=1' : '');
 
   try {
-    const { data, error } = await getJson(url);
-    if (error) {
-      toast('加载分支失败：' + error);
+    const { data } = await getJson(url);
+    if (!data || data.error) {
+      toast('加载分支失败：' + (data?.error || '响应异常'));
     } else {
-      _branches = data || { local: [], remote: [], current: '' };
+      _branches = {
+        local: data.local || [],
+        remote: data.remote || [],
+        current: data.current || '',
+      };
       renderBranches();
       if (refresh) toast('分支列表已刷新');
     }
@@ -191,27 +201,35 @@ function createBranchItem(name, current, type) {
   const item = document.createElement('div');
   item.className = 'git-branch-item ' + type + (name === current ? ' current' : '');
   item.textContent = (name === current ? '✓ ' : '') + name;
-  item.addEventListener('click', () => handleBranchClick(name));
+  item.addEventListener('click', () => handleBranchClick(name, type));
   return item;
 }
 
-/** 点击分支行 → 执行 git checkout */
-async function handleBranchClick(branch) {
+/**
+ * 点击分支行 → 执行 git checkout。
+ *
+ * 远程分支要剥掉 remote 名（`origin/dev` → `dev`）：直接 checkout `origin/dev`
+ * 会进 detached HEAD，而 checkout 短名会走 git 的 DWIM——本地已有就切过去，
+ * 没有就建一个跟踪该远程的本地分支，这才是点「origin/dev」时用户想要的结果。
+ */
+async function handleBranchClick(name, type) {
   if (_isLoading) return;
   _isLoading = true;
+
+  const branch = type === 'remote' ? name.replace(/^[^/]+\//, '') : name;
 
   const refreshBtn = $('#gitRefreshBtn');
   if (refreshBtn) refreshBtn.disabled = true;
 
   const cwd = _getCwd();
   try {
-    const { data, error } = await postJson(
+    const { data } = await postJson(
       '/api/git/checkout?cwd=' + encodeURIComponent(cwd),
       { branch },
     );
-    if (error) {
-      toast('切换分支失败：' + error);
-    } else if (data?.ok) {
+    if (!data || data.error) {
+      toast('切换分支失败：' + (data?.error || '响应异常'));
+    } else if (data.ok) {
       _currentBranch = branch;
       _branches = { local: [], remote: [], current: '' };
       updateButtonLabel();

@@ -389,6 +389,11 @@
         transition: border-color 0.2s;
       }
 
+      /* 作者样式的 display 压过 UA 的 [hidden]{display:none}，非 git 目录须显式隐藏 */
+      .git-selector[hidden] {
+        display: none;
+      }
+
       .git-selector:hover {
         border-color: var(--accent);
       }

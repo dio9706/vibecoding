@@ -37,28 +37,31 @@ function execGit(cwd, args, timeout = 5000) {
 export async function handleGitStatus(cwd, res) {
   const cwdStr = str(cwd);
   if (!cwdStr) {
-    return sendJson(res, 200, { data: { isGit: false, cwd: '' } });
+    return sendJson(res, 200, { isGit: false, cwd: '' });
   }
 
   const isGitCheck = await execGit(cwdStr, ['rev-parse', '--is-inside-work-tree']);
   const isGit = isGitCheck.stdout === 'true';
 
   if (!isGit) {
-    return sendJson(res, 200, { data: { isGit: false, cwd: cwdStr } });
+    return sendJson(res, 200, { isGit: false, cwd: cwdStr });
   }
 
   const branchCheck = await execGit(cwdStr, ['rev-parse', '--abbrev-ref', 'HEAD']);
   const currentBranch = branchCheck.code === 0 ? branchCheck.stdout : 'HEAD';
 
-  sendJson(res, 200, {
-    data: { isGit: true, currentBranch, cwd: cwdStr },
-  });
+  sendJson(res, 200, { isGit: true, currentBranch, cwd: cwdStr });
 }
 
 /**
  * 解析 git branch -a --format=... 的输出行，返回 { local, remote, current }。
  * 纯函数，便于单元测试。
- * @param {string[]} lines 每行格式：`<refname>|(SEP)|<true|false>`
+ *
+ * 用 ref 全名（`refs/heads/x` / `refs/remotes/origin/x`）而非 `refname:short` 分类：
+ * short 形式下远程分支就叫 `origin/x`，无从与同名本地分支区分，且 `origin/HEAD`
+ * 会缩成一个看着像分支的 `origin`。
+ *
+ * @param {string[]} lines 每行格式：`<refname 全名>|(SEP)|<true|false>`
  * @returns {{ local: string[], remote: string[], current: string }}
  */
 export function parseBranchLines(lines) {
@@ -67,18 +70,22 @@ export function parseBranchLines(lines) {
   let current = '';
 
   for (const line of lines) {
-    const [name, isCurrent] = line.split('|(SEP)|');
-    if (!name) continue;
+    const [ref, isCurrent] = line.split('|(SEP)|');
+    if (!ref) continue;
 
-    if (isCurrent === 'true') {
-      current = name.startsWith('remotes/') ? name.replace(/^remotes\//, '') : name;
-    }
-
-    if (name.startsWith('remotes/')) {
-      remote.push(name.replace(/^remotes\//, ''));
-    } else {
+    let name = '';
+    if (ref.startsWith('refs/heads/')) {
+      name = ref.slice('refs/heads/'.length);
       local.push(name);
+    } else if (ref.startsWith('refs/remotes/')) {
+      name = ref.slice('refs/remotes/'.length);
+      if (name.endsWith('/HEAD')) continue; // origin/HEAD 是符号引用，不是分支
+      remote.push(name);
+    } else {
+      continue;
     }
+
+    if (isCurrent === 'true') current = name;
   }
 
   local.sort();
@@ -91,61 +98,58 @@ export function parseBranchLines(lines) {
 export async function handleGitBranches(cwd, refresh, res) {
   const cwdStr = str(cwd);
   if (!cwdStr) {
-    return sendJson(res, 400, { data: null, error: '缺少工作目录' });
+    return sendJson(res, 400, { error: '缺少工作目录' });
   }
 
   if (refresh === '1') {
     const fetchResult = await execGit(cwdStr, ['fetch', '--all'], 10000);
     if (fetchResult.code === 'TIMEOUT') {
-      return sendJson(res, 500, { data: null, error: 'git fetch 超时（10s）' });
+      return sendJson(res, 500, { error: 'git fetch 超时（10s）' });
     }
     if (fetchResult.code !== 0) {
-      return sendJson(res, 500, { data: null, error: fetchResult.stderr || 'git fetch 失败' });
+      return sendJson(res, 500, { error: fetchResult.stderr || 'git fetch 失败' });
     }
   }
 
   // 列出所有分支（--format 含 HEAD 标记）
   const branchResult = await execGit(cwdStr, [
     'branch', '-a',
-    '--format=%(refname:short)|(SEP)|%(if)%(HEAD)%(then)true%(else)false%(end)',
+    '--format=%(refname)|(SEP)|%(if)%(HEAD)%(then)true%(else)false%(end)',
   ]);
 
   if (branchResult.code !== 0) {
-    return sendJson(res, 500, {
-      data: null,
-      error: branchResult.stderr || 'git branch 失败',
-    });
+    return sendJson(res, 500, { error: branchResult.stderr || 'git branch 失败' });
   }
 
   const lines = branchResult.stdout.split('\n').filter((l) => l.trim());
   const { local, remote, current } = parseBranchLines(lines);
 
-  sendJson(res, 200, { data: { local, remote, current } });
+  sendJson(res, 200, { local, remote, current });
 }
 
 /** POST /api/git/checkout - 切换分支 */
 export async function handleGitCheckout(cwd, req, res) {
   const cwdStr = str(cwd);
   if (!cwdStr) {
-    return sendJson(res, 400, { data: null, error: '缺少工作目录' });
+    return sendJson(res, 400, { error: '缺少工作目录' });
   }
 
   return withJsonBody(req, async (body) => {
     const branch = str(body?.branch);
     if (!branch || !validateBranchName(branch)) {
-      return sendJson(res, 400, { data: null, error: '无效的分支名' });
+      return sendJson(res, 400, { error: '无效的分支名' });
     }
 
     const checkoutResult = await execGit(cwdStr, ['checkout', branch], 5000);
 
     if (checkoutResult.code === 'TIMEOUT') {
-      return sendJson(res, 500, { data: null, error: 'git checkout 超时（5s）' });
+      return sendJson(res, 500, { error: 'git checkout 超时（5s）' });
     }
 
     if (checkoutResult.code === 0) {
-      return sendJson(res, 200, { data: { ok: true, branch } });
+      return sendJson(res, 200, { ok: true, branch });
     }
 
-    sendJson(res, 500, { data: null, error: checkoutResult.stderr || 'git checkout 失败' });
+    sendJson(res, 500, { error: checkoutResult.stderr || 'git checkout 失败' });
   });
 }
