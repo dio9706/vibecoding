@@ -8,7 +8,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSqlToolServer, TOOL_NAMES, DEFAULT_MAX_QUERIES } from './llm-sql-agent.js';
+import { buildSqlToolServer, buildAgentOptions, TOOL_NAMES, DEFAULT_MAX_QUERIES } from './llm-sql-agent.js';
 
 /** 解析工具返回的 CallToolResult */
 function parse(res) {
@@ -151,5 +151,47 @@ describe('list_tables：模糊匹配不得逃逸', () => {
     const { tools, executed } = harness();
     await tools.list_tables.handler({});
     assert.match(executed[0].sql, /LIKE '%'/);
+  });
+});
+
+describe('buildAgentOptions —— 守住两个静默失效的坑（2026-09-07 实测踩过）', () => {
+  const allowed = new Set(Object.values(TOOL_NAMES));
+  const opts = buildAgentOptions({ server: { type: 'sdk', name: 'sqlro' }, allowed });
+
+  it('用 tools:[] 收窄工具面，**不得**用 disallowedTools', () => {
+    // disallowedTools 的语义是「从模型上下文里移除，即便本来会被允许」——
+    // 通配符会连自家 MCP 工具一起删，实测表现为三个工具全部 Permission denied。
+    assert.deepEqual(opts.tools, [], 'tools:[] 才是禁内置工具的正确字段');
+    assert.equal('disallowedTools' in opts, false, 'disallowedTools 会连 MCP 工具一起删掉');
+  });
+
+  it('**不得**设 allowedTools —— 那会让 canUseTool 整个不被调用', () => {
+    // SDK 会打印 [CLAUDE_SDK_CAN_USE_TOOL_SHADOWED]；第 2 层防线形同虚设而代码看着正常
+    assert.equal('allowedTools' in opts, false);
+    assert.equal(typeof opts.canUseTool, 'function');
+  });
+
+  it('permissionMode 必须是 default（bypassPermissions 会绕过 canUseTool）', () => {
+    assert.equal(opts.permissionMode, 'default');
+  });
+
+  it('canUseTool 放行三个 SQL 工具、拒绝其余一切', async () => {
+    for (const n of allowed) {
+      assert.equal((await opts.canUseTool(n, { a: 1 })).behavior, 'allow', n + ' 应放行');
+    }
+    for (const n of ['Bash', 'Read', 'Write', 'Edit', 'WebFetch', 'mcp__other__x']) {
+      const r = await opts.canUseTool(n, {});
+      assert.equal(r.behavior, 'deny', n + ' 应拒绝');
+      assert.match(r.message, /只读 SQL/);
+    }
+  });
+
+  it('canUseTool 放行时原样透传 input（吞掉入参会让工具收不到参数）', async () => {
+    const input = { sql: 'SELECT 1', purpose: 'x' };
+    assert.deepEqual((await opts.canUseTool(TOOL_NAMES.runQuery, input)).updatedInput, input);
+  });
+
+  it('MCP 服务器挂在约定的名字下（工具全名依赖它）', () => {
+    assert.ok(opts.mcpServers.sqlro, 'server 名变了 TOOL_NAMES 就对不上');
   });
 });

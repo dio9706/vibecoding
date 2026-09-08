@@ -157,6 +157,74 @@ export function maskLiterals(sql) {
  * @param {string} skeleton
  * @returns {string[]} 每段的**骨架**文本（非空）
  */
+/**
+ * 从骨架里切出全部 **SELECT 输出列表**（每个 SELECT 到与之配对的 FROM 之间）。
+ *
+ * 为什么要区分位置而不是整句判 PII（2026-09-07 维护者反馈）：
+ *   `SELECT phone FROM user`                    ← 导出 PII，该拦
+ *   `SELECT uid FROM user WHERE phone = '136…'` ← 拿已知手机号换内部 ID，**不该拦**
+ * 后者是「按手机号查这个用户的行为轨迹」的第一步，产品运营的高频需求，
+ * 而且它没有暴露任何新信息 —— 手机号本来就是提问的人自己输进去的。
+ * 首版整句判 PII 把这条路彻底堵死，实测让一个常用功能完全不可用。
+ *
+ * 子查询与 CTE 里的 SELECT 同样要查：`WITH t AS (SELECT phone …) SELECT * FROM t`
+ * 一样能把 PII 带出来，所以返回**所有**层级的输出列表。
+ *
+ * @param {string} skeleton 已屏蔽字面量与注释的等长骨架
+ * @returns {string[]}
+ */
+export function selectLists(skeleton) {
+  const s = String(skeleton ?? '');
+  const out = [];
+  const re = /\bSELECT\b/gi;
+  let m;
+  while ((m = re.exec(s))) {
+    let depth = 0;
+    let i = m.index + m[0].length;
+    const start = i;
+    let hitFrom = false;
+    for (; i < s.length; i += 1) {
+      const c = s[i];
+      if (c === '(') depth += 1;
+      else if (c === ')') {
+        if (depth === 0) break; // 走出了本 SELECT 所在的括号
+        depth -= 1;
+      } else if (depth === 0 && /^\s+FROM\b/i.test(s.slice(i))) {
+        hitFrom = true;
+        break; // 同层的 FROM：输出列表到此为止
+      }
+    }
+    // FROM 后面第一个非空字符是 `(` → 取自派生表/子查询。
+    // 这类 `SELECT * FROM (SELECT a, b FROM t) x` 是窗口函数的常见写法，
+    // 而内层的输出列表本轮也会被单独校验，外层的 `*` 拿不到任何未知列 —— 放行。
+    // 反之 `SELECT * FROM user` 从**基表**取全部列，会把手机号一并带出，必须拦。
+    const after = hitFrom ? s.slice(i).replace(/^\s+FROM\b/i, '').trimStart() : '';
+    out.push({ list: s.slice(start, i), fromDerived: after.startsWith('(') });
+  }
+  return out;
+}
+
+/**
+ * 输出列表里有没有「裸星号」（`SELECT *` / `SELECT u.*` / `SELECT a, *`）。
+ *
+ * 为什么单独拦：`SELECT * FROM user WHERE phone='x'` 的输出列表里不含 "phone" 字样，
+ * 但结果集会把整行（含手机号）吐出来 —— 列名黑名单对它完全无效。
+ * 要求显式列出字段，顺带让查询更可审计。
+ *
+ * `COUNT(*)` 放行（星号前是 `(`）；`SUM(a*b)` 的乘号不误判（星号前是标识符字符）。
+ */
+export function hasBareStar(selectList) {
+  const s = String(selectList ?? '');
+  for (let i = 0; i < s.length; i += 1) {
+    if (s[i] !== '*') continue;
+    let j = i - 1;
+    while (j >= 0 && /\s/.test(s[j])) j -= 1;
+    const prev = j >= 0 ? s[j] : '';
+    if (prev === '' || prev === ',' || prev === '.') return true;
+  }
+  return false;
+}
+
 export function splitStatements(skeleton) {
   return String(skeleton ?? '')
     .split(';')
@@ -231,14 +299,32 @@ export function validateSql(sql, policy = {}) {
     }
   }
 
+  // PII：**只管输出，不管条件**（2026-09-07 改。首版整句判，把「按手机号查用户轨迹」
+  // 这个高频需求彻底堵死了 —— 而那个用法根本没暴露新信息，手机号是提问者自己输的）。
   const piiColumns = policy.piiColumns ?? DEFAULT_PII_COLUMNS;
   const lower = stmt.toLowerCase();
-  for (const col of piiColumns) {
-    if (lower.includes(String(col).toLowerCase())) {
-      return deny(
-        'pii_denied',
-        `查询涉及敏感字段「${col}」，出于隐私策略不允许。请改成聚合统计（如 COUNT）。`,
-      );
+  if (piiColumns.length) {
+    for (const { list, fromDerived } of selectLists(skeleton)) {
+      const l = list.toLowerCase();
+      for (const col of piiColumns) {
+        if (l.includes(String(col).toLowerCase())) {
+          return deny(
+            'pii_denied',
+            `不能把敏感字段「${col}」放进查询结果。` +
+              `用它做筛选条件是允许的 —— 例如 SELECT uid FROM user WHERE ${col} = '…'，` +
+              `拿到内部 ID 后再用 ID 做后续分析。`,
+          );
+        }
+      }
+      // 基表上的裸星号会把整行（含手机号等）吐出来，而列名黑名单对 `*` 完全无效。
+      // 派生表放行的理由见 selectLists 里的注释。
+      if (!fromDerived && hasBareStar(list)) {
+        return deny(
+          'pii_denied',
+          '不允许对表直接 SELECT *（会把敏感字段一并带出）。请显式列出字段名；' +
+            'COUNT(*) 与 `SELECT * FROM (子查询) t` 不受此限。',
+        );
+      }
     }
   }
 

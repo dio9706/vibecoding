@@ -8,7 +8,14 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateSql, maskLiterals, splitStatements, DEFAULT_PII_COLUMNS } from './sql-guard.js';
+import {
+  validateSql,
+  maskLiterals,
+  splitStatements,
+  selectLists,
+  hasBareStar,
+  DEFAULT_PII_COLUMNS,
+} from './sql-guard.js';
 
 const ok = (sql, policy) => {
   const r = validateSql(sql, policy);
@@ -38,7 +45,7 @@ describe('放行：正常的只读分析查询', () => {
   });
 
   it('CTE（WITH 开头）', () => {
-    ok(`WITH recent AS (SELECT * FROM orders WHERE created_at >= '2026-09-01')
+    ok(`WITH recent AS (SELECT id, uid FROM orders WHERE created_at >= '2026-09-01')
         SELECT COUNT(*) FROM recent`);
   });
 
@@ -169,46 +176,85 @@ describe('拒绝：残缺输入', () => {
   });
 });
 
-describe('PII 策略', () => {
-  it('默认拒绝敏感列', () => {
-    denied('SELECT phone FROM users', 'pii_denied');
-    denied('SELECT u.email FROM users u', 'pii_denied');
+describe('PII 策略 —— 可做条件，不可做输出（2026-09-07 改）', () => {
+  // 首版整句判 PII，把「按手机号查这个用户的轨迹」彻底堵死了 ——
+  // 而那个用法根本没暴露新信息：手机号是提问的人自己输进去的。
+  it('手机号做筛选条件 → 放行（核心场景：手机号换内部 uid）', () => {
+    ok("SELECT uid FROM user WHERE phone = '13652412008'");
+    ok("SELECT COUNT(*) FROM user WHERE phone LIKE '136%'");
+    ok("SELECT uid, created_at FROM user WHERE phone IN ('1','2')");
+  });
+
+  it('手机号出现在结果列 → 拒绝', () => {
+    denied('SELECT phone FROM user', 'pii_denied');
+    denied('SELECT u.phone, u.uid FROM user u', 'pii_denied');
     denied('SELECT id_card FROM users', 'pii_denied');
   });
 
-  it('拒绝文案要引导到聚合写法', () => {
-    const r = validateSql('SELECT phone FROM users');
-    assert.match(r.reason, /聚合|COUNT/);
+  it('CTE / 子查询里绕道导出也拦得住', () => {
+    denied('WITH t AS (SELECT phone FROM user) SELECT * FROM t', 'pii_denied');
+    denied('SELECT x FROM (SELECT email AS x FROM user) t', 'pii_denied');
   });
 
-  it('聚合查询不碰敏感列则放行', () => {
-    ok('SELECT COUNT(*) FROM users WHERE status = 1');
+  it('拒绝文案要指出「可以放 WHERE」，否则模型只会反复换个写法重试', () => {
+    const r = validateSql('SELECT phone FROM user');
+    assert.match(r.reason, /筛选条件|WHERE/);
+  });
+
+  it('裸星号一律拒 —— 列名黑名单对 SELECT * 完全无效', () => {
+    denied("SELECT * FROM user WHERE phone='x'", 'pii_denied');
+    denied('SELECT u.* FROM user u', 'pii_denied');
+    denied('SELECT a, * FROM t', 'pii_denied');
+  });
+
+  it('派生表上的 SELECT * 放行 —— 内层列已显式且已校验，外层拿不到未知列', () => {
+    ok('SELECT * FROM (SELECT uid, ROW_NUMBER() OVER (PARTITION BY uid ORDER BY id) rn FROM ev) t WHERE rn = 1');
+    // 但内层若自己就是基表星号，仍然拦
+    denied('SELECT * FROM (SELECT * FROM user) t', 'pii_denied');
+  });
+
+  it('COUNT(*) 与乘号不得被误判成裸星号', () => {
+    ok('SELECT COUNT(*) FROM orders');
+    ok('SELECT COUNT( * ) AS c FROM orders');
+    ok('SELECT SUM(price*qty) AS amt FROM orders');
   });
 
   it('策略可关闭（名单内的人不受限时）', () => {
     ok('SELECT phone FROM users', { piiColumns: [] });
+    ok('SELECT * FROM users', { piiColumns: [] });
   });
 
   it('表黑名单', () => {
     denied('SELECT COUNT(*) FROM payroll', 'table_denied', { deniedTables: ['payroll'] });
   });
 
-  it('PII 规则先于表黑名单命中（防线重叠，两者都能独立拦下）', () => {
-    // 表名里含 PII 子串时由 pii_denied 先拦；这不是 bug，是两层都生效的表现
-    denied('SELECT COUNT(*) FROM internal_secrets', 'pii_denied', { deniedTables: ['internal_secrets'] });
-  });
-
-  it('已知取舍：子串匹配会误杀含 PII 词的正常表名', () => {
-    // 记录既有行为而非主张它完美 —— 误杀的代价是换个写法，漏放的代价是隐私事故。
-    // 真被挡住时用户可以改成不提该表名的聚合写法，或由管理员调 piiColumns。
-    denied('SELECT COUNT(*) FROM email_templates', 'pii_denied');
-    denied('SELECT COUNT(*) FROM user_addresses', 'pii_denied');
-  });
-
   it('默认清单覆盖常见 PII 列名', () => {
     for (const c of ['phone', 'email', 'id_card', 'password']) {
       assert.ok(DEFAULT_PII_COLUMNS.includes(c), `默认 PII 清单缺 ${c}`);
     }
+  });
+});
+
+describe('selectLists / hasBareStar', () => {
+  it('切出所有层级的输出列表', () => {
+    const { skeleton } = maskLiterals('WITH t AS (SELECT a FROM x) SELECT b, c FROM t');
+    const lists = selectLists(skeleton).map((x) => x.list.trim());
+    assert.equal(lists.length, 2);
+    assert.ok(lists.some((l) => l === 'a'));
+    assert.ok(lists.some((l) => l === 'b, c'));
+  });
+
+  it('没有 FROM 的 SELECT 也能切（SELECT 1）', () => {
+    assert.deepEqual(selectLists('SELECT 1').map((x) => x.list.trim()), ['1']);
+  });
+
+  it('hasBareStar 的边界', () => {
+    assert.equal(hasBareStar(' * '), true);
+    assert.equal(hasBareStar(' u.* '), true);
+    assert.equal(hasBareStar(' a, * '), true);
+    assert.equal(hasBareStar(' COUNT(*) '), false);
+    assert.equal(hasBareStar(' SUM(a*b) '), false);
+    assert.equal(hasBareStar(' a, b '), false);
   });
 });
 

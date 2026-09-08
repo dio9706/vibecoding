@@ -7,6 +7,7 @@ import {
   buildAnswerReply,
   buildFreeformFailureReply,
   classifyDbError,
+  splitHtmlReport,
 } from './freeform.logic.js';
 
 describe('parseFreeformCommand', () => {
@@ -31,9 +32,14 @@ describe('parseFreeformCommand', () => {
     }
   });
 
-  it('与埋点老路径的前缀互不包含（两条 feature 不会互抢）', () => {
-    assert.equal(parseFreeformCommand('帮我统计埋点: x').hit, false);
+  it('帮我统计埋点 也归本路径（2026-09-07 合并，老用户习惯不打断）', () => {
+    assert.deepEqual(parseFreeformCommand('帮我统计埋点: 上周分享点击'), { hit: true, body: '上周分享点击' });
+    assert.deepEqual(parseFreeformCommand('帮我统计埋点：上周分享点击'), { hit: true, body: '上周分享点击' });
     assert.equal(FREEFORM_PREFIX, '帮我查数据');
+  });
+
+  it('两个前缀都要在开头，中间出现不算', () => {
+    assert.equal(parseFreeformCommand('顺便帮我统计埋点: x').hit, false);
   });
 });
 
@@ -67,6 +73,61 @@ describe('buildAnalysisPrompt', () => {
     assert.match(p, /SHOW/);
     assert.match(p, /list_tables/);
     assert.match(p, /describe_table/);
+  });
+
+  it('强制翻译埋点 key —— 首版漏了这条，报告满屏 ruyee_xxx 等于没写', () => {
+    const p = buildAnalysisPrompt('q', dict, '2026-09-07', 'db');
+    assert.match(p, /event_mapping/, '要指名权威词典表');
+    assert.match(p, /is_deleted/, '要提醒过滤软删');
+    assert.match(p, /LEFT JOIN/, '要给出可照抄的 JOIN 写法');
+    assert.match(p, /COALESCE/, '词典查不到时要兜底而不是丢行');
+    assert.match(p, /不允许出现裸埋点 key|裸埋点/, '要把这条写成硬性要求');
+  });
+
+  it('要求保留 key 在括号里 —— 只给中文名会丢掉研发的可追溯性', () => {
+    const p = buildAnalysisPrompt('q', dict, '2026-09-07', 'db');
+    assert.match(p, /括号/);
+    assert.match(p, /ruyee_dish_toggle_meal/, '给一个具体示范，模型才照做');
+  });
+
+  it('默认排除内测用户 —— 团队自己人天天点，不排会把小功能数字抬高', () => {
+    const p = buildAnalysisPrompt('q', dict, '2026-09-07', 'db');
+    assert.match(p, /internal_user/, '要指名内测名单表');
+    assert.match(p, /login_id NOT IN/, '埋点表按 login_id 排除（不是 distinct_id）');
+    assert.match(p, /uid NOT IN/, '业务表按 uid 排除');
+    assert.match(p, /devtools/, '同时排掉研发调试流量');
+  });
+
+  it('用户标识必须指明 login_id 而非 distinct_id（实测口径）', () => {
+    // distinct_id 是设备级匿名串，与 mini_openid 零匹配；login_id 与 user.uid 匹配 99.87%
+    const p = buildAnalysisPrompt('q', dict, '2026-09-07', 'db');
+    assert.match(p, /login_id/);
+    assert.match(p, /distinct_id/, '要解释两者区别，否则模型还是会混用');
+    assert.match(p, /设备|匿名/, '要说清 distinct_id 认设备不认人');
+  });
+
+  it('提醒 login_id(varchar) 与 uid(bigint) 的类型不匹配', () => {
+    // 直接用 = 比会隐式转换，实测 807 个内测账号炸成 37682 条错误匹配
+    const p = buildAnalysisPrompt('q', dict, '2026-09-07', 'db');
+    assert.match(p, /CAST/);
+    assert.match(p, /COLLATE|utf8mb4/);
+  });
+
+  it('给出按手机号查用户的两步配方（PII 可做条件不可做输出）', () => {
+    const p = buildAnalysisPrompt('q', dict, '2026-09-07', 'db');
+    assert.match(p, /WHERE phone/, '要给出可照抄的第一步');
+    assert.match(p, /筛选条件/);
+    assert.match(p, /查不到就直说/, '不许拿别的用户顶替');
+  });
+
+  it('提醒 NOT IN 的 NULL 陷阱（子查询含 NULL 会整体返回空集）', () => {
+    const p = buildAnalysisPrompt('q', dict, '2026-09-07', 'db');
+    assert.match(p, /NOT EXISTS|IS NOT NULL/);
+  });
+
+  it('要求把「已排除内测」写进报告 —— 口径不说，数字就没法跟别处对上', () => {
+    const p = buildAnalysisPrompt('q', dict, '2026-09-07', 'db');
+    assert.match(p, /已排除内测/);
   });
 
   it('要求聚合优先 + 说明截断，且用户问题在末尾', () => {
@@ -146,5 +207,62 @@ describe('classifyDbError —— 三分（没配置 / 连不上 / 查询错）',
   });
   it('空输入按查询错处理', () => {
     assert.equal(classifyDbError(null), 'db_query');
+  });
+});
+
+describe('splitHtmlReport —— 聊天摘要与 HTML 附件分离', () => {
+  it('切出 html 并把剩余文字作为聊天正文', () => {
+    const raw = ['结论：共 100 人。', '', '```html', '<h1>报告</h1>', '```'].join('\n');
+    const { html, chat } = splitHtmlReport(raw);
+    assert.equal(html, '<h1>报告</h1>');
+    assert.equal(chat, '结论：共 100 人。');
+  });
+
+  it('没有 html 围栏时原样作聊天正文，html 为 null', () => {
+    const { html, chat } = splitHtmlReport('就一句话结论');
+    assert.equal(html, null);
+    assert.equal(chat, '就一句话结论');
+  });
+
+  it('空围栏不当成报告（免得发一个空附件）', () => {
+    assert.equal(splitHtmlReport(['x', '```html', '', '```'].join('\n')).html, null);
+  });
+
+  it('大小写容错', () => {
+    assert.equal(splitHtmlReport(['```HTML', '<p>a</p>', '```'].join('\n')).html, '<p>a</p>');
+  });
+
+  it('空输入不炸', () => {
+    assert.deepEqual(splitHtmlReport(null), { html: null, chat: '' });
+  });
+});
+
+describe('buildAnalysisPrompt —— 前端查证段按需出现', () => {
+  const dict = { categories: [] };
+
+  it('挂载了前端工具才出现相关段落', () => {
+    const on = buildAnalysisPrompt('q', dict, '2026-09-07', 'db', { hasFrontend: true });
+    assert.match(on, /search_frontend/);
+    assert.match(on, /read_frontend/);
+    assert.match(on, /属性取值/);
+  });
+
+  it('未配置前端仓库时整段不出现 —— 免得模型反复试探不存在的工具', () => {
+    const off = buildAnalysisPrompt('q', dict, '2026-09-07', 'db');
+    assert.doesNotMatch(off, /search_frontend/);
+    assert.doesNotMatch(off, /read_frontend/);
+  });
+
+  it('要求查不到就说查不到，不许按 key 字面猜', () => {
+    const on = buildAnalysisPrompt('q', dict, '2026-09-07', 'db', { hasFrontend: true });
+    assert.match(on, /不要凭 key 的字面拼写去猜/);
+  });
+
+  it('要求产出自包含 HTML（离线可开、无外链、无 script）', () => {
+    const p = buildAnalysisPrompt('q', dict, '2026-09-07', 'db');
+    assert.match(p, /```html/);
+    assert.match(p, /自包含/);
+    assert.match(p, /charset/);
+    assert.match(p, /script/);
   });
 });

@@ -24,6 +24,15 @@ from decimal import Decimal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# stdout/stderr 钉死 UTF-8：中文 Windows 默认 GBK，查询结果里的中文（表注释、字段说明、
+# 业务枚举值）会在 print 时抛 UnicodeEncodeError 或变成乱码。与下面 stdin 的处理成对，
+# 缺任何一半都会让「带中文的查询」这一大类静默失败。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:  # noqa: BLE001  (Python < 3.7 无 reconfigure；本项目不会遇到，兜底而已)
+        pass
+
 try:
     import pymysql
     import pymysql.cursors
@@ -132,7 +141,13 @@ def run(payload):
 
 def main():
     try:
-        raw = sys.stdin.read()
+        # ⚠️ 必须走 stdin.buffer 显式按 UTF-8 解码，不能用 sys.stdin.read()。
+        # Python 的文本流用**系统默认编码**，中文 Windows 上是 GBK/cp936 ——
+        # Node 侧按 UTF-8 写入，这边按 GBK 解，SQL 里只要出现中文就是
+        # `UnicodeDecodeError: 'utf-8' codec can't decode byte 0x80`（2026-09-07 实测踩到：
+        # 模型写了 COALESCE(mode,'【全部】') 就整条查询失败）。
+        # 同理 stdout 也要钉死 UTF-8，否则中文结果回不去。
+        raw = sys.stdin.buffer.read().decode('utf-8', errors='replace')
         payload = json.loads(raw) if raw.strip() else {}
         print(json.dumps(run(payload), ensure_ascii=False), flush=True)
         return 0

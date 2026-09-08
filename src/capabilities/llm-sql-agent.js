@@ -11,14 +11,28 @@
  *（模型可以绕过我们的 `run_query` 直接 `mysql -e "..."`）。进程内 MCP 工具让
  * **「能执行的动作集合」在结构上等于「我们写的那三个函数」**，这是收窄工具面唯一可靠的做法。
  *
- * ## 三层只读防线（缺一即漏，对齐 llm-readonly-agent 的做法）
+ * ## 两层只读防线
  *
- * 1. `disallowedTools: ['*']` —— 通配符把全部内置工具从请求里移除，模型根本看不见。
- *    （黑名单式逐个列名补不全：2026-08-24 实测 haiku 用 ToolSearch 把被禁的 Read 重新捞了出来。）
- * 2. `allowedTools` 只列三个 MCP 工具名。
- * 3. `canUseTool` 运行时白名单复核 —— 无论工具怎么被捞回来，执行前都过这关。
+ * 1. **`tools: []`** —— 禁掉全部**内置**工具（Read/Bash/Write/…），MCP 工具不受影响。
+ *    SDK 文档对该字段的说明：`[] (empty array) - Disable all built-in tools`。
+ * 2. **`canUseTool`** —— 运行时白名单，每次工具调用前复核工具名。
  *
  * `permissionMode` 必须是 `'default'`：`bypassPermissions` 会绕过 `canUseTool`。
+ *
+ * ### ⚠️ 两个用错就会静默失效的坑（2026-09-07 实测踩过，勿改回去）
+ *
+ * **坑一：不能用 `disallowedTools: ['*']` 收窄工具面。** 该字段的语义是
+ * 「removed from the model's context and cannot be used, **even if they would otherwise
+ * be allowed**」—— 通配符**连本模块自己的 MCP 工具一起删掉**。实测表现为三个工具全部
+ * `Permission denied`、一条数据都取不到，而日志里只有一句含糊的权限拒绝。
+ * 收窄可用工具集的正确字段是 `tools`（SDK 文档原话：`To restrict which tools are
+ * available, use the tools option instead`）。
+ *
+ * **坑二：不能把工具名列进 `allowedTools`。** 那个字段是「auto-allowed without
+ * prompting」的免审批名单，**会让 `canUseTool` 整个不被调用** —— SDK 会打印
+ * `[CLAUDE_SDK_CAN_USE_TOOL_SHADOWED] canUseTool will not be invoked for: …` 警告。
+ * 于是第 2 层防线形同虚设，而代码看起来一切正常。要保住运行时复核，就**不要**设
+ * `allowedTools`，让每次调用都落到 `canUseTool` 上。
  *
  * 本模块**不含业务语义**（不知道什么是埋点、什么是订单），符合 capabilities 层定位。
  */
@@ -69,6 +83,9 @@ function textResult(obj) {
 export function buildSqlToolServer(deps) {
   const { execute, onAudit, policy = {}, maxRows = 200, budget = { count: 0 } } = deps;
   const maxQueries = deps.maxQueries ?? DEFAULT_MAX_QUERIES;
+  // 调用方可以再挂几个工具（如受限的代码检索）。放在这里而不是写死：
+  // 本模块属 capabilities 层、无业务语义，「该不该让它查前端仓库」是业务决定。
+  const extraTools = Array.isArray(deps.extraTools) ? deps.extraTools : [];
 
   /** 代码写死 SQL 的两个 schema 工具：表名参数化，模型给不了自由 SQL */
   const listTables = tool(
@@ -145,7 +162,7 @@ export function buildSqlToolServer(deps) {
     },
   );
 
-  const defs = [listTables, describeTable, runQuery];
+  const defs = [listTables, describeTable, runQuery, ...extraTools];
   const server = createSdkMcpServer({
     name: SERVER,
     version: '1.0.0',
@@ -157,6 +174,35 @@ export function buildSqlToolServer(deps) {
   });
 
   return { server, tools: Object.fromEntries(defs.map((d) => [d.name, d])) };
+}
+
+/**
+ * 构造给 `query()` 的 options —— **抽成纯函数只为可测**。
+ *
+ * 文件头那两个坑（`disallowedTools:['*']` 连 MCP 工具一起删、`allowedTools` 让
+ * `canUseTool` 不被调用）都是**静默失效**型的：配错了代码照样跑，只是防线没了。
+ * 这种东西必须有断言守着，不能靠注释提醒下一个人。
+ *
+ * @param {{ server: object, allowed: Set<string>, model?: string, abort?: AbortController }} a
+ */
+export function buildAgentOptions({ server, allowed, model, abort }) {
+  return {
+    ...claudeAuthOpts(),
+    ...(model ? { model } : {}),
+    permissionMode: 'default', // bypassPermissions 会绕过 canUseTool，绝不能用
+    mcpServers: { [SERVER]: server },
+    // 第 1 层：禁掉全部内置工具（Read/Bash/Write/…）。MCP 工具不在此列，仍可用。
+    // 刻意**不用** disallowedTools:['*'] —— 那会连 MCP 工具一起删（见文件头「坑一」）。
+    tools: [],
+    // 第 2 层：运行时复核，每次工具调用都过。
+    // 刻意**不设** allowedTools —— 设了会让本回调整个不被调用（见文件头「坑二」）。
+    canUseTool: async (name, input) =>
+      allowed.has(name)
+        ? { behavior: 'allow', updatedInput: input }
+        : { behavior: 'deny', message: `本环境只允许只读 SQL 工具，${name} 不可用` },
+    persistSession: false,
+    ...(abort ? { abortController: abort } : {}),
+  };
 }
 
 /**
@@ -185,18 +231,22 @@ export async function runSqlAgent(opts) {
 
   const budget = { count: 0 };
   const denied = [];
-  const { server } = buildSqlToolServer({
+  const { server, tools } = buildSqlToolServer({
     execute,
     policy,
     maxQueries,
     budget,
+    extraTools: opts.extraTools,
     onAudit: (e) => {
       if (!e.ok && e.denyCode) denied.push(e.denyCode);
       onAudit?.(e);
     },
   });
 
-  const allowed = new Set(Object.values(TOOL_NAMES));
+  // 白名单**从实际装配的工具算出来**，不写死 TOOL_NAMES ——
+  // 否则调用方传了 extraTools，canUseTool 会把它们全拒掉（而且是静默的：
+  // 模型看得见工具、一调就被拒，日志里只有一句权限拒绝，极难往这里想）。
+  const allowed = new Set(Object.keys(tools).map((n) => `mcp__${SERVER}__${n}`));
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), timeoutMs);
   const onExternalAbort = () => abort.abort();
@@ -204,26 +254,7 @@ export async function runSqlAgent(opts) {
 
   let out = '';
   try {
-    const q = query({
-      prompt,
-      options: {
-        ...claudeAuthOpts(),
-        ...(model ? { model } : {}),
-        permissionMode: 'default', // bypassPermissions 会绕过 canUseTool，绝不能用
-        mcpServers: { [SERVER]: server },
-        // 第 1 层：通配符移除全部内置工具（逐个列名的黑名单补不全）
-        disallowedTools: ['*'],
-        // 第 2 层：只放行这三个
-        allowedTools: [...allowed],
-        // 第 3 层：运行时复核。无论工具怎么被捞回来，执行前都过这关。
-        canUseTool: async (name) =>
-          allowed.has(name)
-            ? { behavior: 'allow', updatedInput: undefined }
-            : { behavior: 'deny', message: `本环境只允许只读 SQL 工具，${name} 不可用` },
-        persistSession: false,
-        abortController: abort,
-      },
-    });
+    const q = query({ prompt, options: buildAgentOptions({ server, allowed, model, abort }) });
 
     for await (const m of q) {
       if (m.type === 'assistant') {

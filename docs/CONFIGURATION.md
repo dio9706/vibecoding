@@ -74,6 +74,7 @@ node feishu.js                # .env 自动加载，不必再写 --env-file
 | `REACTION_EMOJIS` | 可选 | 5 个内置表情 | 处理中随机表情 |
 | `CLAUDE_PROJECT_ID` | 可选 | 按目录名推导 | 历史记录归属项目 ID |
 | `TRACKING_DB_HOST` / `TRACKING_DB_PORT` / `TRACKING_DB_NAME` / `TRACKING_DB_USER` / `TRACKING_DB_PASSWORD` | 埋点统计必填 | 见 `.env.example` | 生产埋点库连接（只读账号）。**密码只走环境变量，不得写进源码** |
+| `TRACKING_FRONTEND_DIR` | 可选 | 空 | 前端仓库路径，供「帮我查数据:」受限检索埋点语义（只读；`.env*`/`*.key`/`node_modules` 屏蔽，路径不得越界）。不配则该能力缺席 |
 | `COMPASS_AGENT_DIR` | 可选 | 空 | compass-agent 仓库路径，仅埋点索引同步脚本 `node scripts/sync-event-dict.mjs` 使用 |
 
 ### 关于「可信提交人」
