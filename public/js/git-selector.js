@@ -12,7 +12,7 @@ let _currentBranch = '';
 let _branches = { local: [], remote: [], current: '' };
 let _isOpen = false;
 let _isLoading = false;
-let _listenersAttached = false;
+let _listenerController = null;
 
 /** 注入工作目录读取器，初始化分支选择器 */
 export function bindGitSelector({ getCwd }) {
@@ -63,23 +63,24 @@ function updateButtonLabel() {
   }
 }
 
-/** 只注册一次事件监听器（按钮/刷新/全局关闭） */
+/** 注册全局事件监听器（AbortController 管理，支持热重载清理） */
 function attachListeners() {
-  if (_listenersAttached) return;
-  _listenersAttached = true;
+  if (_listenerController) return;
+  _listenerController = new AbortController();
+  const { signal } = _listenerController;
 
   const btn = $('#gitBtn');
   const refreshBtn = $('#gitRefreshBtn');
 
-  if (btn) btn.addEventListener('click', handleToggle);
-  if (refreshBtn) refreshBtn.addEventListener('click', handleRefresh);
+  if (btn) btn.addEventListener('click', handleToggle, { signal });
+  if (refreshBtn) refreshBtn.addEventListener('click', handleRefresh, { signal });
 
-  document.addEventListener('mousedown', handleClickOutside);
-  document.addEventListener('keydown', handleKeydown);
+  document.addEventListener('mousedown', handleClickOutside, { signal });
+  document.addEventListener('keydown', handleKeydown, { signal });
 }
 
 /** 点击按钮：切换下拉 */
-async function handleToggle(e) {
+function handleToggle(e) {
   e.stopPropagation();
   if (_isOpen) {
     closeDropdown();
@@ -157,7 +158,7 @@ async function loadBranches(refresh) {
     _isLoading = false;
     if (refreshBtn) {
       refreshBtn.disabled = false;
-      refreshBtn.innerHTML = '<span>🔄</span> 刷新';
+      refreshBtn.textContent = '🔄 刷新';
     }
   }
 }
@@ -212,7 +213,7 @@ async function handleBranchClick(branch) {
       toast('切换分支失败：' + error);
     } else if (data?.ok) {
       _currentBranch = branch;
-      _branches.current = branch;
+      _branches = { local: [], remote: [], current: '' };
       updateButtonLabel();
       toast('已切换到 ' + branch);
       closeDropdown();
