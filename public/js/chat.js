@@ -13,11 +13,13 @@ import {
   convSetTitle, convSetMeta, convDelete, convSetDraft,
 } from './conv-store.js';
 import { bindDirPopover, closeDirModal } from './dir-popover.js';
+import { bindGitSelector, reinitializeGitSelector } from './git-selector.js';
 import { ContextProgress } from './context-progress.js';
 import { AnimeAnimations } from './anim.js';
 import { registerDropZone } from './drag-bus.js';
 import { setIconText, PIN_ICON_SVG, REFRESH_ICON_SVG, WAITING_ICON_SVG } from './icons.js';
 bindDirPopover({ getCwd: () => cwd, selectDir }); // 惰性读 cwd 无 TDZ；selectDir 已提升
+bindGitSelector({ getCwd: () => cwd });
 // Tauri 桌面版：文件/目录拖入直接插本地路径 chip，无需上传副本。
 // 走拖拽总线而非旧的单槽位 bindTauriDrop——Markdown 查看器也要注册，单槽位会互相覆盖。
 // Web 模式下总线永不触发（tauri://drag-* 不存在），HTML5 + 上传副本路线继续生效。
@@ -2894,6 +2896,7 @@ export function renderConvListNow() {
           return;
         }
         cwd = p;
+        reinitializeGitSelector();
         lsSet('claude_cwd', cwd);
         saveUiPrefs(); // 同步到服务端配置
         refreshDirLabel();
