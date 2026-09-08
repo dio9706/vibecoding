@@ -66,6 +66,7 @@ import {
   handleFsStat,
   handleFsRead,
 } from './routes-files.js';
+import { handleGitStatus, handleGitBranches, handleGitCheckout } from './routes-git.js';
 import { handleRequirementRoutes } from './routes-requirements.js';
 import { handleMemoryRoutes } from './routes-memory.js';
 import { handleCleanupRoutes } from './routes-cleanup.js';
@@ -147,6 +148,9 @@ const ROUTES = [
   { path: '/api/dirs/browse', h: (req, res, url) => handleBrowse(url, res) },
   { path: '/api/dirs/pick', h: (req, res) => handlePickDir(res) },
   { path: '/api/dirs/saved', h: (req, res) => handleSaved(req, res) },
+  { path: '/api/git/status', h: (req, res, url) => handleGitStatus(url.searchParams.get('cwd') || '', res) },
+  { path: '/api/git/branches', h: (req, res, url) => handleGitBranches(url.searchParams.get('cwd') || '', url.searchParams.get('refresh') || '', res) },
+  { path: '/api/git/checkout', method: 'POST', h: (req, res, url) => handleGitCheckout(url.searchParams.get('cwd') || '', req, res) },
   { path: '/api/logs', h: (req, res) => handleLogs(res) },
   { path: '/api/logs/clear', h: (req, res) => handleLogsClear(req, res) },
   { path: '/api/bot-logs', h: (req, res) => handleBotLogs(res) },
