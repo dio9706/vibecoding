@@ -373,6 +373,17 @@
       }
 
       /* ---- Git 分支选择器 ---- */
+      .git-selector-wrap {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+      }
+
+      /* 按钮隐藏时整个包裹层也隐藏，不占 flex gap */
+      .git-selector-wrap:has(#gitBtn[hidden]) {
+        display: none;
+      }
+
       .git-selector {
         display: flex;
         align-items: center;
@@ -401,6 +412,7 @@
       .git-selector .branch-icon {
         color: var(--accent);
         flex-shrink: 0;
+        display: block;
       }
 
       .git-selector .branch-name {
@@ -418,7 +430,9 @@
 
       /* 分支下拉浮层 */
       .git-dropdown {
-        position: fixed;
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 0;
         z-index: 999;
         background: var(--panel-2);
         border: 1px solid var(--border);
@@ -435,6 +449,9 @@
       }
 
       .git-branch-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
         padding: 8px 12px;
         cursor: pointer;
         white-space: nowrap;
@@ -454,44 +471,29 @@
         font-weight: 500;
       }
 
-      .git-branch-item.current::before {
-        content: "✓ ";
-        margin-right: 4px;
+      .git-branch-item .branch-check {
+        display: inline-flex;
+        align-items: center;
+        flex-shrink: 0;
+        color: inherit;
       }
 
-      .git-branch-item.remote {
+      .git-branch-item.current .branch-check svg {
+        fill: #fff;
+      }
+
+      .git-branch-item .branch-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .git-branch-item.remote .branch-label {
         color: var(--muted);
         font-size: 12px;
       }
 
-      .git-footer {
-        border-top: 1px solid var(--border);
-        padding: 6px;
-      }
-
-      .git-refresh-btn {
-        width: 100%;
-        padding: 6px 8px;
-        border: none;
-        border-radius: 5px;
-        background: transparent;
-        color: var(--text);
-        cursor: pointer;
-        font-size: 12px;
-        transition: background 0.15s;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 4px;
-      }
-
-      .git-refresh-btn:hover:not(:disabled) {
-        background: var(--hover, rgba(255, 255, 255, 0.08));
-      }
-
-      .git-refresh-btn:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
+      .git-branch-item.current .branch-label {
+        color: #fff;
       }
 
       .spacer {

@@ -65,6 +65,31 @@ test('uploadFile：空 Buffer 直接抛错，且不发起上传请求', async ()
   assert.equal(calls.file.length, 0, '空文件不应该白跑一次网络请求');
 });
 
+test('uploadFile：传路径字符串必须报错 —— 这是最容易误传且症状最误导的一种', async () => {
+  // 字符串也有 .length，旧的空文件校验放行 → SDK 把路径当内容传上去。
+  // 表现是「上传成功、附件收到，打开才发现内容是一行路径」（2026-09-08 实测）。
+  await assert.rejects(
+    () => uploadFile('C:/tmp/report.html', 'a.html'),
+    (e) => {
+      assert.match(e.message, /Buffer/);
+      assert.match(e.message, /路径|readFile/, '错误里要直接点出正确做法');
+      return true;
+    },
+  );
+  assert.equal(calls.file.length, 0, '不得发起上传请求');
+});
+
+test('uploadFile：非 Buffer 对象也挡掉', async () => {
+  for (const bad of [{ length: 5 }, [1, 2, 3], 123]) {
+    await assert.rejects(() => uploadFile(bad, 'a.html'), /Buffer|空文件/);
+  }
+});
+
+test('uploadFile：Uint8Array 视为合法（Buffer 的父类型）', async () => {
+  const key = await uploadFile(new Uint8Array([60, 104, 49, 62]), 'a.html');
+  assert.ok(key);
+});
+
 test('uploadFile：buf 为 null/undefined 同样按空文件挡掉', async () => {
   await assert.rejects(() => uploadFile(null, 'a.html'), /空文件/);
   await assert.rejects(() => uploadFile(undefined, 'a.html'), /空文件/);

@@ -255,7 +255,19 @@ export async function sendImageByUrl(chatId, url) {
  * @param {'opus'|'mp4'|'pdf'|'doc'|'xls'|'ppt'|'stream'} [fileType]
  */
 export async function uploadFile(buf, fileName, fileType = 'stream') {
-  if (!buf || !buf.length) throw new Error('不能上传空文件');
+  // 空值判定放最前，保持原有错误文案不变（已有用例依赖它）
+  if (!buf) throw new Error('不能上传空文件');
+  // 类型闸：必须是 Buffer。传路径字符串是个**极具误导性**的错误 —— 字符串也有 .length，
+  // 下面那道长度校验照样放行，SDK 会把路径本身当文件内容传上去。
+  // 表现是「上传成功、附件也收到了」，只有打开才发现内容是 `C:\...\xxx.html` 这么一行
+  //（2026-09-08 实测踩过）。挡在这里，比让每个调用方自己记得 readFile 可靠。
+  if (typeof buf === 'string') {
+    throw new Error('uploadFile 需要 Buffer，收到的是字符串（是不是把文件路径直接传进来了？请先 fs.readFile）');
+  }
+  if (!Buffer.isBuffer(buf) && !(buf instanceof Uint8Array)) {
+    throw new Error(`uploadFile 需要 Buffer，收到 ${Object.prototype.toString.call(buf)}`);
+  }
+  if (!buf.length) throw new Error('不能上传空文件');
   if (buf.length > 30 * 1024 * 1024) {
     throw new Error(`文件超过 30MB 限制（${(buf.length / 1024 / 1024).toFixed(1)}MB）`);
   }

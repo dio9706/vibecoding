@@ -6,6 +6,9 @@ import { $ } from './util.js';
 import { toast } from './ui.js';
 import { getJson, postJson } from './api.js';
 
+// 对号内联 SVG（内部静态资源，非用户输入）
+const CHECK_SVG = '<svg viewBox="0 0 1024 1024" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M416.832 798.08C400.64 798.08 384.512 791.872 372.16 779.52L119.424 525.76C94.784 500.992 94.784 460.8 119.424 436.032 144.128 411.264 184.128 411.264 208.768 436.032L416.832 644.928 814.4 245.76C839.04 220.928 879.04 220.928 903.744 245.76 928.384 270.528 928.384 310.656 903.744 335.424L461.504 779.52C449.152 791.872 432.96 798.08 416.832 798.08Z"/></svg>';
+
 // 模块级状态
 let _getCwd = () => '';
 let _currentBranch = '';
@@ -76,10 +79,7 @@ function attachListeners() {
   const { signal } = _listenerController;
 
   const btn = $('#gitBtn');
-  const refreshBtn = $('#gitRefreshBtn');
-
   if (btn) btn.addEventListener('click', handleToggle, { signal });
-  if (refreshBtn) refreshBtn.addEventListener('click', handleRefresh, { signal });
 
   document.addEventListener('mousedown', handleClickOutside, { signal });
   document.addEventListener('keydown', handleKeydown, { signal });
@@ -95,27 +95,16 @@ function handleToggle(e) {
   }
 }
 
-/** 打开下拉菜单，定位后加载分支列表 */
+/** 打开下拉菜单，每次重新加载分支列表 */
 async function openDropdown() {
-  const btn = $('#gitBtn');
   const dropdown = $('#gitDropdown');
-  if (!btn || !dropdown) return;
+  if (!dropdown) return;
 
   _isOpen = true;
   dropdown.hidden = false;
+  _branches = { local: [], remote: [], current: '' };
 
-  // 定位浮层：左对齐 #gitBtn，紧贴下方
-  const rect = btn.getBoundingClientRect();
-  dropdown.style.left = rect.left + 'px';
-  dropdown.style.top = (rect.bottom + 6) + 'px';
-
-  // 若已有缓存，不重复请求
-  if (_branches.local.length > 0 || _branches.remote.length > 0) {
-    renderBranches();
-    return;
-  }
-
-  await loadBranches(false);
+  await loadBranches();
 }
 
 /** 关闭下拉菜单 */
@@ -125,29 +114,23 @@ function closeDropdown() {
   if (dropdown) dropdown.hidden = true;
 }
 
-/** 加载分支列表（refresh=true 时触发 git fetch） */
-async function loadBranches(refresh) {
+/** 加载分支列表 */
+async function loadBranches() {
   if (_isLoading) return;
   _isLoading = true;
 
   const container = $('#gitBranches');
-  const refreshBtn = $('#gitRefreshBtn');
-
-  if (refreshBtn) {
-    refreshBtn.disabled = true;
-    if (refresh) refreshBtn.textContent = '刷新中…';
-  }
 
   if (container) {
     container.innerHTML = '';
     const hint = document.createElement('div');
     hint.style.cssText = 'padding:8px 12px;color:var(--muted);font-size:12px';
-    hint.textContent = refresh ? '正在 fetch 最新数据…' : '加载中…';
+    hint.textContent = '加载中…';
     container.appendChild(hint);
   }
 
   const cwd = _getCwd();
-  const url = '/api/git/branches?cwd=' + encodeURIComponent(cwd) + (refresh ? '&refresh=1' : '');
+  const url = '/api/git/branches?cwd=' + encodeURIComponent(cwd);
 
   try {
     const { data } = await getJson(url);
@@ -160,20 +143,20 @@ async function loadBranches(refresh) {
         current: data.current || '',
       };
       renderBranches();
-      if (refresh) toast('分支列表已刷新');
     }
   } catch {
     toast('加载分支失败');
   } finally {
     _isLoading = false;
-    if (refreshBtn) {
-      refreshBtn.disabled = false;
-      refreshBtn.textContent = '🔄 刷新';
-    }
   }
 }
 
-/** 渲染分支列表到 #gitBranches */
+/**
+ * 渲染分支列表到 #gitBranches。
+ *
+ * 合并策略：本地分支与同名远程分支（origin/<name>）合并为一条；
+ * 仅存在于远程的分支单独展示。
+ */
 function renderBranches() {
   const container = $('#gitBranches');
   if (!container) return;
@@ -181,11 +164,19 @@ function renderBranches() {
   container.innerHTML = '';
   const { local, remote, current } = _branches;
 
+  // 本地分支短名集合，用于判断远程分支是否已被合并
+  const localSet = new Set(local);
+
   for (const branch of local) {
     container.appendChild(createBranchItem(branch, current, 'local'));
   }
+
+  // 仅显示本地没有对应分支的远程分支
   for (const branch of remote) {
-    container.appendChild(createBranchItem(branch, current, 'remote'));
+    const shortName = branch.replace(/^[^/]+\//, '');
+    if (!localSet.has(shortName)) {
+      container.appendChild(createBranchItem(branch, current, 'remote'));
+    }
   }
 
   if (local.length === 0 && remote.length === 0) {
@@ -198,9 +189,25 @@ function renderBranches() {
 
 /** 创建单条分支行 */
 function createBranchItem(name, current, type) {
+  const isCurrent = type === 'remote'
+    ? name.replace(/^[^/]+\//, '') === current
+    : name === current;
+
   const item = document.createElement('div');
-  item.className = 'git-branch-item ' + type + (name === current ? ' current' : '');
-  item.textContent = (name === current ? '✓ ' : '') + name;
+  item.className = 'git-branch-item ' + type + (isCurrent ? ' current' : '');
+
+  if (isCurrent) {
+    const check = document.createElement('span');
+    check.className = 'branch-check';
+    check.innerHTML = CHECK_SVG;
+    item.appendChild(check);
+  }
+
+  const label = document.createElement('span');
+  label.className = 'branch-label';
+  label.textContent = name;
+  item.appendChild(label);
+
   item.addEventListener('click', () => handleBranchClick(name, type));
   return item;
 }
@@ -217,9 +224,6 @@ async function handleBranchClick(name, type) {
   _isLoading = true;
 
   const branch = type === 'remote' ? name.replace(/^[^/]+\//, '') : name;
-
-  const refreshBtn = $('#gitRefreshBtn');
-  if (refreshBtn) refreshBtn.disabled = true;
 
   const cwd = _getCwd();
   try {
@@ -240,14 +244,7 @@ async function handleBranchClick(name, type) {
     toast('切换分支失败');
   } finally {
     _isLoading = false;
-    if (refreshBtn) refreshBtn.disabled = false;
   }
-}
-
-/** 点击刷新按钮 */
-async function handleRefresh(e) {
-  e.stopPropagation();
-  await loadBranches(true);
 }
 
 /** 菜单外点击关闭 */

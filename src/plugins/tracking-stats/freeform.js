@@ -241,7 +241,13 @@ async function sendHtmlReport(ctx, html, question) {
     return;
   }
   try {
-    const key = await uploadFile(file, name);
+    // ⚠️ uploadFile 的第一个参数是 **Buffer**，不是路径（见 integrations/lark.js:257）。
+    // 传字符串不会报错 —— 字符串也有 .length，那道空文件校验照样放行，
+    // SDK 会把这串路径当成文件内容上传，用户下载到一个内容是
+    // `C:\...\数据报告_xxx.html` 的 html。实测踩过，症状极具误导性：
+    // 上传成功、附件也收到了，只有打开才知道内容是错的。
+    const buf = await fs.readFile(file);
+    const key = await uploadFile(buf, name);
     await sendFile(chatId, key);
   } catch (e) {
     logger.error('tracking-stats', 'HTML 报告发送失败', { err: e?.message || String(e) });
