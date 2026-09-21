@@ -150,10 +150,18 @@ async function onTaskCardAction(data) {
   }
 
   // discard：与 merge 对称的幂等短路。谓词取 task-actions 的 isDiscardable（同一把尺子，
-  // 不重写条件），否则只能把「任务不满足放弃条件（须为自动完成且未合并）」这种内部口径甩给用户。
+  // 不重写条件），否则只能把「任务不满足放弃条件（须为自动完成且未放弃）」这种内部口径甩给用户。
   if (!isDiscardable(task)) return done(`ℹ️「${task.title}」已不在可放弃态。`);
   const r = await discardTaskById(task.id);
-  return done(r.ok ? `🗑 已放弃改动并删除分支 ${task.branch}` : `⚠️ ${r.error}（请到网页端处理）`);
+  if (!r.ok) return done(`⚠️ ${r.error}（请到网页端处理）`);
+  // 已合并任务走的是 revert 撤销路径，没有「删除分支」这回事——用户关心的是改动有没有从基线分支撤下去
+  // 分流条件必须带上 `|| task.merged`：任务恰在 LLM 撤销那几分钟里被人删掉时，
+  // updateTask 返回 null 会让 r.task 为 null（r.task?.revertedAt 为 undefined），
+  // 若只看 r.task?.revertedAt 会误判成「已删除分支」，与实际发生的 revert 撤销不符。
+  const text = r.task?.revertedAt || task.merged
+    ? `🗑 已撤销「${task.title}」合并进 ${task.baseBranch} 的改动` + (r.task?.revertedBy === 'llm' ? '（由 AI 完成撤销）' : '')
+    : `🗑 已放弃改动并删除分支 ${task.branch}`;
+  return done(text);
 }
 
 // 模块加载即注册（feishu/web 进程都会加载插件；web 进程无卡片事件，注册无害）。

@@ -99,22 +99,25 @@ const run = async () => {
     chip = await askChipState(page);
     if (!chip.hidden) fail('聊天视图下 #askChip 不应显示，实际: ' + JSON.stringify(chip));
 
-    // 4) 切到任务面板视图：#askChip 应显示「<沙漏图标> 1 待确认」
-    await page.click('#taskBtn');
+    // 4) 切到行为面板视图：#askChip 应显示「<沙漏图标> 1 待确认」
+    await page.click('#behaviorBtn');
     await page.waitForTimeout(150);
     chip = await askChipState(page);
-    if (chip.hidden) fail('任务视图下 #askChip 应显示');
+    if (chip.hidden) fail('行为视图下 #askChip 应显示');
     // 不要求 ⏳ 字符：图标已从 emoji 改为内联 SVG（chat.js 走 setIconText + WAITING_ICON_SVG），
     // textContent 里自然不含 emoji。断言文字部分即可，图标另行单独查。
     if (!/1\s*待确认/.test(chip.text)) fail('#askChip 文案不符预期: ' + chip.text);
     const hasIcon = await page.evaluate(() => !!document.querySelector('#askChip svg'));
     if (!hasIcon) fail('#askChip 缺少沙漏 SVG 图标');
 
-    // 5) 切到日志视图：#askChip 仍应显示（离开聊天视图即算）
-    await page.click('#logBtn');
+    // 5) 再切到另一个非聊天视图：#askChip 仍应显示（判据是「离开聊天视图」，不限于某一个面板）
+    //    原先这里切的是独立的「访问日志」视图，该视图已并入行为面板成为内部 tab
+    //    （见 index.html 的 #behaviorTabs）；切 tab 不离开 behavior 视图，验不了「即算」这层语义，
+    //    故改切设置视图 —— 换任何一个非聊天视图都能验，这里取最稳的那个。
+    await page.click('#settingsBtn');
     await page.waitForTimeout(150);
     chip = await askChipState(page);
-    if (chip.hidden) fail('日志视图下 #askChip 应显示');
+    if (chip.hidden) fail('设置视图下 #askChip 应显示');
 
     // 6) 点击徽标：回聊天视图 + 定位到 ask-card
     await page.click('#askChip');
@@ -137,11 +140,11 @@ const run = async () => {
     if (!askCardGone) fail('提交决策后 .ask-card 应被移除');
 
     // 8) 决策后再切到面板视图：#askChip 应保持隐藏（无挂起审批）
-    await page.click('#taskBtn');
+    await page.click('#behaviorBtn');
     await page.waitForTimeout(150);
     chip = await askChipState(page);
     if (!chip.hidden) fail('决策提交后面板视图下 #askChip 应隐藏，实际: ' + JSON.stringify(chip));
-    await page.click('#taskBtn'); // 收起，回聊天
+    await page.click('#behaviorBtn'); // 收起，回聊天
 
     if (pageErrors.length) fail('出现页面错误：\n  ' + pageErrors.join('\n  '));
 

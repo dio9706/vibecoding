@@ -69,12 +69,15 @@ import {
 import { handleGitStatus, handleGitBranches, handleGitCheckout } from './routes-git.js';
 import { handleRequirementRoutes } from './routes-requirements.js';
 import { handleMemoryRoutes } from './routes-memory.js';
+import { handleColleagueRoutes } from './routes-colleagues.js';
 import { handleCleanupRoutes } from './routes-cleanup.js';
 import { handleOptimizeRoutes } from './routes-optimize.js';
 import { healAllBusyOnStartup } from './optimize-ops.js';
 import { handleProjectMapRoutes } from './routes-project-map.js';
 import { handleConvNotifyRoutes } from './routes-conv-notify.js';
 import { startConvNotify } from './conv-notify.js';
+import { handlePatrolRoutes } from './routes-patrol.js';
+import { startPatrolLoopPump } from '../../plugins/team-tools/bug-patrol/loop.js';
 import {
   handleLogs,
   handleLogsClear,
@@ -161,8 +164,10 @@ const ROUTES = [
   { prefix: '/api/conv-notify/', h: (req, res, url) => handleConvNotifyRoutes(req, res, url) },
   { prefix: '/api/req/', h: (req, res, url) => handleRequirementRoutes(req, res, url) },
   { prefix: '/api/memory/', h: (req, res, url) => handleMemoryRoutes(req, res, url) },
+  { prefix: '/api/colleagues', h: (req, res, url) => handleColleagueRoutes(req, res, url) },
   { prefix: '/api/cleanup/', h: (req, res, url) => handleCleanupRoutes(req, res, url) },
   { prefix: '/api/optimize/', h: (req, res, url) => handleOptimizeRoutes(req, res, url) },
+  { prefix: '/api/patrol/', h: (req, res, url) => handlePatrolRoutes(req, res, url) },
   { prefix: '/api/project-map/', h: (req, res, url) => handleProjectMapRoutes(req, res, url) },
   { path: '/api/settings', h: (req, res) => handleSettings(req, res) },
   { path: '/api/settings/export', h: (req, res) => handleSettingsExport(req, res) },
@@ -288,6 +293,7 @@ export const ready = new Promise((resolve) => {
     startAutoDevPump(); // 自动开发泵：仅 web 进程执行（feishu 只标记状态），含中断任务恢复
     startRequirementPump(); // 需求工作流串行闸泵：docgen/系统任务出队 + busy 崩溃恢复
     startConvNotify(); // 会话飞书通知：注册 run 终结监听器
+    startPatrolLoopPump(); // BUG 巡检循环泵：仅 web 进程（需读 auto-dev 任务终态判「本轮全修完」）
     startMemoryBankTicker({ cwd: process.cwd() }); // 记忆库 10 分钟 tick：窗口内才真跑提炼
     startProjectMapIdleTicker(); // 项目地图闲时刷新 10 分钟 tick：凌晨窗口且用户开启才真跑
     resolve();

@@ -58,12 +58,18 @@ try {
   console.log(`  设置 tab 已遍历 ${tabs.length} 个: ${tabs.join(', ')}`);
   assertNoErrors('设置页');
 
-  // 需求/故障、访问日志、JSON 工具视图
-  await page.click('#taskBtn');
-  if (!(await page.isVisible('.panel-page[data-view="tasks"]'))) fail('tasks 视图未显示');
-  await page.click('#logBtn');
-  await page.waitForTimeout(300); // 日志拉取
-  if (!(await page.isVisible('.panel-page[data-view="logs"]'))) fail('logs 视图未显示');
+  // 行为面板（「需求故障」「访问日志」两个内部 tab）、JSON 工具视图。
+  // 这两者原本是 tasks / logs 两个独立视图，现已合并为 behavior 一个视图 + 内部 tab 切换。
+  await page.click('#behaviorBtn');
+  if (!(await page.isVisible('.panel-page[data-view="behavior"]'))) fail('behavior 视图未显示');
+  // tab 显隐查 hidden 属性而非 isVisible：app.js#initBehaviorTabs 正是用 .hidden 控制切换，
+  // 而两个 pane 在无数据时内容为空、高度为 0，isVisible 会误判成「未显示」。
+  const paneHidden = (id) => page.evaluate((i) => document.getElementById(i)?.hidden, id);
+  if (await paneHidden('behaviorPane-tasks')) fail('「需求故障」tab 默认未显示');
+  await page.click('#behaviorTabs [data-behavior-tab="logs"]');
+  await page.waitForTimeout(300); // 切到该 tab 才懒加载日志，给拉取留时间
+  if (await paneHidden('behaviorPane-logs')) fail('「访问日志」tab 未显示');
+  if (!(await paneHidden('behaviorPane-tasks'))) fail('切到日志 tab 后「需求故障」应隐藏');
   assertNoErrors('面板视图');
 
   // JSON 工具：切侧栏工具态 → 打开 → 贴 JSON → 格式化 → 出树

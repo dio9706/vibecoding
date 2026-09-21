@@ -131,15 +131,23 @@ const STALE_REPORT_REASON = '体检报告缺少修复所需的结构化字段（
  * 重新体检一次，才能拿到真实的其余清单。
  *
  * @param {object|null} report
+ * @param {number[]|null} [pickIndices] 只处理这些 issue 下标；`null` = 全选（既有调用点的行为）。
+ *   空数组表示「一条都没勾」，与 null 语义**不同**
  * @returns {{rootMap:boolean, modules:string[], stale:Array<{file:string,staleDays:number}>,
  *   deadLinks:Array<{file:string,line:number,ref:string}>, blocked:Array<{file:string,reason:string}>}}
  */
-export function selectFixableMap(report) {
+export function selectFixableMap(report, pickIndices = null) {
   const out = { rootMap: false, modules: [], stale: [], deadLinks: [], blocked: [] };
   const issues = report?.dims?.map?.issues;
   if (!Array.isArray(issues)) return out;
 
-  for (const it of issues) {
+  // null = 全选（既有调用点的行为，不能变）；数组 = 只看这些下标。
+  // 空数组表示「一条都没勾」，与 null 语义不同
+  const pick = pickIndices ? new Set(pickIndices) : null;
+
+  for (let i = 0; i < issues.length; i += 1) {
+    if (pick && !pick.has(i)) continue;
+    const it = issues[i];
     const file = String(it?.file || '');
     if (it?.fixable !== true) {
       out.blocked.push({ file, reason: String(it?.message || '检测器标记为不可自动修复') });

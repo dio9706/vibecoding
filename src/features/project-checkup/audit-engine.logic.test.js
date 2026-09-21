@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   normalizeRecall, buildSystemPrompt, buildPrompt, validateVerdicts,
   reanchor, scoreOf, evaluateAudit, chunk, mergeAugmentDim,
+  weightedCodesOf, excludeIgnoredCandidates,
 } from './audit-engine.logic.js';
 
 /** 一个最小维度声明，覆盖「有扣分档 + 有免扣档」两类 verdict */
@@ -193,4 +194,49 @@ test('mergeAugmentDim 不原地改写宿主（调用方可能还持有它）', (
   mergeAugmentDim(host, { score: 80, status: 'done', issues: [{ code: 'H3' }] });
   assert.equal(host.score, 90);
   assert.equal(host.issues.length, 0);
+});
+
+const dimFixture = {
+  id: 'structure',
+  verdicts: {
+    violation: { weight: 9, code: 'A1_DEP_VIOLATION', severity: 'error' },
+    smell: { weight: 3, code: 'A2_DEP_SMELL', severity: 'warn' },
+    acceptable: { weight: 0 },
+  },
+};
+
+test('weightedCodesOf 只取会产生 issue 的档位', () => {
+  // weight 为 0 的 acceptable 档不产出 issue，也就无从豁免
+  assert.deepEqual(weightedCodesOf(dimFixture).sort(), ['A1_DEP_VIOLATION', 'A2_DEP_SMELL']);
+});
+
+test('有权重 code 全部被豁免时，该文件的候选被剔除（省额度）', () => {
+  const candidates = [{ file: 'src/a.js', line: 1 }, { file: 'src/b.js', line: 2 }];
+  const ignores = [
+    { dim: 'structure', code: 'A1_DEP_VIOLATION', file: 'src/a.js' },
+    { dim: 'structure', code: 'A2_DEP_SMELL', file: 'src/a.js' },
+  ];
+  const out = excludeIgnoredCandidates(candidates, dimFixture, ignores);
+  assert.deepEqual(out.map((c) => c.file), ['src/b.js']);
+});
+
+test('只豁免了部分 code 时候选必须保留', () => {
+  // 剔除了就等于连没被豁免的那类问题也不查了 —— 那是静默漏报，比多烧一次额度糟得多
+  const candidates = [{ file: 'src/a.js', line: 1 }];
+  const ignores = [{ dim: 'structure', code: 'A1_DEP_VIOLATION', file: 'src/a.js' }];
+  assert.equal(excludeIgnoredCandidates(candidates, dimFixture, ignores).length, 1);
+});
+
+test('别的维度的豁免不影响本维度', () => {
+  const candidates = [{ file: 'src/a.js', line: 1 }];
+  const ignores = [
+    { dim: 'complexity', code: 'A1_DEP_VIOLATION', file: 'src/a.js' },
+    { dim: 'complexity', code: 'A2_DEP_SMELL', file: 'src/a.js' },
+  ];
+  assert.equal(excludeIgnoredCandidates(candidates, dimFixture, ignores).length, 1);
+});
+
+test('没有豁免记录时原样返回同一个数组引用', () => {
+  const candidates = [{ file: 'src/a.js', line: 1 }];
+  assert.equal(excludeIgnoredCandidates(candidates, dimFixture, []), candidates);
 });

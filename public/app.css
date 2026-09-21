@@ -428,24 +428,40 @@
         flex-shrink: 0;
       }
 
-      /* 分支下拉浮层 */
+      /* 分支下拉浮层。
+         节点由 git-selector.js 挪到 <body> 下、用 fixed 按按钮位置定位——不是风格选择，是必须：
+         .topbar 带 backdrop-filter，既创建层叠上下文、又是 fixed 后代的包含块。留在 topbar 里时
+         本浮层的 z-index 只在 topbar 内部排序，topbar 外任何 z-index>0 的定位元素（如 .fab-row 的 20）
+         都会盖在它上面——把 999 改成多大都没用，只有挪出这个上下文才有效。
+         z-index 取 10000：压过 toast / 两个右键菜单（均 9999），但**刻意低于**
+         启动错误条(99999)/启动罩(100000)/掉线罩(100001)——那三层是系统级阻断，
+         浮在它们之上会让用户在应用已被挡住时还能点分支。 */
       .git-dropdown {
-        position: absolute;
-        top: calc(100% + 6px);
+        position: fixed;
+        top: 0;
         left: 0;
-        z-index: 999;
-        background: var(--panel-2);
+        z-index: 10000;
+        /* 实色不透明：浮层压着正文内容，半透明会让分支名和底下的文字糊成一片 */
+        background: var(--panel-2, #1d1e28);
         border: 1px solid var(--border);
         border-radius: 8px;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
         min-width: 240px;
         max-width: 320px;
+      }
+
+      /* 本文件已知坑：作者样式的 display/position 会压过 UA 的 [hidden]{display:none}。
+         这里虽未设 display，仍显式兜一道——将来给浮层加 display:flex 时不至于静默失效。 */
+      .git-dropdown[hidden] {
+        display: none;
       }
 
       .git-branches {
         max-height: 400px;
         overflow-y: auto;
         padding: 4px 0;
+        /* 圆角由父层裁切，否则首/末条的 hover 底色会溢出到圆角外 */
+        border-radius: 8px;
       }
 
       .git-branch-item {
@@ -1230,6 +1246,33 @@
       .composer-input.dragover {
         border-color: var(--accent);
         background: var(--accent-soft);
+      }
+      /* 设计稿精确还原开关：.composer 是 flex + align-items:flex-end，
+         按钮插在 #prompt 之前自然落左侧、与发送按钮同底基线 */
+      .composer-icon-btn {
+        flex: 0 0 auto;
+        width: 40px;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 3px; /* 对齐 .composer-input 46px 高度的视觉中线 */
+        padding: 0;
+        border: 1px solid var(--border);
+        border-radius: 12px; /* 同 .composer-input，避免两种圆角并排 */
+        background: var(--panel);
+        color: var(--faint);
+        font-size: 19px;
+        cursor: pointer;
+        transition: color 0.15s, background 0.15s, border-color 0.15s;
+      }
+      .composer-icon-btn:hover {
+        color: var(--text);
+      }
+      .composer-icon-btn.on {
+        color: #2b85fb;
+        border-color: rgba(43, 133, 251, 0.45);
+        background: rgba(43, 133, 251, 0.12);
       }
       /* 内联附件 chip（图片缩略图 / 文件图标） */
       .att-chip {
@@ -2212,7 +2255,22 @@
       .cleanup-ranges { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
       .cleanup-ranges label { font-size: 13px; color: var(--text); cursor: pointer; display: flex; align-items: center; gap: 6px; }
       .cleanup-custom { display: flex; gap: 16px; margin: 10px 0; flex-wrap: wrap; }
+      /* 作者样式的 display:flex 压过 UA 的 [hidden]{display:none}，不显式覆盖的话
+         这个面板从头到尾都是展开的，切换按钮点了毫无反应（表现为「无法收起」） */
+      .cleanup-custom[hidden] { display: none; }
       .cleanup-custom label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+      /* 日期框不在 .set-field 下，够不到那条通用输入样式，不补的话是浏览器原生白底控件 */
+      .cleanup-custom input[type="date"] {
+        box-sizing: border-box; padding: 7px 10px; border: 1px solid var(--border);
+        border-radius: 8px; background: var(--bg); color: var(--text);
+        font-size: 13px; font-family: inherit; color-scheme: dark;
+      }
+      .cleanup-custom input[type="date"]:focus { outline: none; border-color: var(--accent); }
+      /* 原生日历图标在深色底上默认是黑的，反相成浅色才看得见 */
+      .cleanup-custom input[type="date"]::-webkit-calendar-picker-indicator {
+        filter: invert(0.7); cursor: pointer;
+      }
+      .cleanup-custom-toggle { margin-bottom: 2px; }
       .cleanup-actions { margin-top: 14px; }
 
       /* ---- 设置页 ---- */
@@ -2224,10 +2282,12 @@
         padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
         background: var(--bg); color: var(--text); font-size: 13px;
       }
-      .set-field select.set-select,
-      .cred-add select.set-select,
-      .token-add select.set-select {
-        display: block; margin-top: 4px; box-sizing: border-box;
+      /* 下拉**外观**：刻意不挂容器前缀。原先这段绑在 .set-field / .cred-add / .token-add
+         三个容器下，于是 `class="set-select"` 用在别处（如弹窗里）时类名看着对、实际
+         一条样式都不生效，渲染成浏览器原生白底控件 —— 排查起来毫无线索。外观与容器无关，
+         就不该由容器决定；布局（display/margin/宽度）才留给各容器自己定，见下一条。 */
+      select.set-select {
+        box-sizing: border-box;
         padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
         background: var(--bg); color: var(--text); font-size: 13px;
         cursor: pointer; appearance: none;
@@ -2235,6 +2295,13 @@
         background-repeat: no-repeat; background-position: right 10px center;
         padding-right: 30px;
         transition: border-color .15s ease, box-shadow .15s ease;
+      }
+      select.set-select:disabled { opacity: .45; cursor: not-allowed; }
+      /* 容器布局：设置页的三处表单里下拉独占一行 */
+      .set-field select.set-select,
+      .cred-add select.set-select,
+      .token-add select.set-select {
+        display: block; margin-top: 4px;
       }
       /* 短选项下拉（默认模型 / 强度 / 模式、机器人平台等）：按内容自适应宽度，不再铺满整行 */
       .set-field select.set-select {
@@ -2256,6 +2323,72 @@
       .set-tab { max-width: 640px; }
       .set-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
 
+      /* ---- 同事设置：名册 + 右侧表单双栏 ----
+         全设置页唯一放开 640px 单列约束的 tab。理由是这一页的内容形状不同：
+         名册十几行、纵向本就占满一屏，表单再追加到底部，用户点「＋ 新增」时
+         表单落在视口之外——看上去像没反应。右侧那片空白正好承接它。
+         列宽约束改挂到 .colleague-main，两栏各自仍保持易读宽度。 */
+      .set-tab[data-tab="colleagues"] { max-width: none; }
+      /* wrap 而不是媒体查询：这里要响应的是**面板容器**的宽度（侧栏收放、窗口缩放都会变），
+         而媒体查询只看视口，窄面板配宽视口时会判错，把 300px 的表单挤成一条竖缝 */
+      .colleague-layout { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+      .colleague-main { flex: 1 1 420px; min-width: 0; max-width: 640px; }
+      .colleague-side { flex: 1 1 280px; min-width: 0; max-width: 340px; position: sticky; top: 0; }
+      /* 独立成栏后必须自带边框：贴着名册时它靠位置表明「这是个表单」，
+         挪到右边的空白里就只剩一组悬空控件，没有边界读不出它是一块 */
+      .colleague-form {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px 14px 14px;
+        background: var(--panel);
+      }
+      .colleague-form .set-sec-head { margin-top: 0; }
+      /* 图标 + 文案：.btn 是普通 inline-block，不给 gap 的话 svg 会紧贴文字 */
+      #colleagueImportBtn { display: inline-flex; align-items: center; gap: 6px; }
+
+      /* ---- 模型 tab：订阅 Key 账号池 + 右侧取 key 教程 ----
+         同事 tab 的双栏做法在这里复用。放开 tab 的 640px 后，
+         上面的「API Key」组（直接子 .set-sec）要自己把宽度收回来，
+         否则那一排 input 会拉成整屏宽、每个字段都远得对不上标签 */
+      .set-tab[data-tab="providers"] { max-width: none; }
+      .set-tab[data-tab="providers"] > .set-sec { max-width: 640px; }
+      .token-layout { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+      .token-main { flex: 1 1 420px; min-width: 0; max-width: 640px; }
+      .token-side { flex: 1 1 300px; min-width: 0; max-width: 380px; }
+
+      /* 操作指引卡：描边 + 弱底色，与周围的输入区分开 */
+      .howto-card {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px 14px 14px;
+        background: var(--panel);
+      }
+      .howto-card .set-sec-head { margin-top: 0; }
+      .howto-card .sec-label { display: inline-flex; align-items: center; gap: 6px; }
+      .howto-steps {
+        margin: 6px 0; padding-left: 18px;
+        font-size: 12px; line-height: 1.75; color: var(--muted);
+      }
+      .howto-steps code, .howto-note code {
+        padding: 1px 4px; border-radius: 4px;
+        background: var(--bg); color: var(--accent-hi);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
+      }
+      /* 命令行：整行等宽 + 右侧复制。命令本身可选中，长命令横向滚动而不换行——
+         换行的命令粘到终端里会被拆成两条 */
+      .howto-cmd {
+        display: flex; align-items: center; gap: 8px;
+        margin: 8px 0 10px; padding: 8px 10px;
+        border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
+      }
+      .howto-cmd code {
+        flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap;
+        color: var(--text); user-select: all;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px;
+      }
+      .howto-cmd .btn { flex: none; padding: 4px 10px; font-size: 11.5px; }
+      .howto-note { font-size: 11.5px; line-height: 1.7; color: var(--faint); }
+
       /* 样式化复选框（开机自启动等开关） */
       .pretty-check {
         -webkit-appearance: none; appearance: none;
@@ -2272,6 +2405,14 @@
         transform: rotate(45deg);
       }
       .pretty-check:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+      /* 半选：修复计划树的域 / 维度节点用（部分子项被勾）。
+         沿用上面的全部形制，只把「勾」换成「横杠」—— 另起一套视觉会让同一棵树里
+         出现两种复选框语言。原生 indeterminate 属性驱动，不需要额外的类名 */
+      .pretty-check:indeterminate { background: var(--accent); border-color: var(--accent); }
+      .pretty-check:indeterminate::after {
+        content: ''; position: absolute; left: 3px; top: 6.5px;
+        width: 10px; height: 2px; background: #fff; border-radius: 1px;
+      }
 
       /* 项目目录：输入框 + 文件夹选择按钮 */
       .dir-picker { display: flex; gap: 8px; margin-top: 4px; align-items: stretch; }
@@ -3264,28 +3405,16 @@
   background-color: var(--bg-hover, rgba(255,255,255,0.08));
 }
 
+/* 菜单项按需求阶段增删（废弃行只留「移除」）。上面那条作者样式的 display:block 会压过
+   UA 的 [hidden]{display:none}，不显式覆盖的话 el.hidden=true 根本藏不住——本文件已踩过多次。 */
+.req-ctx-menu .ctx-item[hidden] { display: none; }
+
 .req-ctx-menu .ctx-danger {
   color: var(--red, #ef4444);
 }
 
 .req-ctx-menu .ctx-danger:hover {
   background-color: rgba(239,68,68,0.12);
-}
-
-/* ---- 需求钉住图标 ---- */
-.req-item .req-pin-ic {
-  display: inline-flex;
-  align-items: center;
-  margin-right: 4px;
-  /* 橙色与侧栏会话行的 .conv-pin-ic 对齐：同一个钉住语义不该出现两种颜色 */
-  color: var(--accent);
-  opacity: 0.6;
-  flex-shrink: 0;
-}
-
-.req-item:hover .req-pin-ic,
-.req-item.active .req-pin-ic {
-  opacity: 1;
 }
 
 /* ---- 已废弃状态 badge ---- */
@@ -4181,6 +4310,14 @@
 .mem-session-status--pending   { background: #fff3cd; color: #856404; }
 @keyframes mem-pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
 .mem-session-status--outdated { background: #fde8e8; color: #9b2335; }
+/* 可折叠分组标题：已分析那组默认收起，点开才拉数据 */
+.mem-section-label--toggle { display: flex; align-items: center; gap: 6px; user-select: none; }
+.mem-section-label--toggle:hover { opacity: .75; }
+.mem-section-arrow { font-size: 10px; width: 10px; display: inline-block; }
+.mem-load-more { display: block; width: 100%; margin: 6px 0; padding: 6px 10px; font-size: 12px;
+  border: 1px dashed var(--border, #d7dae0); border-radius: 6px; background: transparent;
+  color: var(--muted, #6b7280); cursor: pointer; }
+.mem-load-more:hover { background: var(--hover, #f3f4f6); }
 .mem-session-findings { padding: 4px 0 4px 20px; }
 .mem-finding-item { display: flex; align-items: flex-start; gap: 6px; padding: 3px 0; font-size: 12px; }
 .mem-finding-type { padding: 1px 5px; border-radius: 8px; font-size: 10px; white-space: nowrap; flex-shrink: 0; }
@@ -4267,10 +4404,24 @@
 
 .opt-picker { display: flex; align-items: center; gap: 8px; }
 .opt-picker label { color: var(--muted); font-size: 13px; white-space: nowrap; }
-/* 复用顶栏同款 .dir-selector：顶栏受工具条挤压才限 320px，面板里宽度富裕，
-   放开上限占满一行，路径长时靠 .dir-label 的 ellipsis 截断（title 显示全路径） */
-.opt-picker .dir-selector { flex: 1; max-width: 100%; min-width: 0; }
-.opt-picker .dir-selector .dir-label { flex: 1; text-align: left; min-width: 0; }
+/* 当前项目：**只读**展示条。样式贴近顶栏的 .dir-selector，但刻意不复用那个类——
+   它带 cursor:pointer 与 hover 高亮，会把「可点击换目录」的暗示还给用户，而这里点不动。
+   路径长时靠 .dir-label 的 ellipsis 截断（title 兜住全路径） */
+.opt-picker .dir-current {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.opt-picker .dir-current .folder { color: var(--accent); }
+.opt-picker .dir-current .dir-label {
+  flex: 1; min-width: 0; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* 分数区做成一张卡：原来贴着背景飘着，和下面的维度卡片没有层次区分 */
 .opt-score {
@@ -4376,6 +4527,24 @@
 .opt-plan-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
 .opt-plan-sub { color: var(--muted); font-size: 12px; }
 
+/* 测试闸关闭横幅。用琥珀色描边而不是红：这不是错误，是一个「本轮做不了、可以解锁」的状态。
+   display:flex 会压过 [hidden] 的 UA display:none，须显式覆盖（本文件已知坑） */
+.opt-gate-banner {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border: 1px solid rgba(217, 164, 65, .45);
+  background: rgba(217, 164, 65, .10);
+  border-radius: 8px;
+}
+.opt-gate-banner[hidden] { display: none; }
+.opt-gate-icon { color: var(--amber); flex: none; line-height: 1.5; }
+.opt-gate-body { min-width: 0; }
+.opt-gate-title { font-size: 12.5px; font-weight: 600; margin-bottom: 4px; }
+.opt-gate-why { font-size: 12px; color: var(--muted); line-height: 1.6; }
+
 .opt-dim {
   border: 1px solid var(--faint);
   border-radius: 8px;
@@ -4415,31 +4584,219 @@
   padding-left: 12px; border-left: 2px solid var(--faint);
 }
 .opt-dim.is-open .opt-issues { display: flex; }
-.opt-issue { display: flex; gap: 8px; font-size: 12px; align-items: baseline; line-height: 1.6; }
+/* 行内多了复选框之后必须从 baseline 改成 center：复选框没有文字基线，
+   按基线对齐会明显偏低，与同行的严重度、路径、文案错开 */
+.opt-issue { display: flex; gap: 8px; font-size: 12px; align-items: center; line-height: 1.6; }
+/* 无复选框的行（维度未跑完 / 该条没有修复策略）用等宽占位，否则整列会左右错开 */
+.opt-issue-nocheck { width: 14px; flex: none; }
+/* 「本轮已处理」的行整体压暗。类名从 .opt-plan-item.is-handled 迁过来的 */
+.opt-issue.is-handled { opacity: .55; }
 .opt-issue-sev { min-width: 40px; }
 .opt-issue-sev.sev-error { color: var(--red); }
 .opt-issue-sev.sev-warn { color: var(--amber); }
 .opt-issue-sev.sev-info { color: var(--muted); }
 .opt-issue-loc { color: var(--accent-hi); white-space: nowrap; }
-.opt-issue-msg { color: var(--muted); }
+/* 文案是这一行唯一可压缩的部分：min-width:0 解开 flex 项的 auto 最小宽度，
+   它才会真的收缩而不是把后面的标签和按钮顶出容器（全文由 title 兜底，
+   渲染侧早就挂了 title，只是一直缺这几行 CSS 来兑现） */
+.opt-issue-msg {
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
-.opt-actions { display: flex; align-items: center; gap: 12px; }
+/* 前导位：复选框 / 进度指示 / 占位三选一都落在这一格，同宽才不会让整列左右错开 */
+.opt-issue-lead {
+  width: 14px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+/* 行尾进度文案。给个固定最小宽度，免得「排队中」→「修复中」→「已处理」来回变字数时
+   整行的后半段跟着左右抽动 */
+.opt-issue-state { flex: none; min-width: 42px; font-size: 11.5px; color: var(--muted); }
+.opt-issue-state.is-running { color: var(--accent-hi); }
+.opt-issue-state.is-done { color: var(--green); }
+.opt-issue-state.is-failed { color: var(--red); }
+/* 排队中：空心弱点，只表示「在本轮里，还没轮到」，不该比转圈更抢眼 */
+.opt-issue-wait { color: var(--faint); font-size: 14px; line-height: 1; }
+.opt-issue-ok { color: var(--green); font-size: 12px; line-height: 1; }
+.opt-issue-bad { color: var(--red); font-size: 12px; line-height: 1; }
+
+/* 「正在修复」：复选框位换成转圈，形制照 .opt-dim-spin::after */
+.opt-issue-spin {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  box-sizing: border-box;
+  border: 2px solid var(--faint);
+  border-top-color: var(--accent-hi);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+.opt-issue.is-fixing .opt-issue-msg { color: var(--text); }
+
+/* 「这不是问题」：次要动作，平时低调，hover 才浮出来。
+   它和勾选框抢注意力的话，用户会先去点它而不是先勾修复项。
+   刻意**不**用 margin-left:auto 顶到最右：每行文案长短不一，右对齐会让这一列
+   孤零零落在一片空白里，既扫不出它属于哪一行，也对不齐 */
+.opt-issue-ignore {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--muted);
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .15s, color .15s, border-color .15s;
+}
+.opt-issue:hover .opt-issue-ignore { opacity: 1; }
+.opt-issue-ignore:hover {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--panel);
+}
+/* 触屏与键盘可达：hover 不可用时也要能看见 */
+.opt-issue-ignore:focus-visible { opacity: 1; }
+/* 修复中的行禁用它。选择器要带上 :hover 那一层，否则 (0,3,0) 的 hover 规则会把它打亮回来 */
+.opt-issue-ignore:disabled,
+.opt-issue:hover .opt-issue-ignore:disabled { opacity: .35; cursor: not-allowed; }
+.opt-issue-ignore:disabled:hover { color: var(--muted); border-color: transparent; background: transparent; }
+
+/* 维度头部的勾选计数「已勾 3/12」 */
+.opt-dim-count { color: var(--muted); font-size: 11.5px; flex: none; }
+
+/* 分数卡里的「已豁免 N 项」入口 */
+.opt-ignored-entry {
+  align-self: flex-start;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--muted);
+  border: 1px solid var(--faint);
+  background: transparent;
+  cursor: pointer;
+}
+.opt-ignored-entry:hover { color: var(--text); border-color: var(--border); }
+
+/* 侧栏「项目优化」工具卡片上的状态标签（体检中 / 修复中）。
+   形制照 .opt-stale-badge：小号、描边、弱底色，挂在标题后面不抢视线 */
+.tool-item-tag {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent-hi);
+  border: 1px solid rgba(217, 119, 87, 0.45);
+  background: rgba(217, 119, 87, 0.12);
+  vertical-align: middle;
+}
+
 .opt-phase-note { color: var(--muted); font-size: 12px; }
 
-/* 这两个是面板的主操作，默认 .btn 的 12.5px/6px 在这么空的版面里显得像次要链接 */
-#optRunCheckup, #optFix {
+/* 顶部操作区：按钮统一收在分数卡右侧。原先体检在顶部、修复在底部，
+   完成一轮操作要在一屏里上下找两次 */
+/* 顶部操作区。
+   原来「重新体检」和「一键修复」都是 .btn.primary —— 两个同权重的实心橙块并排，
+   没有主次层级，一起把分数环压了下去。现在只有主动作保持实心，次动作降为描边。 */
+.opt-score-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.opt-score-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* 上面这条 display:inline-flex 是作者样式，会压过 UA 的 [hidden]{display:none}
+   —— 本文件已知的第七次同款坑（.token-banner / .win-controls / .req-rail …）。
+   不显式覆盖的话，「中止体检」「停止修复」在任务结束后仍然挂在那儿：
+   JS 的 hidden 一直设对了，只是不生效。这四个按钮是互斥的，漏一个就全乱 */
+.opt-score-actions .btn[hidden] { display: none; }
+/* 次动作：描边幽灵。已有报告时的「重新体检」属于这一档 */
+.opt-score-actions #optRunCheckup {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted);
+  font-weight: 500;
+}
+.opt-score-actions #optRunCheckup:hover:not(:disabled) {
+  background: var(--panel);
+  color: var(--text);
+  border-color: var(--accent);
+}
+/* 唯一例外：还没体检过时它是这个面板上唯一的动作，此时该是实心的。
+   `is-primary` 这个类由 refreshButtons() 按 !currentReport 切换 */
+.opt-score-actions #optRunCheckup.is-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a1109;
+  font-weight: 600;
+}
+.opt-score-actions #optRunCheckup.is-primary:hover:not(:disabled) {
+  background: var(--accent-hi);
+}
+.opt-done-note { color: var(--muted); font-size: 12px; max-width: 240px; line-height: 1.5; }
+
+/* 面板主操作，默认 .btn 的 12.5px/6px 在这么空的版面里显得像次要链接 */
+#optRunCheckup, #optFix, #optCancelCheckup, #optFixCancel {
   font-size: 14px;
   font-weight: 600;
   padding: 10px 26px;
   border-radius: 8px;
   flex: none;
 }
+/* 体检在主操作里再拔高一档，但**只在它确实是唯一动作时**（`.is-primary` = 还没体检过）。
+   理由仍是原来那条：没有报告时「一键修复」根本不显示，用户第一次进来能点的只有它，
+   尺寸要对齐分数环（96px）的视觉重量，免得「唯一能点的东西」比旁边的装饰性圆环还轻。
+   但这个理由**一旦有了报告就不成立**：那时「重新体检」仍是 16px / 16px 40px 的巨块，
+   与旁边同为实心橙的「一键修复」并排，两个庞然大物没有主次、把分数环压了下去
+   —— 那正是「按钮丑」的由来。现在主次改由填充 vs 描边表达，尺寸差只留给「第一次进来」那一档。 */
+#optRunCheckup.is-primary {
+  font-size: 16px;
+  padding: 16px 40px;
+  border-radius: 10px;
+}
 #optRunCheckup:disabled, #optFix:disabled { cursor: not-allowed; }
+
+.opt-plan-handled { font-size: 11px; color: var(--faint); white-space: nowrap; flex: none; }
+
+/* 动作 / 风险标签：照 .t-badge 形制（11px / 1px 7px / radius 10px），
+   颜色一律走变量，不硬编码色值 */
+.opt-tag {
+  font-size: 11px; padding: 1px 7px; border-radius: 10px;
+  white-space: nowrap; flex: none;
+}
+.opt-tag.risk-low { background: rgba(108, 195, 138, .15); color: var(--green); }
+.opt-tag.risk-medium { background: rgba(217, 164, 65, .15); color: var(--amber); }
+.opt-tag.risk-high { background: rgba(229, 104, 122, .15); color: var(--red); }
+
+/* ---- 修复报告弹窗（复用 .mask / .modal，仅加内容区排版） ---- */
+.opt-report-modal { width: min(680px, 94vw); }
+.opt-report-sec { margin-bottom: 18px; }
+.opt-report-sec:last-child { margin-bottom: 0; }
+.opt-report-sec h4 { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.opt-report-group { color: var(--text); font-weight: 600; font-size: 12px; margin: 8px 0 4px; }
+.opt-report-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 0; font-size: 12px; color: var(--muted);
+}
+.opt-report-block { padding: 4px 0; }
+.opt-report-dir { color: var(--text); font-weight: 600; font-size: 12px; }
+.opt-report-resp { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.opt-report-note { color: var(--muted); font-size: 12px; line-height: 1.7; padding: 4px 0; }
+.opt-report-error { color: var(--red); font-size: 12px; margin-bottom: 12px; }
+.opt-report-foot {
+  display: flex; gap: 8px; justify-content: flex-end;
+  padding: 12px 16px; border-top: 1px solid var(--border-soft);
+}
 
 /* ---- 优化进度 ---- */
 /* 这两块默认带 hidden 属性，而 display:flex 的优先级高于 hidden 自带的 display:none，
    不显式盖掉的话空盒子会一直占着一条带边框的空白 */
-.opt-progress[hidden], .opt-result[hidden] { display: none; }
+.opt-progress[hidden] { display: none; }
 
 .opt-progress {
   border: 1px solid var(--faint);
@@ -4457,54 +4814,11 @@
 .opt-step-file { color: var(--muted); font-family: var(--mono, monospace); }
 .opt-step-text { color: var(--muted); }
 
-/* ---- 优化结果 ---- */
-.opt-result { display: flex; flex-direction: column; gap: 10px; }
-
-.opt-res-summary {
-  display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center;
-  background: var(--panel-2);
-  border: 1px solid var(--faint);
-  border-radius: 8px;
-  padding: 12px 16px;
-  font-size: 13px;
-}
-.opt-res-stat { font-weight: 600; }
-.opt-res-stat.is-warn { color: var(--amber); }
-.opt-res-error { color: var(--red); font-size: 13px; }
-
-.opt-res-file {
-  border: 1px solid var(--faint);
-  border-left-width: 3px;
-  border-radius: 8px;
-  padding: 12px 14px;
-  background: var(--panel);
-}
-.opt-res-file.is-done { border-left-color: var(--green); }
-.opt-res-file.is-skipped { border-left-color: var(--amber); }
-.opt-res-file.is-failed { border-left-color: var(--red); }
-
-.opt-res-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+/* ---- 修复结果状态徽标（修复报告弹窗用） ---- */
 .opt-res-badge { font-size: 12px; font-weight: 600; }
 .opt-res-badge.sev-done { color: var(--green); }
 .opt-res-badge.sev-skipped { color: var(--amber); }
 .opt-res-badge.sev-failed { color: var(--red); }
-.opt-res-file-name { font-family: var(--mono, monospace); font-size: 13px; }
-
-.opt-res-body { display: flex; flex-direction: column; gap: 6px; }
-.opt-kv { display: flex; gap: 10px; font-size: 12px; line-height: 1.7; align-items: baseline; }
-.opt-kv-k { color: var(--muted); min-width: 92px; flex: none; }
-.opt-kv-v { flex: 1; min-width: 0; word-break: break-word; }
-/* 生成的 description 是要用户逐字读的（写砸了 skill 就唤不起来），给足对比度和行距 */
-.opt-kv-v.is-desc {
-  color: var(--text, #e8e8ef);
-  background: var(--panel-2);
-  border-radius: 6px;
-  padding: 8px 10px;
-  line-height: 1.8;
-}
-
-.opt-res-note { color: var(--amber); font-size: 12px; line-height: 1.7; }
-.opt-res-foot { display: flex; gap: 10px; margin-top: 4px; }
 
 /* ---- 消息分页加载 ---- */
 .load-more-msgs-wrap {
@@ -4583,3 +4897,148 @@
 .msg-blur-overlay:hover .msg-expand-label {
   opacity: 0.8;
 }
+
+/* 开发人员选人弹窗（req-assignee-dialog.js） */
+/* ---- 定稿分支弹框 ---- */
+.rq-branch-modal { width: min(520px, 92vw); }
+/* 各工程当前分支一览。这块是「沿用当前分支」那个按钮的全部依据，
+   不列出来用户就是在盲点——所以给它描边独立成块，而不是混进说明文字里 */
+.rq-branch-projects {
+  margin: 10px 0 4px; padding: 8px 10px;
+  border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg);
+}
+.rq-branch-proj { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 2; }
+.rq-branch-proj .rl { flex: none; min-width: 28px; color: var(--faint); }
+.rq-branch-proj .dir { flex: none; color: var(--text); }
+.rq-branch-proj .br {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--accent-hi); font-family: var(--mono);
+}
+.rq-branch-label { display: block; margin-top: 12px; font-size: 12px; color: var(--faint); }
+.rq-branch-label + .prompt-input { margin-top: 4px; }
+.rq-branch-hint { margin-top: 6px; min-height: 16px; font-size: 11.5px; line-height: 1.5; color: var(--faint); }
+.rq-branch-hint.is-warn { color: var(--amber); }
+
+/* 选人列表改挂右侧抽屉后，限高交给 .rq-drawer 的固定高度 + .body 的 flex:1（见 req-v2.css），
+   原来的 max-height:52vh 已无引用，删除 */
+.rq-assignee-group { margin-bottom: 12px; }
+.rq-assignee-group > b { display: block; font-size: 12px; color: var(--faint); margin-bottom: 4px; }
+.rq-assignee-row { display: flex; align-items: center; gap: 8px; padding: 5px 2px; cursor: pointer; }
+.rq-assignee-row .nm { font-size: 13px; color: var(--text); }
+.rq-assignee-row .nt { font-size: 11px; color: var(--faint); }
+.rq-assignee-empty { opacity: .6; padding: 12px 4px; font-size: 13px; }
+/* 开发人员槽位里的姓名 chip（req-view.js makeAssigneeSlot） */
+.rqw-assignees { display: flex; flex-wrap: wrap; gap: 5px; }
+.rqw-assignees .chip { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: rgba(127,127,127,.14); }
+.rqw-assignees .chip.missing { opacity: .55; text-decoration: line-through; }
+
+/* ---- 从飞书群导入同事（colleagues-import.js） ---- */
+.cl-import-modal { width: min(520px, 92vw); }
+.cl-import-modal .body { display: flex; flex-direction: column; gap: 10px; }
+
+/* 选群区 */
+.cl-import-pick { display: flex; flex-direction: column; gap: 5px; }
+.cl-import-pick .cl-lb { font-size: 12px; color: var(--faint); }
+.cl-import-pick .cl-chat-sel { width: 100%; }
+.cl-import-meta { font-size: 11px; color: var(--faint); min-height: 14px; }
+
+/* 工具条：搜索 + 全选 + 批量设职位 */
+.cl-import-tools { display: flex; align-items: center; gap: 8px; }
+.cl-import-tools .cl-sp { flex: 1; }
+.cl-import-tools .cl-search {
+  box-sizing: border-box; width: 150px; padding: 5px 9px;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg); color: var(--text); font-size: 12px; font-family: inherit;
+}
+.cl-import-tools .cl-search:focus { outline: none; border-color: var(--accent); }
+/* 「全选/全不选」是次要动作，做成文字按钮：跟主按钮同款会跟底部「导入」抢视线 */
+.cl-linkbtn {
+  border: none; background: none; padding: 2px 0; cursor: pointer;
+  font-size: 12px; color: var(--muted); font-family: inherit;
+}
+.cl-linkbtn:hover { color: var(--accent); }
+
+/* 成员列表：包一层边框成为一个可滚区，行数多时标题/工具条/底部按钮都不被推走 */
+.cl-import-list {
+  border: 1px solid var(--border); border-radius: 8px;
+  max-height: 46vh; overflow-y: auto; padding: 4px;
+}
+.cl-import-row {
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center;
+  gap: 10px; padding: 4px 8px; border-radius: 6px; cursor: pointer;
+}
+/* display:grid 会盖过 [hidden] 的 UA display:none，搜索过滤靠它，必须显式覆盖 */
+.cl-import-row[hidden] { display: none; }
+.cl-import-row:hover { background: rgba(127, 127, 127, .09); }
+.cl-import-row .nm { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cl-import-row .tl { font-size: 11px; color: var(--faint); white-space: nowrap; }
+.cl-import-row .set-select.sm { width: 104px; }
+/* 已在名册：淡化且不可点，与上方可操作的行区分开（它们也被排到了列表末尾） */
+.cl-import-row.exists { opacity: .45; cursor: default; }
+.cl-import-row.exists:hover { background: none; }
+.cl-import-tip { opacity: .6; padding: 14px 6px; font-size: 13px; text-align: center; }
+
+/* 底部计数靠左，与取消/导入拉开 */
+.cl-import-modal .confirm-foot { align-items: center; }
+.cl-import-count { flex: 1; font-size: 12px; color: var(--faint); text-align: left; }
+
+/* 小号变体：随 set-select 外观走，只压缩尺寸 */
+select.set-select.sm { padding: 4px 24px 4px 8px; font-size: 12px; background-position: right 7px center; }
+/* 工具条里的批量下拉：文案「批量设职位…」比行内的长，不给下限会挤到贴住箭头 */
+.cl-import-tools .cl-bulk-role { min-width: 116px; }
+.btn.sm { padding: 2px 8px; font-size: 12px; }
+
+/* ---- 同事对话（colleague-chat.js） ---- */
+.rq-railbtn { position: relative; }
+.rq-railbadge {
+  position: absolute; top: 6px; right: 8px;
+  min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box;
+  border-radius: 8px; background: var(--red); color: #fff;
+  font-size: 10px; line-height: 16px; text-align: center; font-weight: 700;
+}
+.cc-list-modal { width: min(420px, 92vw); }
+.cc-list { display: flex; flex-direction: column; gap: 4px; }
+.cc-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); font-size: 13px;
+  font-family: inherit; cursor: pointer; text-align: left;
+}
+.cc-row:hover:not(:disabled) { border-color: var(--accent); }
+.cc-row:disabled { opacity: .45; cursor: not-allowed; }
+.cc-row .nm { flex: 1; }
+.cc-row .tl { font-size: 11px; color: var(--faint); }
+.cc-badge {
+  min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box;
+  border-radius: 9px; background: var(--red); color: #fff;
+  font-size: 11px; line-height: 18px; text-align: center; font-weight: 700;
+}
+.cc-chat-modal { width: min(560px, 94vw); }
+.cc-msgs {
+  display: flex; flex-direction: column; gap: 8px;
+  height: 46vh; overflow-y: auto; padding: 4px 2px;
+}
+.cc-msg { max-width: 78%; padding: 7px 10px; border-radius: 10px; font-size: 13px; }
+.cc-msg.in { align-self: flex-start; background: rgba(127, 127, 127, .14); }
+.cc-msg.out { align-self: flex-end; background: var(--accent); color: #fff; }
+.cc-msg .cc-body { word-break: break-word; }
+.cc-msg .cc-body :is(p, ul, ol) { margin: 0 0 4px; }
+.cc-msg .cc-body :is(p, ul, ol):last-child { margin-bottom: 0; }
+.cc-msg .cc-at { margin-top: 3px; font-size: 10px; opacity: .6; }
+.cc-file {
+  display: inline-block; margin-top: 4px; padding: 2px 7px;
+  border: 1px solid currentColor; border-radius: 6px;
+  font-size: 11px; background: none; color: inherit; font-family: inherit;
+}
+button.cc-file { cursor: pointer; }
+.cc-compose {
+  display: flex; gap: 8px; align-items: flex-end;
+  padding: 10px 16px; border-top: 1px solid var(--border-soft);
+}
+.cc-input {
+  flex: 1; box-sizing: border-box; resize: none;
+  padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); font-size: 13px; font-family: inherit;
+}
+.cc-input:focus { outline: none; border-color: var(--accent); }
+.cc-tip { opacity: .6; padding: 14px 6px; font-size: 13px; text-align: center; }

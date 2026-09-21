@@ -2,7 +2,9 @@
  * 记忆库面板 v2：已记忆条目 + 会话分析列表。
  * 渲染一律 createElement + textContent（内容来自 LLM，绝不裸写 innerHTML）。
  *
- * 数据来源：GET /api/memory/sessions（单次请求返回 memories/sessions/enabled）
+ * 数据来源：
+ *   GET /api/memory/sessions                            — memories + **待办**会话 + 已分析计数
+ *   GET /api/memory/sessions?scope=analyzed&offset=&limit= — 已分析分组，点开才拉、按页追加
  * 操作接口：
  *   POST /api/memory/settings {enabled}  — 开关闲时提炼
  *   POST /api/memory/extract             — 立即提炼
@@ -12,13 +14,23 @@ import { $ } from './util.js';
 
 // ── 模块级状态 ──────────────────────────────────────────────────────────────
 let _memories = [];          // 已提炼的记忆条目（bank.memories）
-let _sessions = [];          // 已登记的会话（带 status 字段）
+let _sessions = [];          // 待办会话（pending/analyzing/outdated，带 status 字段）
 let _unanalyzedPaths = [];   // 扫描到但尚未登记的路径
 let _enabled = false;        // settings.enabled（闲时提炼开关）
 let _lastExtractAt = 0;      // 上次提炼时间戳
 let _extracting = false;     // 立即提炼进行中标记
 let _pollTimer = null;       // 提炼中的轮询定时器
 let _expandedIds = new Set();// 展开 findings 的 session id 集合
+
+// 已分析分组：默认收起且**不拉数据**。实测生产库这一组有 1200+ 条、连着 findings 有 2.7MB，
+// 跟着每次刷新整份传就是面板卡顿的根源，所以点开才按页取（GET ?scope=analyzed）。
+const ANALYZED_PAGE = 50;
+let _analyzedOpen = false;      // 分组是否展开
+let _analyzedLoaded = false;    // 是否已经拉过至少一页（收起再展开不重复请求）
+let _analyzedLoading = false;   // 正在拉取中
+let _analyzedSessions = [];     // 已拉到的已分析会话
+let _analyzedTotal = 0;         // 已分析总数（默认接口给的计数，未加载时也能显示）
+let _analyzedHasMore = false;   // 还有下一页
 
 const CATEGORY_LABEL = {
   'code-style': '代码风格',
@@ -28,6 +40,8 @@ const CATEGORY_LABEL = {
   'tech-pref': '技术偏好',
 };
 
+// 后端 sessionDisplayStatus 还会产出 'missing'（源文件已删），但那种记录永远不会被再处理，
+// groupSessionsForPanel 已把它从两个分组里都剔除，前端不会收到，故此处不设文案。
 const STATUS_LABEL = {
   analyzed: '已分析',
   analyzing: '分析中',
@@ -62,11 +76,34 @@ async function refresh() {
     _unanalyzedPaths = Array.isArray(d.unanalyzedPaths) ? d.unanalyzedPaths : [];
     _enabled = !!d.enabled;
     _lastExtractAt = d.lastExtractAt || 0;
+    // 只更新计数，不动已加载的那几页 —— 提炼进行中每 3 秒轮询一次，
+    // 跟着重拉已分析组会把刚省下来的流量原样吐回去。
+    _analyzedTotal = Number(d.analyzedCount) || 0;
   } catch {
     // 失败沿用上次渲染，不清空面板
   }
   renderToggle();
   render();
+}
+
+/** 拉取已分析分组的下一页。失败不清空已有内容，只提示。 */
+async function loadAnalyzedPage() {
+  if (_analyzedLoading) return;
+  _analyzedLoading = true;
+  render();
+  try {
+    const offset = _analyzedSessions.length;
+    const d = await api(`/api/memory/sessions?scope=analyzed&offset=${offset}&limit=${ANALYZED_PAGE}`);
+    _analyzedSessions = _analyzedSessions.concat(Array.isArray(d.sessions) ? d.sessions : []);
+    _analyzedTotal = Number(d.total) || _analyzedSessions.length;
+    _analyzedHasMore = !!d.hasMore;
+    _analyzedLoaded = true;
+  } catch (e) {
+    window.toast?.error(e.message);
+  } finally {
+    _analyzedLoading = false;
+    render();
+  }
 }
 
 // ── 闲时提炼开关（注入 .mem-toolbar） ───────────────────────────────────────
@@ -142,12 +179,12 @@ function render() {
     }
   }
 
-  // ---- 待分析会话区段 ----
+  // ---- 待分析会话区段（默认展开：这是真正需要你关注的那一组）----
   const totalSessions = _sessions.length + _unanalyzedPaths.length;
   frag.appendChild(makeSectionLabel(`待分析会话（${totalSessions}）`));
 
   if (totalSessions === 0) {
-    frag.appendChild(makeHint('暂无会话记录。'));
+    frag.appendChild(makeHint('没有待分析的会话。'));
   } else {
     // 已登记的 sessions
     for (const s of _sessions) {
@@ -159,8 +196,57 @@ function render() {
     }
   }
 
+  // ---- 已分析会话区段（默认收起，点开才拉数据）----
+  frag.appendChild(makeGroupHeader(`已分析会话（${_analyzedTotal}）`, _analyzedOpen, () => {
+    _analyzedOpen = !_analyzedOpen;
+    // 首次展开才发请求；收起再展开沿用已加载的几页
+    if (_analyzedOpen && !_analyzedLoaded) loadAnalyzedPage();
+    else render();
+  }));
+
+  if (_analyzedOpen) {
+    for (const s of _analyzedSessions) {
+      frag.appendChild(makeSessionRow(s));
+    }
+    if (_analyzedLoading) {
+      frag.appendChild(makeHint('加载中…'));
+    } else if (_analyzedHasMore) {
+      frag.appendChild(makeLoadMoreButton());
+    } else if (_analyzedLoaded && _analyzedSessions.length === 0) {
+      frag.appendChild(makeHint('还没有分析完成的会话。'));
+    }
+  }
+
   el.innerHTML = '';
   el.appendChild(frag);
+}
+
+/** 可折叠的分组标题：箭头 + 文案，整行可点 */
+function makeGroupHeader(text, open, onToggle) {
+  const d = document.createElement('div');
+  d.className = 'mem-section-label mem-section-label--toggle';
+  d.style.cursor = 'pointer';
+
+  const arrow = document.createElement('span');
+  arrow.className = 'mem-section-arrow';
+  arrow.textContent = open ? '▾' : '▸';
+
+  const label = document.createElement('span');
+  label.textContent = text;
+
+  d.appendChild(arrow);
+  d.appendChild(label);
+  d.onclick = onToggle;
+  return d;
+}
+
+/** 「加载更多」按钮：按页追加，不做无限滚动（列表里还有待办组，滚动语义会打架） */
+function makeLoadMoreButton() {
+  const btn = document.createElement('button');
+  btn.className = 'mem-load-more';
+  btn.textContent = `加载更多（还有 ${_analyzedTotal - _analyzedSessions.length} 条）`;
+  btn.onclick = () => loadAnalyzedPage();
+  return btn;
 }
 
 // ── 记忆条目行 ──────────────────────────────────────────────────────────────
@@ -401,6 +487,12 @@ export function initMemoryPanel() {
 
       // 开始提炼
       setExtracting(true);
+      // 这一轮会把待办会话搬进已分析组，缓存的那几页立刻就过期了。
+      // 丢弃并收起，用户想看时再点开拉最新的 —— 好过让它在轮询期间一直显示陈旧列表。
+      _analyzedOpen = false;
+      _analyzedLoaded = false;
+      _analyzedSessions = [];
+      _analyzedHasMore = false;
       try {
         await api('/api/memory/extract', {});
         window.toast?.info('已开始提炼，实时更新中…');

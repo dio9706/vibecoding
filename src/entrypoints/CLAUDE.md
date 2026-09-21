@@ -36,6 +36,9 @@
 - `web/req-uispec.logic.js` — UI 规范纯逻辑：还原 prompt / 规范草稿 prompt。
 - `web/req-inspect.js` — 测试期 bitable 巡检（复用 \10001 基建：bitable API / 字段映射 / 评审门）。
 - `web/req-pitfalls.js` — 避坑清单读写：`.claude/pitfalls.md` 与 `CLAUDE.md`。
+- `web/colleague-auto.js` — 同事中继四期：后端同事消息自动处理编排（`autoHandleMessages`，deps 注入可测）。有附件走接口文档识别（`registerApiDoc` + 入队），无附件走文字判定（Haiku 一次给出判定 + 提炼）；分类失败一律视同不处理、warn 留痕、**不重试**。
+- `web/colleague-auto.logic.js` — 上者的零 IO 纯函数：扩展名白名单、两个分类 prompt 与解析、子会话提示词模板（固定同时带原话与提炼）、简报截断、`newSubConvId`。
+- `web/colleague-dev.js` — 系统任务 `colleague-dev` 执行侧：`dispatchColleagueDev`（新建 `kind:'sub'` 子会话 + 新 session 上下文 + `bypassPermissions`，**busy 带 convId**）、`buildColleagueDevOnSettle`（清 busy / 回填 sessionId / `markHandled` / 回飞书简报）、`abandonColleagueDev`、`replyColleague`。**不得 import `requirement-ops.js` / `colleague-auto.js`**（成环）。
 
 ### web 入口：体检 / 优化
 - `web/routes-optimize.js` — 项目优化 HTTP 接口（单入口范式，对齐 routes-memory）。
@@ -51,9 +54,11 @@
 - `web/routes-files.js` — 上传 / 目录浏览 / 系统选目录 / 常用目录 / 脚本上传 / 静态托管；含 `validateScriptName`、路径防穿越。
 - `web/routes-ops.js` — 日志 / 任务 / 历史 / 动作配置 / 脚本列举 / 启动初始化（`initializeDefaults`）/ ping / notify。
 - `web/routes-memory.js` — 记忆库 HTTP 接口（单入口范式）。
+- `web/routes-colleagues.js` — 同事名册 CRUD（单入口范式）。单条 prefix 覆盖 `/api/colleagues` 与 `/api/colleagues/:id`。
+- `web/routes-patrol.js` — BUG 巡检循环的 `/api/patrol/start|stop`（单入口范式）。只服务 feishu 进程的跨进程调用：循环泵在 web 进程（要读 auto-dev 任务终态判「全修完」），而 `\10001`/`\10004` 指令在 feishu 进程收。`start` 有单例约束，冲突回 409 并带启动人与时间。
 
 ### 纯逻辑层 & 测试
-- `web/*.test.js`（`body` / `origin` / `input` / `route-match` / `run-claude.logic` / `run-openai.cred` / `tool-summary` / `req-*` / `routes-*` 等）— 与同名源文件配对的 `node --test` 单测。分发层（route-match）与各 `*.logic.js` 的契约靠这批测试钉住，因为编排本体全是 SDK/落盘/`server.listen`，无法直测。
+- `web/*.test.js`（`body` / `origin` / `input` / `route-match` / `run-claude.logic` / `run-openai.cred` / `tool-summary` / `req-*` / `routes-*` / `colleague-auto` / `colleague-auto.logic` / `colleague-dev` 等）— 与同名源文件配对的 `node --test` 单测。分发层（route-match）与各 `*.logic.js` 的契约靠这批测试钉住，因为编排本体全是 SDK/落盘/`server.listen`，无法直测。
 
 ## 二、关键流程
 
@@ -79,7 +84,7 @@ channel 收信 → `feishu/index.js`（群聊只处理 @ 机器人；图片/文�
 `server.js` `listen` 调 `startConvNotify` 注册终结监听器（选在 `store/runs` 而非 `settleRun`：要覆盖全 provider、全终结路径）→ run 终结 → `conv-notify.js` `onRunSettled` 推私聊卡片（卡片失败降级纯文本，仅确实送达才记 `lastNotifiedAt`）。用户飞书回「补充内容」→ `injectToConv`：有活跃且支持持有的 run 走插话缓冲，否则 `resume` 原 session 新起一轮 `startClaudeRun`。
 
 ### E. 需求工作流
-HTTP `/api/req/*` → `routes-requirements.js`（单入口分发）/ `routes-req-v2.js` → `requirement-ops.js` 编排：`startRequirementPump` 单泵按串行闸出队（busy 空且该 conv 无活跃 run）→ 直调 `startClaudeRun` 或 `runClaude`；prompt 构造 / 解析等纯逻辑在 `req-*.logic.js`。busy 落盘镜像供崩溃恢复，`healStaleBusy` 兜底续跑链泄漏。
+HTTP `/api/req/*` → `routes-requirements.js`（单入口分发）/ `routes-req-v2.js` → `requirement-ops.js` 编排：`startRequirementPump` 单泵按串行闸出队（busy 空且该 conv 无活跃 run）→ 直调 `startClaudeRun` 或 `runClaude`；prompt 构造 / 解析等纯逻辑在 `req-*.logic.js`。busy 落盘镜像供崩溃恢复，`healStaleBusy` 兜底续跑链泄漏。系统任务 kind 现有 `docgen / quizgen / mapgen / mapfix / mapchange / mapregen / bug-fix / colleague-dev`；`colleague-dev` 落在**子会话**而非主会话，`busy.convId` 因此是双重契约 —— 前端接流（`req-chat.js#mountReqChrome`）与 `isBusyStale` / `recoverBusyOnBoot` 查待续跑登记都以它为准，拿主会话 convId 查会把续跑中的任务误判成泄漏、清 busy 击穿串行闸。
 
 ### F. 项目体检 / 优化
 HTTP `/api/optimize/*` → `routes-optimize.js` → `optimize-ops.js`：静态维度同步返回，`prompts`/`comments` 两个 LLM 维度后台并行跑、经 SSE（借 `store/runs` 的 `sendTo`）回填；带串行闸防同目录并发重复烧额度。
@@ -97,4 +102,7 @@ HTTP `/api/optimize/*` → `routes-optimize.js` → `optimize-ops.js`：静态�
 - 要**改需求工作流编排**（docgen / 串行闸 / 崩溃恢复 / busy 自愈），就改 `web/requirement-ops.js`；改需求 HTTP 路由就改 `web/routes-requirements.js` 或 `web/routes-req-v2.js`；改 prompt / 解析等纯逻辑就改对应 `web/req-*.logic.js`；改测试期 bitable 巡检就改 `web/req-inspect.js`；改避坑清单读写就改 `web/req-pitfalls.js`。
 - 要**改体检 / 优化编排**就改 `web/optimize-ops.js`，改其 HTTP 接口就改 `web/routes-optimize.js`。
 - 要**改设置 / token / 凭证 / MCP / 插件启停**就改 `web/routes-settings.js`；改上传 / 目录浏览 / 静态托管就改 `web/routes-files.js`；改日志 / 任务 / 历史 / 动作 / 脚本 / 启动初始化就改 `web/routes-ops.js`；改记忆库 HTTP 就改 `web/routes-memory.js`。
+- 要**改同事消息中继**：文本链路在 `src/plugins/colleague-relay/`（feature order=35，靠 dispatch 的 intents 段 PASS 回落 feedback），附件链路在 `feishu/index.js` 的 image/file 分支 —— **附件在 dispatch 之前就被接走，两条链路必须共用 `colleague-relay/logic.js` 的 `resolveTargets`**；web 侧读写端点在 `web/routes-requirements.js` 的 `/api/req/colleague-messages*`。四期自动处理的入口是同文件的 `POST /api/req/colleague-messages/auto`（飞书进程经 `plugins/colleague-relay/auto-notify.js` 跨进程触发，插件开关**只在这条路由认**——附件链路是刻意绕过开关的），编排在 `web/colleague-auto.js`，执行在 `web/colleague-dev.js`；改分类 prompt / 简报文案改 `web/colleague-auto.logic.js`。
+- 要**改同事名册 HTTP 接口**就改 `web/routes-colleagues.js`；要改需求的开发人员指派就改 `web/routes-requirements.js` 的 `handleAssignees`（刻意独立于 `handleConfig`，理由见其注释）。
+- 要**改 BUG 巡检循环**：HTTP 端点改 `web/routes-patrol.js`，泵与状态机改 `plugins/team-tools/bug-patrol/loop.js`（泵由 `server.js` 的 listen 回调启动，与 `startAutoDevPump` 同范式）。
 - 要**改路由分发或启动自检逻辑**（而非某条具体路由），就改 `web/route-match.js`——它是唯一不依赖真实服务即可测试的分发层。

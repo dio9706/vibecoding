@@ -32,7 +32,7 @@
 - **L0 寒暄**：`isChitchat(text)` 命中 → `other`（免 LLM）。此函数先卡 `CHITCHAT_MAX_LEN`(60) 再跑 `CHITCHAT_RE`——长度护栏是为防带 `+` 的多选择支正则对长输入灾难性回溯占死事件循环（真实事故，勿删）。
 - **L1 强前缀**：调 `intent-keywords.js` 的 `matchStrongIntent(text)`。命中 bug/feature 直接短路返回（`strong:true`，`body` 为剥掉前缀的正文）；命中 question 则**先不返回**，让路给 L2。
 - **L2 动作关键词单命中**：`enabledActions()`（动态 import `../store/action-configs.js` + `../store/settings.js`，取当前启用 bot 的动作）按 `keywords.includes` 匹配。恰好单命中 → `action`。L1 判 question 时用剥好的 `body` 在此再匹配一次，命中即改判 action（避免「请问能帮我清一下 test 环境吗」被 question 劫持）；未命中才落回 question 返回。
-- **L3 语义分类**：`quickClassify` 拼 prompt 后调 `../capabilities/llm-classify.js` 的 `runClassifierOnce`（一次 Haiku 合并分类，`INTENT_CLASSIFY_TIMEOUT_MS`=10s）。命中且非 other → 返回对应类型。
+- **L3 语义分类**：`quickClassify` 拼 prompt 后调 `../capabilities/llm-classify.js` 的 `runClassifierOnce`（一次 Haiku 合并分类，`INTENT_CLASSIFY_TIMEOUT_MS`=10s）。命中且非 other → 返回对应类型。命中 action 时额外带 `via:'llm'` —— 这是「本次动作是花了一次模型调用才认出来的」的唯一凭据，`plugins/action-runner` 据此决定执行成功后要不要学关键词（L2 命中的不带，本来就零成本）。
 - **L4 兜底**：L3 失败/超时/other 一律返回 `other`——**不退回全文关键词兜底**（那正是旧版误立案的来源），交给 dispatch 回引导文案。
 
 控制流：`intent.js` → `intent-keywords.js`（`matchStrongIntent`）、`../capabilities/llm-classify.js`（`runClassifierOnce`）、`../shared/config.js`（`config.intent.classifyModel`），并动态 import `../store/action-configs.js` / `../store/settings.js`。

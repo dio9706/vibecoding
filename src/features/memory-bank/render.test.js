@@ -153,3 +153,50 @@ test('v2 memory 含未知 category 时，必须计入 truncated 而非静默丢�
   assert.equal(truncated, 1, '被挡掉的 v2 memory 必须诚实计入 truncated');
   assert.equal(text, '', '无可渲染条目时 text 应为空串');
 });
+
+// ── 排序修复（2026-09-18）────────────────────────────────────────────────────
+// 旧 normalizeMem 无条件写死 inject/scope/evidenceCount/source，导致 weight() 对每条
+// 算出同一个值、explicit 优先级从未生效 ——「哪 40 条进 CLAUDE.md」实际由数组下标决定。
+
+test('v2 memory 的 explicit 字段驱动排序：明说的压过推断的', () => {
+  const items = [
+    v2mem({ id: 'a', category: 'code-style', statement: '推断来的', explicit: false }),
+    v2mem({ id: 'b', category: 'collaboration', statement: '明说的', explicit: true }),
+  ];
+  const { included } = selectForInjection(items, { scope: 'global', now: NOW, maxItems: 2, maxChars: 500 });
+  assert.equal(included.length, 2);
+  assert.equal(included[0].statement, '明说的', 'explicit 条目必须排在最前');
+});
+
+test('v2 memory 的 evidenceCount 参与权重，强证据排前', () => {
+  const items = [
+    v2mem({ id: 'a', statement: '弱证据', evidenceCount: 1 }),
+    v2mem({ id: 'b', statement: '强证据', evidenceCount: 3 }),
+  ];
+  const { included } = selectForInjection(items, { scope: 'global', now: NOW, maxItems: 2, maxChars: 500 });
+  assert.equal(included[0].statement, '强证据');
+});
+
+test('normalizeMem 不覆盖条目自带的 inject', () => {
+  const items = [v2mem({ statement: '被关掉的', inject: false })];
+  const { included } = selectForInjection(items, { scope: 'global', now: NOW, maxItems: 5, maxChars: 500 });
+  assert.equal(included.length, 0, 'inject:false 的条目不该被强制打开');
+});
+
+test('normalizeMem 不覆盖条目自带的 status', () => {
+  const items = [v2mem({ statement: '休眠的', status: 'dormant' })];
+  const { included } = selectForInjection(items, { scope: 'global', now: NOW, maxItems: 5, maxChars: 500 });
+  assert.equal(included.length, 0, 'dormant 条目不该被强制转 active');
+});
+
+test('回归：v1 条目自带的 source=explicit 不被 explicit 字段的缺失降级', () => {
+  // v1 条目（promote.js 产出）有 source 没有 explicit。若归一时无条件用
+  // `explicit===true ? 'explicit' : 'inferred'` 推导，这类条目会被静默降级，
+  // 用户明说的规矩就此失去优先级。
+  const items = [
+    item({ id: 'a', source: 'inferred', statement: '推断的', evidenceCount: 9 }),
+    item({ id: 'b', source: 'explicit', statement: 'v1 明说的', evidenceCount: 1 }),
+  ];
+  const { included } = selectForInjection(items, { scope: 'global', now: NOW, maxItems: 2, maxChars: 500 });
+  assert.equal(included[0].statement, 'v1 明说的');
+});

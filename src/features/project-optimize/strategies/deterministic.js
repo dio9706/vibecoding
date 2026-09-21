@@ -85,9 +85,13 @@ async function applyIgnore(dir, issues) {
 
   // 逐个 untrack。一个失败不影响其它——它们互相独立，
   // 而部分成功比整批放弃有用（用户看到哪几条没成，可以手工补）
+  //
+  // `-r` 是必需的：H4_TOOL_BACKUP_TRACKED 的目标是**目录**（.claude/optimize-backup），
+  // 不带 -r 的话 git 直接报 "not removing ... recursively without -r" 整条失败。
+  // 对单个文件加 -r 无任何副作用，所以不必按 issue 类型分支。
   for (const rel of rels) {
     try {
-      await exec('git', ['rm', '--cached', '--quiet', '--', rel], {
+      await exec('git', ['rm', '--cached', '--quiet', '-r', '--', rel], {
         cwd: dir, windowsHide: true, timeout: GIT_TIMEOUT_MS,
       });
       results.push({

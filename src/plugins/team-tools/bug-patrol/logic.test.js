@@ -15,6 +15,11 @@ import {
   recordTitle,
   buildRecordDetail,
   buildPatrolSummary,
+  collectImageAttachments,
+  filterUnseen,
+  parseReqChoice,
+  buildStartReply,
+  buildReqChoicePrompt,
 } from './logic.js';
 
 // —— 触发文案常量本身的回归锚点（严格匹配的“规格”就是这两个字符串，改动必须是有意的）——
@@ -180,4 +185,107 @@ test('buildPatrolSummary：零命中 / 混合结果 / 跳过表', () => {
   assert.match(s, /B — 非本项目/);
   assert.match(s, /C — 写表失败/);
   assert.match(s, /表2 — 未识别出状态字段/);
+});
+
+// —— 循环巡检（\10004 / 20min 待命复查）新增的纯函数 ——
+
+test('filterUnseen：已判过的 recordId 被过滤掉（成本护栏）', () => {
+  const records = [{ record_id: 'r1' }, { record_id: 'r2' }, { record_id: 'r3' }];
+  const seen = { r1: { verdict: 'reject' }, r3: { verdict: 'fix', side: 'backend' } };
+  assert.deepEqual(
+    filterUnseen(records, seen).map((r) => r.record_id),
+    ['r2'],
+  );
+});
+
+test('filterUnseen：seen 为空/非法 → 原样返回（不吞记录）', () => {
+  const records = [{ record_id: 'r1' }];
+  assert.equal(filterUnseen(records, {}).length, 1);
+  assert.equal(filterUnseen(records, null).length, 1);
+  assert.equal(filterUnseen(records, 'bad').length, 1);
+  assert.equal(filterUnseen(null, {}).length, 0);
+});
+
+test('parseReqChoice：解析 1-based 序号，越界/非数字返回 null', () => {
+  assert.equal(parseReqChoice('2', 3), 1); // 返回 0-based 下标
+  assert.equal(parseReqChoice(' 1 ', 3), 0);
+  assert.equal(parseReqChoice('3', 3), 2);
+  assert.equal(parseReqChoice('4', 3), null); // 越界
+  assert.equal(parseReqChoice('0', 3), null);
+  assert.equal(parseReqChoice('abc', 3), null);
+  assert.equal(parseReqChoice('1个', 3), null); // 带尾字不认，避免把正文误判成选择
+  assert.equal(parseReqChoice('', 3), null);
+  assert.equal(parseReqChoice(null, 3), null);
+});
+
+test('buildStartReply：有需求名则回显，无则给出未关联说明', () => {
+  const withReq = buildStartReply('订单中心改版');
+  assert.match(withReq, /关联需求：订单中心改版/);
+  assert.match(withReq, /每 20 分钟/);
+  assert.match(withReq, /\\10004/);
+
+  const without = buildStartReply(null);
+  assert.doesNotMatch(without, /关联需求/);
+  assert.match(without, /未找到测试期需求/);
+  assert.match(without, /\\10004/); // 停止指令两种情况都要给
+});
+
+test('collectImageAttachments：只收 image/* 附件，按字段归类', () => {
+  const rec = {
+    fields: {
+      流程佐证: [{ file_token: 'ft1', name: 'a.jpg', type: 'image/jpeg' }],
+      优化后的UI: [
+        { file_token: 'ft2', name: 'b.png', type: 'image/png' },
+        { file_token: 'ft3', name: 'c.mp4', type: 'video/mp4' }, // 非图片，不收
+      ],
+    },
+  };
+  assert.deepEqual(collectImageAttachments(rec), [
+    { field: '流程佐证', fileToken: 'ft1', name: 'a.jpg', type: 'image/jpeg' },
+    { field: '优化后的UI', fileToken: 'ft2', name: 'b.png', type: 'image/png' },
+  ]);
+});
+
+test('collectImageAttachments：人员/多选字段不会被误当附件（判据是 file_token）', () => {
+  const rec = {
+    fields: {
+      处理人: [{ id: 'ou_x', name: '张三' }], // 人员字段：有 name 无 file_token
+      标签: ['A', 'B'], // 多选：字符串数组
+      文本: '普通文本',
+      空附件: [],
+    },
+  };
+  assert.deepEqual(collectImageAttachments(rec), []);
+});
+
+test('collectImageAttachments：空记录/畸形输入不抛错', () => {
+  assert.deepEqual(collectImageAttachments(null), []);
+  assert.deepEqual(collectImageAttachments({}), []);
+  assert.deepEqual(collectImageAttachments({ fields: { x: [null, 42, 'str'] } }), []);
+});
+
+test('buildRecordDetail：带截图时给出路径并明确要求用 Read 查看', () => {
+  const rec = { record_id: 'rec1', fields: { 问题描述: '按钮点不动' } };
+  const s = buildRecordDetail(rec, {
+    tableName: '测试表',
+    images: [{ field: '流程佐证', path: 'C:/tmp/a.jpg' }],
+  });
+  assert.match(s, /【截图】/);
+  assert.match(s, /Read 工具/);
+  assert.match(s, /流程佐证：C:\/tmp\/a\.jpg/);
+});
+
+test('buildRecordDetail：无截图时不出现截图段（行为与改造前一致）', () => {
+  const rec = { record_id: 'rec1', fields: { 问题描述: '按钮点不动' } };
+  const s = buildRecordDetail(rec, { tableName: '测试表' });
+  assert.doesNotMatch(s, /【截图】/);
+  assert.match(s, /问题描述：按钮点不动/);
+});
+
+test('buildReqChoicePrompt：1-based 编号列出，未命名需求有占位', () => {
+  const s = buildReqChoicePrompt([{ title: '需求A' }, { title: '' }]);
+  assert.match(s, /找到 2 个/);
+  assert.match(s, /1\. 需求A/);
+  assert.match(s, /2\. （未命名需求）/);
+  assert.match(s, /取消/);
 });

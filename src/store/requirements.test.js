@@ -6,7 +6,7 @@ import os from 'node:os';
 
 // 隔离数据目录：store/index.js 按 APP_DATA_DIR 定位，须在 import store 之前设置
 process.env.APP_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'req-store-'));
-const { createRequirement, getRequirement, getRequirements, updateRequirement, canTransition, normalizeSessions } =
+const { createRequirement, getRequirement, getRequirements, updateRequirement, deleteRequirement, canTransition, normalizeSessions } =
   await import('./requirements.js');
 
 test('createRequirement：初始 review 期、空骨架、history 有创建记录', () => {
@@ -54,12 +54,43 @@ test('createRequirement：sessions 初始为空数组', () => {
   assert.deepEqual(r.sessions, []);
 });
 
-test('normalizeSessions：sessions 非空直接返回', () => {
+test('normalizeSessions：sessions 非空直接返回，缺 phase 的补需求当前阶段', () => {
   const sessions = [
     { convId: 'conv_123', sessionId: 'sess_456', title: 'Test', kind: 'main', createdAt: '2026-08-11T00:00:00Z' },
   ];
-  const req = { sessions };
-  assert.deepEqual(normalizeSessions(req), sessions);
+  assert.deepEqual(normalizeSessions({ sessions, phase: 'dev' }), [{ ...sessions[0], phase: 'dev' }]);
+});
+
+test('normalizeSessions：已在测试期的存量需求，会话补 test 而非 dev（否则会话树整棵消失）', () => {
+  const sessions = [
+    { convId: 'c_legacy', sessionId: 's1', title: '老会话', kind: 'main', createdAt: '' },
+  ];
+  assert.equal(normalizeSessions({ sessions, phase: 'test' })[0].phase, 'test');
+});
+
+test('normalizeSessions：已有 phase 的会话不被覆盖', () => {
+  const sessions = [
+    { convId: 'c_t', sessionId: null, title: '测试期主会话', kind: 'main', phase: 'test', createdAt: '' },
+    { convId: 'c_d', sessionId: 's1', title: '开发期子会话', kind: 'sub', phase: 'dev', createdAt: '' },
+  ];
+  assert.deepEqual(normalizeSessions({ sessions, phase: 'test' }), sessions);
+});
+
+test('normalizeSessions：混合数组——有 phase 的保留，缺的补当前阶段（迁移期最易出错的形状）', () => {
+  const sessions = [
+    { convId: 'c_d', sessionId: 's1', title: '开发期会话', kind: 'main', phase: 'dev', createdAt: '' },
+    { convId: 'c_x', sessionId: null, title: '未标记会话', kind: 'sub', createdAt: '' },
+  ];
+  const result = normalizeSessions({ sessions, phase: 'test' });
+  assert.equal(result[0].phase, 'dev');
+  assert.equal(result[1].phase, 'test');
+});
+
+test('normalizeSessions：纯函数——不改动入参数组及其元素', () => {
+  const sessions = [{ convId: 'c1', sessionId: null, title: 'x', kind: 'sub', createdAt: '' }];
+  normalizeSessions({ sessions, phase: 'dev' });
+  assert.equal(sessions[0].phase, undefined);
+  assert.equal(sessions.length, 1);
 });
 
 test('normalizeSessions：sessions 空但 convId 非空 → 合成主会话', () => {
@@ -68,6 +99,7 @@ test('normalizeSessions：sessions 空但 convId 非空 → 合成主会话', ()
     convId: 'conv_123',
     devSession: 'sess_456',
     title: '需求标题',
+    phase: 'test',
     createdAt: '2026-08-11T00:00:00Z',
   };
   const result = normalizeSessions(req);
@@ -77,6 +109,13 @@ test('normalizeSessions：sessions 空但 convId 非空 → 合成主会话', ()
   assert.equal(result[0].title, '需求标题');
   assert.equal(result[0].kind, 'main');
   assert.equal(result[0].createdAt, '2026-08-11T00:00:00Z');
+  assert.equal(result[0].phase, 'test'); // 路径 2 同样按需求当前阶段打标
+});
+
+test('normalizeSessions：需求连 phase 都没有（极老数据）→ 退到 dev', () => {
+  const req = { sessions: [], convId: 'conv_ancient', devSession: null, title: '远古需求', createdAt: '' };
+  assert.equal(normalizeSessions(req)[0].phase, 'dev');
+  assert.equal(normalizeSessions({ sessions: [{ convId: 'c', title: 'x', kind: 'sub' }] })[0].phase, 'dev');
 });
 
 test('normalizeSessions：sessions 空且 convId 空 → 返回空数组', () => {
@@ -89,4 +128,14 @@ test('normalizeSessions：sessions 空且 convId 空 → 返回空数组', () =>
   };
   const result = normalizeSessions(req);
   assert.deepEqual(result, []);
+});
+
+test('deleteRequirement：物理删除并返回被删记录；不存在返回 null 且不影响其它需求', () => {
+  const a = createRequirement({ title: '待删需求' });
+  const b = createRequirement({ title: '保留需求' });
+  const removed = deleteRequirement(a.id);
+  assert.equal(removed.id, a.id);
+  assert.equal(getRequirement(a.id), null, '删完必须查不到——不是改状态位');
+  assert.equal(getRequirement(b.id).id, b.id, '同批需求不能被连坐');
+  assert.equal(deleteRequirement('r_none'), null);
 });

@@ -21,6 +21,9 @@ import { develop } from '../task-ops.js';
 import { currentBranch, commitAll, ensureAutoWorktree, commitResidue, checkoutNewFromBaseArgs } from './git.js';
 import { taskBranchName, buildCommitMessage } from './logic.js';
 import { notifyTaskDone } from '../task-notify.js';
+// 自动合并复用与人工路径同一套编排（merged/mergedAt/mergeError 写法、钩子绕过留痕全部继承）。
+// 依赖链 auto-dev/index → task-actions → auto-dev/git 无环：task-actions 只引 git.js，不引本文件。
+import { mergeTaskById } from '../task-actions.js';
 import { compileDevQrcode } from './compile.js';
 import { sendText, sendImageByUrl } from '../../../integrations/lark.js';
 import { runScript } from '../../../integrations/shell.js';
@@ -43,6 +46,7 @@ export function startAutoDevPump() {
   pumpTimer = setInterval(() => {
     tick().catch((e) => logger.error('auto-dev', 'pump 异常', { err: e?.message || String(e) }));
   }, POLL_MS);
+  pumpTimer.unref(); // 与 requirement-ops 的泵一致：常驻进程不受影响，但别拖住测试进程退出
   logger.info('auto-dev', '自动开发泵已启动');
 }
 
@@ -144,9 +148,17 @@ async function runOne(task) {
   }
 
   // developing → done：仅在改码已提交后推进，保证重启恢复不变量
-  updateTask(task.id, { status: 'done' }, '自动开发完成，待确认合并');
-  // 飞书私聊卡片通知（管理员本人：合并/补充/放弃）。现读盘上值传入 —— 分支/基线是上面
-  // 分步写入的，卡片要靠它们判「待合并态」才给出合并按钮。fire-and-forget，失败不影响后续流程。
+  updateTask(task.id, { status: 'done' }, '自动开发完成');
+
+  // 自动合并回基线分支（用户拍板：全部自动任务统一自动合并）。
+  // 必须在 status='done' 之后调 —— mergeTaskById 的 isAwaitingMerge 谓词要求这个状态。
+  // 失败（冲突 / 脏文件被覆盖）即静默降级回「待人工合并」态：任务仍是 done + mergeError、
+  // merged 仍为 false，面板与飞书卡片照旧给合并按钮，不写任何新分支逻辑。
+  const mg = await mergeTaskById(task.id, { auto: true });
+  if (!mg.ok) logger.warn('auto-dev', '自动合并失败，退回待人工合并', { id: task.id, err: mg.error });
+
+  // 飞书私聊卡片通知（管理员本人）。现读盘上值传入 —— 分支/基线/合并结果都是上面分步写入的，
+  // 卡片要靠它们决定给「合并」还是「已自动合并」。fire-and-forget，失败不影响后续流程。
   notifyTaskDone(getTask(task.id), true);
 
   // 脱离到 detached HEAD：残留自愈提交不会落在待合并分支上
@@ -161,7 +173,7 @@ async function runOne(task) {
   } catch (e) {
     logger.warn('auto-dev', '编译二维码失败（忽略）', { id: task.id, err: e?.message || String(e) });
   }
-  await replySource(task, true, qrUrl, null, { branch, baseBranch });
+  await replySource(task, true, qrUrl, null, { branch, baseBranch, merged: mg.ok, mergeError: mg.error });
 }
 
 /** 回复来源会话（仅飞书源且有 chatId）；群聊 @ 提交人；失败仅告警不阻塞 */
@@ -173,10 +185,12 @@ async function replySource(task, ok, qrUrl, failReason, branchInfo) {
   const at = atPrefix(task.source?.openId, task.source?.chatType);
   try {
     if (ok) {
-      await sendText(
-        chatId,
-        `${at}✅ ${tag}「${task.title}」已自动完成（分支 ${branchInfo?.branch}），等待管理员确认合并到 ${branchInfo?.baseBranch}。`,
-      );
+      // 自动合并成功是常态；失败时必须说清「还没进主干」，否则提交人会以为已经上线了
+      const line = branchInfo?.merged
+        ? `${at}✅ ${tag}「${task.title}」已自动完成并合并到 ${branchInfo?.baseBranch}（分支 ${branchInfo?.branch}）。`
+        : `${at}✅ ${tag}「${task.title}」已自动完成（分支 ${branchInfo?.branch}），` +
+          `但自动合并未成功${branchInfo?.mergeError ? '：' + branchInfo.mergeError : ''}，等待管理员确认合并到 ${branchInfo?.baseBranch}。`;
+      await sendText(chatId, line);
       if (qrUrl) await sendImageByUrl(chatId, qrUrl);
     } else {
       await sendText(chatId, `${at}❌ ${tag}「${task.title}」自动处理失败${failReason ? '：' + failReason : ''}，已转人工处理。`);

@@ -17,8 +17,8 @@ import {
   DOCGEN_GUIDE,
 } from './requirement-ops.js';
 import { pickCwdAndDirs } from './req-logic.js';
-import { UNSURE_VALUE } from './req-quiz.logic.js';
-import { collectAnnotLines } from './req-map.logic.js';
+import { sanitizeAnswers } from './req-quiz.logic.js';
+import { collectAnnotLines, mergeFigmas } from './req-map.logic.js';
 import { buildRestorePrompt, buildSpecDraftPrompt } from './req-uispec.logic.js';
 import { readUiSpec, writeUiSpec } from '../../store/ui-specs.js';
 import { sendJson } from './http-util.js';
@@ -91,6 +91,31 @@ function handlePrimePut(req, res) {
   });
 }
 
+// ==== POST /api/req/quiz/draft {id, answers} —— 逐题保存进度（不校验必答、不触发生成）====
+// 与 PUT 的分工：PUT 是**定稿**（必答校验 + 入队 docgen），本端点只把答到一半的进度落盘。
+// 没有它的话，中途关页 / 切需求 / 点取消都会让已答的题白答——答案本就该是服务端状态，
+// 不该只活在前端内存里（这也是本项目「关窗续跑」的一贯口径）。
+//
+// 刻意**不挡 busy**：挡了草稿就会静默丢失，而用户根本不知道自己白答了；
+// 草稿写入对任何在跑的任务都无害——期间若重新出题，quizgen 会整体覆盖 quiz 对象，
+// 过期 qid 也会被 sanitizeAnswers 自然清掉。
+function handleQuizDraft(req, res) {
+  return withJsonBody(req, res, (data) => {
+    const id = str(data.id);
+    const r = mustGet(res, id);
+    if (!r) return;
+    // 只接待答问卷：已定稿（answered）的问卷再被写入会让 status 与 answers 对不上
+    if (r.quiz?.status !== 'ready') return sendJson(res, 409, { error: '当前没有待答问卷' });
+
+    // **整份替换**而非增量合并：调用方每次都发完整答案表。合并语义看似更省流量，
+    // 但那样用户改主意取消某题的作答就永远删不掉了（前端也确实是整份发）。
+    const answers = sanitizeAnswers(r.quiz, data.answers, ANNOT_TEXT_MAX);
+    // 与 prime 自动保存同理：逐题写 history 会把时间线冲爆，故省略 event 即不留痕
+    updateRequirement(id, { quiz: { ...r.quiz, answers } });
+    sendJson(res, 200, { ok: true, saved: Object.keys(answers).length });
+  });
+}
+
 // ==== PUT /api/req/quiz {id, answers} —— 存答案并触发 docgen ====
 function handleQuizAnswers(req, res) {
   return withJsonBody(req, res, (data) => {
@@ -101,20 +126,7 @@ function handleQuizAnswers(req, res) {
     if (!r.quiz?.questions?.length) return sendJson(res, 409, { error: '当前没有待答问卷' });
     if (r.busy || hasQueuedTasks(id)) return sendJson(res, 409, { error: '已有任务在进行或排队' });
 
-    // 只认问卷里真实存在的题与选项：前端传错/脏数据不该污染 docgen prompt。
-    // UNSURE_VALUE 是前端注入的「不确定」，不在 LLM 出的 opts 里，需显式放行。
-    const valid = new Map(r.quiz.questions.map((q) => [q.id, new Set(q.opts.map((o) => o.v))]));
-    const incoming = data.answers && typeof data.answers === 'object' ? data.answers : {};
-    const answers = {};
-    for (const [qid, a] of Object.entries(incoming)) {
-      const opts = valid.get(qid);
-      if (!opts) continue;
-      const v = str(a?.v);
-      // 必答规则下「只写补充不选项」不再算作答：逃生口是每题的「不确定」，
-      // 而不是留空。否则前端的必答校验形同虚设，绕过接口就能提交半份问卷。
-      if (!opts.has(v) && v !== UNSURE_VALUE) continue;
-      answers[qid] = { v, note: str(a?.note).slice(0, ANNOT_TEXT_MAX) };
-    }
+    const answers = sanitizeAnswers(r.quiz, data.answers, ANNOT_TEXT_MAX);
 
     const total = r.quiz.questions.length;
     const done = Object.keys(answers).length;
@@ -141,7 +153,9 @@ function handleMapGet(url, res) {
   sendJson(res, 200, { map, versions: (r.reqMap?.versions || []).map((x) => ({ v: x.v, at: x.at })) });
 }
 
-// ==== PUT /api/req/map/figma {id, pageId, url, node} —— 挂/解绑设计稿（就地改当前版，不升版本）====
+// ==== PUT /api/req/map/figma {id, pageId, figmas:[{id?,url,label}]} ====
+// 全量覆盖（增 / 删 / 改 label 都走这一个幂等端点）。就地改当前版，不升版本。
+// restoredAt 的存废规则在 mergeFigmas 里，路由层只管取值、落盘、记审计。
 function handleMapFigma(req, res) {
   return withJsonBody(req, res, (data) => {
     const got = mustGetMap(res, str(data.id));
@@ -150,21 +164,14 @@ function handleMapFigma(req, res) {
     const page = map.pages.find((p) => p.id === str(data.pageId));
     if (!page) return sendJson(res, 404, { error: '页面不存在' });
 
-    const url = str(data.url);
-    if (url) {
-      page.figma = { url, node: str(data.node) };
-    } else {
-      // 解绑连带清掉还原时间：设计稿都换了，"已还原"这个状态不再成立
-      page.figma = null;
-      page.restoredAt = null;
-    }
+    page.figmas = mergeFigmas(page.figmas, data.figmas);
     writeMapVersion(r, map);
-    updateRequirement(r.id, {}, (url ? '挂载' : '解绑') + '设计稿：' + page.name);
+    updateRequirement(r.id, {}, '更新设计稿：' + page.name + '（' + page.figmas.length + ' 张）');
     sendJson(res, 200, { ok: true, page });
   });
 }
 
-// ==== POST /api/req/map/restore {id, pageId} —— 按 UI 规范还原 ====
+// ==== POST /api/req/map/restore {id, pageId, figmaId} —— 按 UI 规范还原某一张稿 ====
 // 服务端只负责「记状态 + 拼 prompt」，真正的发送由前端 sendMessageProgrammatically 完成
 //（与 API 文档上传后自动发对照修正消息同款范式，见 req-chat.js）。
 function handleMapRestore(req, res) {
@@ -174,18 +181,20 @@ function handleMapRestore(req, res) {
     const { r, map } = got;
     const page = map.pages.find((p) => p.id === str(data.pageId));
     if (!page) return sendJson(res, 404, { error: '页面不存在' });
+    const figma = (page.figmas || []).find((f) => f.id === str(data.figmaId));
+    if (!figma) return sendJson(res, 404, { error: '该设计稿不存在' });
 
     // UI 规范按「第一个工程」归属，与 docgen/开发任务的 cwd 同源
     const { cwd } = pickCwdAndDirs(r.projects);
     let prompt;
     try {
-      prompt = buildRestorePrompt({ page, specText: readUiSpec(cwd) });
+      prompt = buildRestorePrompt({ page, figma, specText: readUiSpec(cwd) });
     } catch (e) {
       return sendJson(res, 400, { error: e?.message || '无法生成还原任务' });
     }
-    page.restoredAt = new Date().toISOString();
+    figma.restoredAt = new Date().toISOString();
     writeMapVersion(r, map);
-    updateRequirement(r.id, {}, '触发 UI 还原：' + page.name);
+    updateRequirement(r.id, {}, '触发 UI 还原：' + page.name + (figma.label ? ' · ' + figma.label : ''));
     sendJson(res, 200, { ok: true, prompt, hasSpec: !!readUiSpec(cwd).trim() });
   });
 }
@@ -385,6 +394,7 @@ function handleDevPromptClaim(req, res) {
 /** 分发入口：命中返回 true（已处理），未命中返回 false 交回原分发表。 */
 export function handleReqV2Routes(req, res, url, pathname, method) {
   if (pathname === '/api/req/quiz' && method === 'POST') return handleQuizGen(req, res), true;
+  if (pathname === '/api/req/quiz/draft' && method === 'POST') return handleQuizDraft(req, res), true;
   if (pathname === '/api/req/quiz' && method === 'PUT') return handleQuizAnswers(req, res), true;
   if (pathname === '/api/req/prime' && method === 'PUT') return handlePrimePut(req, res), true;
   if (pathname === '/api/req/map' && method === 'GET') return handleMapGet(url, res), true;

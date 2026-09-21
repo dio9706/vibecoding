@@ -227,3 +227,42 @@ test('空选材产出空计划', () => {
   assert.deepEqual(planMapFix({ rootMap: false, modules: [], stale: [], deadLinks: [] }), []);
   assert.deepEqual(planMapFix(), []);
 });
+
+// ---------- selectFixableMap 的下标子集入参 ----------
+
+test('selectFixableMap：传 pickIndices 时只处理选中的下标', () => {
+  const report = {
+    dims: {
+      map: {
+        issues: [
+          { code: 'M1_NO_ROOT_MAP', file: 'CLAUDE.md', fixable: true },
+          { code: 'M2_MISSING_MAP', file: 'src/app/CLAUDE.md', fixable: true },
+        ],
+      },
+    },
+  };
+  const out = selectFixableMap(report, [1]);
+  assert.equal(out.rootMap, false, '没勾 M1 就不该生成根地图');
+  assert.deepEqual(out.modules, ['src/app']);
+});
+
+test('selectFixableMap：不传 pickIndices 时行为与改动前完全一致（回归护栏）', () => {
+  const report = {
+    dims: {
+      map: {
+        issues: [
+          { code: 'M1_NO_ROOT_MAP', file: 'CLAUDE.md', fixable: true },
+          { code: 'M2_MISSING_MAP', file: 'src/app/CLAUDE.md', fixable: true },
+        ],
+      },
+    },
+  };
+  const out = selectFixableMap(report);
+  assert.equal(out.rootMap, true);
+  assert.deepEqual(out.modules, ['src/app']);
+});
+
+test('selectFixableMap：空 pickIndices 数组表示「一条都不选」，不是「全选」', () => {
+  const report = { dims: { map: { issues: [{ code: 'M1_NO_ROOT_MAP', file: 'CLAUDE.md', fixable: true }] } } };
+  assert.equal(selectFixableMap(report, []).rootMap, false);
+});

@@ -176,12 +176,81 @@ export function buildApiFixPrompt({ action, doc }) {
   );
 }
 
-/** BUG 修复 prompt：标题 + 详情 + 只读工程约束。 */
-export function buildBugFixPrompt({ bug }) {
+/**
+ * BUG 修复 prompt：标题 + 详情 + 只读工程约束。
+ *
+ * seed（buildSeedPrompt 产物）仅在**无 Claude session 可续**时前置：测试期换了新主会话，
+ * devSession 是空的，不带背景的话 AI 会在零上下文的新 session 里改代码。有 session 可续时
+ * 不要传，那段背景在会话历史里已经有了，重复塞纯属烧 token。
+ *
+ * ★ seed 必须由**派发方在决定 session 的同一处**推导，不能塞进入队 payload：payload 入队即
+ * 冻结，而 devSession 会在入队与派发之间被回填（前一个系统任务 settle 时），串行闸泵还会把
+ * 这段间隔拉得很长。在入队侧判「有没有 session」，就会出现排队时没有、派发时有了——两个决策
+ * 错开，白烧一份 token。
+ *
+ * @param {{bug: {title: string, detail: string}, seed?: string}} params
+ */
+export function buildBugFixPrompt({ bug, seed = '' }) {
+  const head = seed ? `【需求背景】\n${seed}\n\n` : '';
   return (
+    head +
     `修复以下 BUG：「${bug.title}」\n详情：\n${bug.detail}\n\n` +
     `修复后自查；只读参考工程禁止修改。`
   );
+}
+
+/**
+ * 当前阶段内仍有活跃 run 的会话（阶段流转守卫用）。
+ *
+ * 只看当前阶段：历史阶段的会话即便还挂着 run（理论上不该有，但多标签页/孤儿恢复能造出来），
+ * 也不该拦住本阶段的流转——那是上个阶段遗留的事，不归这一次流转管。
+ *
+ * `!s.phase` 是冗余防御：normalizeSessions 已保证每条都带 phase，这里只兜住绕过它的调用方。
+ * 真正的存量迁移在 normalizeSessions（store 层），不在这儿。取「视为当前阶段」而非跳过，
+ * 是守卫该有的失败方向——宁可多拦一次，也不能放一个还在改代码的 run 溜进下个阶段。
+ *
+ * @param {object[]} sessions - normalizeSessions 的产物
+ * @param {string} currentPhase - 需求**当前**阶段。绝不能传流转目标阶段：那会让守卫检查一批
+ *   还不存在的会话、对正在跑的那批视而不见，真空通过。（调用点 phaseGuard 的作用域里
+ *   正好有个 toPhase，名字还更顺手，这个形参名就是拿来挡它的。）
+ * @param {(convId: string) => boolean} hasActive - 注入 store/runs 的 hasActiveRunForConv。
+ *   本层零 IO 不能 import store，只能注入；顺带让函数可直测。
+ * @returns {{convId: string, title: string}[]} 供 409 响应列给用户看
+ */
+export function runningSessions(sessions, currentPhase, hasActive) {
+  // hasActive 排在最后：它是对全部 run 的线性扫描，让 convId / phase 两个廉价判据先滤掉大部分
+  return (sessions || [])
+    .filter((s) => s.convId && (!s.phase || s.phase === currentPhase) && hasActive(s.convId))
+    .map((s) => ({ convId: s.convId, title: s.title || s.convId }));
+}
+
+/**
+ * 功能文件快照：基于历史 git diff 收割的「本功能模块常改哪些文件」，喂给 buildSeedPrompt 收窄探索范围。
+ *
+ * 两个判据性质不同，改动前先分清：
+ * - `!req.featureTag` 是**内禀约束**——没标签就没有快照可言，对任何调用方都成立，不可动。
+ * - dev/test 之外返回 null 是**展示策略**——「离开开发测试期的快照不值得再展示」是我们的取舍，
+ *   不是数据约束。策略正是调用方有朝一日会合理分歧的东西。
+ * 现在它留在函数内，因为两个调用方（handleGet 的 seed 预览、dispatchSystemTask 的 bug-fix prompt）
+ * 口径一致；上移只会把刚消掉的重复换成两份阶段清单再长回来。真出现第三个调用方要求不同阶段策略时
+ * （归档报告、需求只读回看是现实候选），再把策略交还调用点——但别现在预留开关参数，YAGNI。
+ *
+ * readTopFiles 是**必填位置参数、不给默认值**：本层零 IO（本文件至今零 import 语句），
+ * 给默认值就得 import store/feature-index，当场破掉分层属性。这里不能照抄 requirement-ops.js
+ * 里 `canDispatch(req, hasActive = hasActiveRunForConv)` 的默认值写法——那个函数住在允许
+ * import store 的层。形态对齐本文件的 runningSessions。
+ *
+ * 空数组与 null 同等对待：调用方要的是「有没有快照」，一个空的 files 节只会误导模型。
+ * 不写成 `files ? ...`，是不想依赖 getTopFiles「恒返回 null 而非 []」这个实现细节。
+ *
+ * @param {object} req - 需求对象（只读 featureTag / phase）
+ * @param {(tag: string) => object[]|null} readTopFiles - 注入 store/feature-index 的 getTopFiles
+ * @returns {{tag: string, files: object[]}|null}
+ */
+export function buildFeatureSnapshot(req, readTopFiles) {
+  if (!req.featureTag || (req.phase !== 'dev' && req.phase !== 'test')) return null;
+  const files = readTopFiles(req.featureTag);
+  return files?.length ? { tag: req.featureTag, files } : null;
 }
 
 /**
@@ -362,6 +431,113 @@ export function reqBranchName(req) {
  * 双工程场景下后写入的那条会把先写入的覆盖掉，档案里两个工程会显示同一份提交摘要。
  * dir 在同一需求内对每个工程唯一，天然避免这个碰撞。
  */
+/**
+ * 定稿（评审 → 开发）时给开发人员发的私聊文案。
+ *
+ * 口吻是机器人第一人称：给后端说「接口文档到了发给我」的前提是机器人在写前端；
+ * 纯后端工程时机器人自己就写后端、不需要别人给接口文档，所以那条换成通用措辞。
+ * `backendOnly` 由调用方按 devProjects（只含 backend）判定，不在这里猜。
+ *
+ * 只发产品 / 前端 / 后端三类：运营与 UI 设计没有约定过文案，宁可不发也不凭空编一句。
+ * 被跳过的分三类回报给调用方，让用户知道「谁没收到、为什么」——
+ * 静默不发会让人以为消息到了，等着对方回复。
+ *
+ * @param {object} p
+ * @param {string} p.title 需求标题（文案里的 [需求名]）
+ * @param {object[]} p.assigneeList `/api/req/get` 的 assigneeList 形状（含 name/role/feishuOpenId/missing）
+ * @param {boolean} p.backendOnly 是否纯后端工程
+ * @returns {{notices: {openId:string,name:string,role:string,text:string}[], skippedNoId: string[], skippedNoRole: string[], skippedMissing: string[]}}
+ */
+export function buildAssigneeNotices({ title, assigneeList, backendOnly }) {
+  const notices = [];
+  const skippedNoId = [];
+  const skippedNoRole = [];
+  const skippedMissing = [];
+  if (!Array.isArray(assigneeList)) return { notices, skippedNoId, skippedNoRole, skippedMissing };
+
+  const text = (role) => {
+    if (role === 'product') return `新需求已收到，${title}，后续有需求变动可以直接和我说 ~`;
+    if (role === 'frontend') return `新需求已收到，${title}，后续有需要我配合可以直接和我说 ~`;
+    // 后端：纯后端工程时机器人自己写后端，不存在「等你的接口文档」
+    return backendOnly
+      ? `新需求已收到，${title}，后续有需要配合可以直接发送给我`
+      : `新需求已收到，${title}，后续接口文档到了可以直接发送给我`;
+  };
+
+  const seen = new Set(); // 同一个 open_id 只发一条：一人兼两职时被连发两遍很怪
+  for (const a of assigneeList) {
+    if (!a || typeof a !== 'object') continue;
+    const name = typeof a.name === 'string' ? a.name : '';
+    if (a.missing) {
+      skippedMissing.push(name);
+      continue;
+    }
+    if (!['product', 'frontend', 'backend'].includes(a.role)) {
+      skippedNoRole.push(name);
+      continue;
+    }
+    const openId = typeof a.feishuOpenId === 'string' ? a.feishuOpenId.trim() : '';
+    if (!openId) {
+      skippedNoId.push(name);
+      continue;
+    }
+    if (seen.has(openId)) continue;
+    seen.add(openId);
+    notices.push({ openId, name, role: a.role, text: text(a.role) });
+  }
+  return { notices, skippedNoId, skippedNoRole, skippedMissing };
+}
+
+/**
+ * 从待发通知里剔除已送达的（定稿重试时用）。
+ *
+ * 为什么按 **openId** 而不是同事 id 记账：`buildAssigneeNotices` 的去重本就是按 openId
+ * （一人兼两职只发一条），两处用同一个键才不会出现「按 id 算没发过、按 openId 算发过」的分叉。
+ *
+ * 为什么要逐人记而不是打一个「已通知」总标记：3 人里 1 成 2 败时，总标记会把那 2 人
+ * 永久挡在补发之外；反过来不打标记又会让已收到的人在重试时再收一遍。只有逐人记账
+ * 才能既不漏也不重复 —— 而漏通知（同事不知道有需求要做）比重复通知严重得多。
+ *
+ * @param {object[]} notices `buildAssigneeNotices` 的 notices
+ * @param {Record<string,string>} notified 已送达账本 `{ [openId]: ISO 时间 }`，脏数据一律当没记录
+ * @returns {object[]} 还需要发的那些
+ */
+export function pickPendingNotices(notices, notified) {
+  if (!Array.isArray(notices)) return [];
+  const done = normalizeNotifiedBook(notified);
+  return notices.filter((n) => !done[n?.openId]);
+}
+
+/**
+ * 已送达账本归一：非普通对象一律当「没记录过」。
+ *
+ * 判据只此一份：读侧（pickPendingNotices）与写侧（定稿后合并回存储）用同一个，
+ * 否则会出现「读的时候当脏数据全发、写的时候又把脏数据展开存回去」这种自相矛盾。
+ */
+export function normalizeNotifiedBook(notified) {
+  return notified && typeof notified === 'object' && !Array.isArray(notified) ? notified : {};
+}
+
+/**
+ * 归档用的开发人员快照。
+ *
+ * 归档是**审计语义**——记的是「当时是谁」，所以固化姓名/职位/open_id 而不是留 id 引用：
+ * 名册里改名、转职、离职删号都不该反向改写已归档的历史记录。这与开发期 `assignees` 存 id
+ * 并不矛盾，那边是「当前负责人」，要的正是跟着名册自动同步。
+ * 已移除的同事也一并留痕：当时确实指派过他，抹掉才是失真。
+ */
+export function buildAssigneeSnapshot(assigneeList) {
+  if (!Array.isArray(assigneeList)) return [];
+  return assigneeList
+    .filter((a) => a && typeof a === 'object')
+    .map((a) => ({
+      name: typeof a.name === 'string' ? a.name : '',
+      role: typeof a.role === 'string' ? a.role : '',
+      roleLabel: typeof a.roleLabel === 'string' ? a.roleLabel : '',
+      feishuOpenId: typeof a.feishuOpenId === 'string' ? a.feishuOpenId : '',
+    }));
+}
+
 export function buildArchiveSummary({ req, note, branchLogs = [] }) {
   const versions = (req.devDoc && req.devDoc.versions) || [];
   const finalVersion = versions.length ? Math.max(...versions.map((v) => v.v)) : 0;
@@ -379,12 +555,21 @@ export function buildArchiveSummary({ req, note, branchLogs = [] }) {
 
   const bugLines = bugs.map((b) => `- [${b.status}] ${b.title}`);
 
+  // 开发人员：读归档快照而非当前名册——档案要回答「当时归谁」，名册后来怎么变都不影响
+  const assignees = Array.isArray(req.archiveAssignees) ? req.archiveAssignees : [];
+  const assigneeLine = assignees.length
+    ? assignees.map((a) => `- ${a.name}${a.roleLabel ? `（${a.roleLabel}）` : ''}`).join('\n')
+    : '（未指派）';
+
   return [
     `# 需求档案：${req.title}`,
     '',
     `## 开发文档（终稿 v${finalVersion}）`,
     '',
     `终稿引用：${finalDocPath}`,
+    '',
+    '## 开发人员',
+    assigneeLine,
     '',
     '## 分支改动',
     branchLines.join('\n'),

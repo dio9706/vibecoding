@@ -59,7 +59,8 @@
 │  │  └─ plugins/  (业务插件，settings 可启停)          │             │
 │  │      ├─ team-tools/    (需求/故障/待办/埋点)       │             │
 │  │      ├─ action-runner/ (特性⑤: 脚本执行)         │             │
-│  │      └─ feishu-relay/  (会话飞书回控)             │             │
+│  │      ├─ feishu-relay/  (会话飞书回控)             │             │
+│  │      └─ colleague-relay/ (同事消息中继→web 自动处理)│             │
 │  │                                                     │             │
 │  │  【状态管理层】src/store/                          │             │
 │  │  ├─ runs.js            (task 管理 + 权限队列)    │             │
@@ -68,6 +69,8 @@
 │  │  ├─ history.js         (特性②: 会话归档)         │             │
 │  │  ├─ settings.js        (特性③④: token 池)       │             │
 │  │  ├─ action-configs.js  (特性⑤: 脚本配置)       │             │
+│  │  ├─ colleagues.js      (同事名册 + 职位枚举)     │             │
+│  │  ├─ colleague-messages.js (同事对话流+未读+AI处理标记)│             │
 │  │  ├─ tasks.json, event-log.jsonl, ...            │             │
 │  │  └─ ...其他运行时状态                             │             │
 │  │                                                     │             │

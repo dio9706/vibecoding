@@ -13,14 +13,15 @@
 import { getConfig as getConfigDefault } from '../../../store/action-configs.js';
 import { setVar } from '../../../store/user-vars.js';
 import { extractVars, pickMissingVars } from './slot-filler.js';
-import { runAction } from './script-runner.js';
+import { runAction, describeTarget } from './script-runner.js';
 import { canRunAction } from './permission.js';
 import { logger } from '../../../shared/logger.js';
 import { msg } from '../../../shared/messages.js';
 import { PASS } from '../../../app/signals.js';
 
 // pendingState: userId(open_id) → { actionId, collected: {...}, waitingFor: varName, ts: number,
-//                                    extracting?: boolean, inbox?: string[] }
+//                                    extracting?: boolean, inbox?: string[],
+//                                    learnSrc?: { text: string } | null }
 const pendingState = new Map();
 
 /**
@@ -43,7 +44,14 @@ function getPending(userId, now = Date.now()) {
 
 /** 写入/刷新中间态（ts 每轮刷新：用户在正常互动就不该被超时打断） */
 function setPending(userId, entry) {
-  pendingState.set(userId, { ...entry, ts: Date.now() });
+  const prev = pendingState.get(userId);
+  // learnSrc 只在 proceedWithAction 首轮写一次，此后靠这里在追问链上透传。
+  // 不透传的话，走到 executeAction 时手里只剩最后一条补槽位的回答（「test」），
+  // 而关键词要学的是**触发那句话**。在这里继承，比让 4 个调用点各自记得带一次可靠。
+  // 不变式：三个调用点的 prev 都是新鲜的 —— handle 入口处刚做过 getPending（带 TTL 剪枝），
+  // 两个追问路径的 prev 就是本轮 getPending 拿到的那条。新增调用点前请先确认这条仍成立。
+  const learnSrc = entry.learnSrc !== undefined ? entry.learnSrc : (prev?.learnSrc ?? null);
+  pendingState.set(userId, { ...entry, learnSrc, ts: Date.now() });
 }
 
 /** 检查该用户是否有未完成的交互（在追问中间态）。now 可注入，便于测超时。 */
@@ -103,7 +111,9 @@ export async function handle(ctx, intentResult, deps = DEFAULT_DEPS) {
     return ctx.reply('你没有执行该操作的权限。');
   }
 
-  return proceedWithAction(ctx, actionConfig, deps);
+  // via==='llm' 才带触发原句下去：只有 L3 兜底认出来的动作值得学关键词，
+  // L2 命中的本来就零成本，卡片按钮入口（card-action.js）更是压根不经过意图识别。
+  return proceedWithAction(ctx, actionConfig, deps, intentResult?.via === 'llm' ? text : null);
 }
 
 /**
@@ -131,7 +141,7 @@ function sendAck(ctx) {
 }
 
 /** 开始某个动作的槽位填充（新请求首轮） */
-async function proceedWithAction(ctx, actionConfig, deps) {
+async function proceedWithAction(ctx, actionConfig, deps, learnText = null) {
   const userId = ctx.user.id;
   const text = ctx.text || '';
 
@@ -140,7 +150,14 @@ async function proceedWithAction(ctx, actionConfig, deps) {
   // 用户等不及先答了「test环境」，这条消息绕过本 feature 走常规意图识别 → 判 other →
   // 回一张「没有识别到你的意图」帮助卡，随后首轮才姗姗来迟地追问同一个字段
   //（实证 app-2026-09-01.log:231-255）。占位后窗口内的消息由 handlePendingResponse 收进 inbox。
-  setPending(userId, { actionId: actionConfig.id, collected: {}, waitingFor: null, extracting: true, inbox: [] });
+  setPending(userId, {
+    actionId: actionConfig.id,
+    collected: {},
+    waitingFor: null,
+    extracting: true,
+    inbox: [],
+    learnSrc: learnText ? { text: learnText } : null,
+  });
 
   try {
     // 从消息提取变量 + 合并持久化。
@@ -167,8 +184,13 @@ async function proceedWithAction(ctx, actionConfig, deps) {
     }
 
     // 所有必填变量已收集 → 执行脚本
+    // 直接用手里的 learnText，不要去读 pendingState —— 慢抽取那 8~17s 里，
+    // 用户可能已经取消本动作、又触发了另一个动作并写进同一个 userId key，
+    // 那时 Map 里躺着的是**别人的**原句。学错原句的后果是永久的（错词进关键词表，
+    // 此后零模型介入直接误触发），比一次误执行严重得多。
+    const learnSrc = learnText ? { text: learnText } : null;
     pendingState.delete(userId);
-    return executeAction(ctx, actionConfig, collected, deps);
+    return executeAction(ctx, actionConfig, collected, deps, learnSrc);
   } catch (e) {
     pendingState.delete(userId);
     logger.error('action-runner', '槽位填充异常', { actionId: actionConfig.id, err: e?.message });
@@ -264,9 +286,11 @@ async function handlePendingResponse(ctx, pending, text, deps) {
       return ctx.reply(next.prompt || `请提供 ${next.label || next.name}`);
     }
 
-    // 全齐 → 执行
+    // 全齐 → 执行。从 pending 取而不是从 Map 取：pending 是本轮 getPending() 刚拿到的条目
+    //（已过 TTL 剪枝），比再读一次 Map 稳（理由同 proceedWithAction 那处）。
+    const learnSrc = pending.learnSrc || null;
     pendingState.delete(userId);
-    return executeAction(ctx, actionConfig, collected, deps);
+    return executeAction(ctx, actionConfig, collected, deps, learnSrc);
   } catch (e) {
     pendingState.delete(userId);
     logger.error('action-runner', '追问处理异常', { actionId: actionConfig.id, err: e?.message });
@@ -275,7 +299,7 @@ async function handlePendingResponse(ctx, pending, text, deps) {
 }
 
 /** 执行脚本并回复结果（含持久变量落盘） */
-async function executeAction(ctx, actionConfig, collectedVars, deps) {
+async function executeAction(ctx, actionConfig, collectedVars, deps, learnSrc = null) {
   const userId = ctx.user.id;
 
   try {
@@ -286,19 +310,56 @@ async function executeAction(ctx, actionConfig, collectedVars, deps) {
       }
     }
 
-    await ctx.reply(`⏳ 正在执行「${actionConfig.name}」…`);
+    // 执行目标（哪个环境、哪个号）必须在 ⏳ 与结果两条回执里都出现 ——
+    // persistent 变量会静默复用上次的值，不回显的话「清错对象」对用户零可观测
+    // （事故实证见 script-runner.js#describeTarget 文档）。
+    const target = describeTarget(actionConfig, collectedVars);
+    const targetSuffix = target ? `\n（${target}）` : '';
+
+    await ctx.reply(`⏳ 正在执行「${actionConfig.name}」…${target ? `\n${target}` : ''}`);
 
     const result = await deps.run(actionConfig, userId, collectedVars);
     const tail = (result.output || '').slice(-800);
 
     if (result.ok) {
-      // 成功：直接回脚本自身输出（脚本已精简为用户关心的一句话），不加框架前缀
-      return ctx.reply(tail.trim() || `✅ ${actionConfig.name}完成`);
+      // 关键词自学习：只在「这次是 L3 兜底认出来的」+「脚本真的跑成功了」时触发。
+      // 执行成功是用户用行为给出的确认 —— 中途取消、脚本失败都不学，
+      // 免得把一次误判固化成永久关键词（见 learn-keywords.js 文件头）。
+      if (learnSrc?.text) fireLearn(actionConfig, learnSrc.text, deps);
+      // 成功：正文就是脚本自身输出（脚本已精简为用户关心的一句话），不加框架前缀。
+      // 脚本一个字都没打时**不许伪造**「✅ xx完成」—— exit 0 只说明脚本自己认为跑完了，
+      // 究竟做了什么无从确认，含糊报成功正是「明明啥也没干却说成功」的帮凶。
+      const body = tail.trim() || `✅ ${actionConfig.name}已执行（退出码 0，但脚本无输出，无法确认结果）`;
+      return ctx.reply(`${body}${targetSuffix}`);
     }
-    return ctx.reply(`❌ 执行失败\n${tail || '(无输出)'}`);
+    return ctx.reply(`❌ 执行失败${targetSuffix}\n${tail || '(无输出)'}`);
   } catch (e) {
     logger.error('action-runner', '执行脚本异常', { actionId: actionConfig.id, err: e?.message });
     return ctx.reply('执行脚本时出错，请稍后重试。');
+  }
+}
+
+/**
+ * 触发关键词自学习：绝不 await、绝不让异常冒泡（与 sendAck 同款姿态）。
+ * 学关键词是锦上添花，失败了用户照样该拿到执行结果。
+ *
+ * 动态 import：学习链要拉起 llm-classify + store，而绝大多数执行根本不走这条路
+ *（L2 命中的、卡片按钮触发的都不学），没必要在模块加载期就把它们拖进来。
+ */
+function fireLearn(actionConfig, sourceText, deps) {
+  const swallow = (e) =>
+    logger.warn('action-runner', '关键词自学习失败（不影响执行结果）', {
+      actionId: actionConfig.id,
+      err: e?.message || String(e),
+    });
+  try {
+    const run = deps.learn
+      ? deps.learn({ action: actionConfig, sourceText })
+      : import('./learn-keywords.js').then((m) =>
+          m.learnKeywords({ action: actionConfig, sourceText }));
+    if (run && typeof run.catch === 'function') run.catch(swallow);
+  } catch (e) {
+    swallow(e);
   }
 }
 

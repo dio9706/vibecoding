@@ -2,6 +2,7 @@
 import { toast, confirmDialog, promptDialog } from './ui.js';
 import { $, debounce, renderMarkdown, lsSet, isMarkdownPath } from './util.js';
 import { decorateUltracode, canEnableUltracode } from './ultracode.logic.js';
+import { decorateFigmaRestore, hasFigmaUrl } from './figma-restore.logic.js';
 import {
   getPromptText, clearPrompt, handleDrop, insertDroppedPaths,
   stashPrompt, restorePrompt, bindComposerDraft,
@@ -14,12 +15,18 @@ import {
 } from './conv-store.js';
 import { bindDirPopover, closeDirModal } from './dir-popover.js';
 import { bindGitSelector, reinitializeGitSelector } from './git-selector.js';
+import { bindOptimizeCwd } from './optimize-view.js';
+import { bindOptimizeBadgeCwd, probeOptimizeBadge, refreshOptimizeBadge } from './optimize-badge.js';
 import { ContextProgress } from './context-progress.js';
 import { AnimeAnimations } from './anim.js';
 import { registerDropZone } from './drag-bus.js';
-import { setIconText, PIN_ICON_SVG, REFRESH_ICON_SVG, WAITING_ICON_SVG } from './icons.js';
+import { setIconText, PIN_ICON_SVG, REFRESH_ICON_SVG, WAITING_ICON_SVG, FIGMA_RESTORE_ICON_SVG } from './icons.js';
 bindDirPopover({ getCwd: () => cwd, selectDir }); // 惰性读 cwd 无 TDZ；selectDir 已提升
-bindGitSelector({ getCwd: () => cwd });
+bindGitSelector({ getCwd: () => cwd }); // 仅注入读取器；首探在 initChat（后端就绪闸门之后）发起
+bindOptimizeCwd({ getCwd: () => cwd }); // 项目优化恒作用于当前项目，不再自带目录选择
+bindOptimizeBadgeCwd({ getCwd: () => cwd }); // 同上：惰性读，此刻 cwd 尚未初始化
+// 挂全局给 app.js 的「展开工具列表」用（项目已有 _setSidebarToolsMode 等同类挂载）
+window._refreshOptimizeBadge = refreshOptimizeBadge;
 // Tauri 桌面版：文件/目录拖入直接插本地路径 chip，无需上传副本。
 // 走拖拽总线而非旧的单槽位 bindTauriDrop——Markdown 查看器也要注册，单槽位会互相覆盖。
 // Web 模式下总线永不触发（tauri://drag-* 不存在），HTML5 + 上传副本路线继续生效。
@@ -142,6 +149,9 @@ export function openMarkdownFile(path) {
       // 否则在 A 会话开了编排做大重构、切到 B 问个小问题，B 的每条消息也会去拉工作流烧额度。
       // 持久化与还原完全照 chatMode 的流程：recordMessage 快照 / persistPrefsToConv 写穿 / applySessionPrefs 还原。
       let chatUltracode = false;
+      // 设计稿精确还原：会话级开关，与 chatUltracode 同策略（不落 localStorage，新会话从关开始）。
+      // 理由相同：在 A 会话开着还原设计稿，切到 B 问别的问题不该被拼上还原指令。
+      let chatFigmaRestore = false;
       let chatActiveTokenLabel = ''; // 当前激活 token 的名称，由 initUiPrefs 从服务端填充
 
       // 额度状态圆点（topbar 右侧，替代原 #ratelimit）
@@ -192,6 +202,7 @@ export function openMarkdownFile(path) {
           if (_urlCwd == null && !_prefsOwnedByConv && cwd === snap.cwd && prefs.defaultCwd && prefs.defaultCwd !== cwd) {
             cwd = prefs.defaultCwd;
             lsSet('claude_cwd', cwd);
+            reinitializeGitSelector(); // 目录被服务端默认值改写：分支必须跟着重扫，否则停在上一个目录的结论
             changed = true;
           }
           if (!_prefsOwnedByConv && chatModel === snap.chatModel && prefs.model && prefs.model !== 'auto' && MODEL_LABELS[prefs.model] && prefs.model !== chatModel) {
@@ -795,6 +806,7 @@ export function renderConvListNow() {
         c.customLabel = chatCustomLabel;
         c.customCredId = chatCustomCredId;
         c.ultracode = chatUltracode; // 每条消息都快照（与 model/mode 同款）；首条消息建会话记录时也会写入，解决「会话还没建就先开了开关」的时序
+        c.figmaRestore = chatFigmaRestore;
         c.updatedAt = Date.now();
         saveConvs(list);
         renderConvListDebounced();
@@ -805,10 +817,12 @@ export function renderConvListNow() {
        * 可跨浏览器续接同一开发会话。不调 renderConvList——本就不该出现在列表里。
        * @returns {string} convId
        */
-      export function createReqConv({ reqId, cwd: reqCwd, session, title, kind = 'sub', seedPending = false, seedText = '' }) {
+      export function createReqConv({ id, reqId, cwd: reqCwd, session, title, kind = 'sub', seedPending = false, seedText = '' }) {
         const list = loadConvs();
+        // 服务端起的子会话（colleague-dev）先于本地存在：按既定 id 补建；已有同 id 直接返回，防重复插入
+        if (id && list.some((c) => c.id === id)) return id;
         const c = {
-          id: 'c' + String(Date.now()),
+          id: id || 'c' + String(Date.now()),
           title: title || '需求会话',
           session: session || null,
           cwd: reqCwd || '',
@@ -837,6 +851,7 @@ export function renderConvListNow() {
         c.customLabel = chatCustomLabel;
         c.customCredId = chatCustomCredId;
         c.ultracode = chatUltracode;
+        c.figmaRestore = chatFigmaRestore;
         saveConvs(list); // 不动 updatedAt：纯偏好变更不改变左栏排序
       }
 
@@ -885,9 +900,13 @@ export function renderConvListNow() {
         lsSet('claude_last_conv', id); // 刷新后自动回到该会话
         currentSession = c.session || null;
         if (typeof c.cwd === 'string') {
+          const cwdChanged = c.cwd !== cwd;
           cwd = c.cwd;
           lsSet('claude_cwd', cwd);
           refreshDirLabel();
+          // 会话可能绑在另一个项目上。分支选择器的 _currentBranch 是模块级状态，
+          // 不重扫就会把上一个项目的分支当成当前分支显示——用户据此误判要不要切分支。
+          if (cwdChanged) reinitializeGitSelector();
         }
         applySessionPrefs(c); // 还原该会话的模型/强度/模式（缺失或不认识则保持现状）
         restorePrompt(c.draft); // 还原该会话未发送的草稿（无则清空，即上面 stash 后的状态）
@@ -971,6 +990,8 @@ export function renderConvListNow() {
         currentSession = null;
         chatUltracode = false; // 新会话从关开始（见变量声明处）
         syncUltracodeRow();
+        chatFigmaRestore = false; // 新会话从关开始（同 chatUltracode，见变量声明处）
+        syncFigmaRestoreBtn();
         // 🔔 飞书通知是会话级偏好，新对话没有登记：同步复位勾选态并停掉旧会话的收件箱轮询
         //（findConv(null) → refreshBtn(null) 取消勾选 + stopPolling），否则会留下「勾着但没登记」的假象
         if (window.__convNotify) window.__convNotify.onConvOpened(null);
@@ -2163,6 +2184,13 @@ export function renderConvListNow() {
         // ultracode 前缀只进 prompt：气泡（上面 addMessage）与记忆库（launchRun 的 typedText）都是原文
         finalText = decorateUltracode(finalText, { on: chatUltracode, provider: chatProvider });
 
+        // 同上：还原指令段只进 prompt，气泡与记忆库存原文
+        if (chatFigmaRestore && chatProvider === 'claude-agent' && !hasFigmaUrl(finalText)) {
+          // 开着却没贴链接：不拦截发送，只提示一次，避免用户以为已经触发了还原
+          toast('未检测到设计稿链接，本条按普通消息发送');
+        }
+        finalText = decorateFigmaRestore(finalText, { on: chatFigmaRestore, provider: chatProvider });
+
         // 先建占位 job（es 待填），立即显示”运行中…”，避免 start 往返期间无反馈
         const job = {
           es: null,
@@ -2897,6 +2925,7 @@ export function renderConvListNow() {
         }
         cwd = p;
         reinitializeGitSelector();
+        probeOptimizeBadge(p); // 换项目：标签必须跟着换，否则会把 A 项目的体检显示在 B 上
         lsSet('claude_cwd', cwd);
         saveUiPrefs(); // 同步到服务端配置
         refreshDirLabel();
@@ -3186,6 +3215,12 @@ export function renderConvListNow() {
           chatUltracode = nextUltracode;
           syncUltracodeRow();
         }
+        // 同款会话级开关，缺字段视为关；不参与 changed 的 toast
+        const nextFigmaRestore = !!prefs.figmaRestore;
+        if (nextFigmaRestore !== chatFigmaRestore) {
+          chatFigmaRestore = nextFigmaRestore;
+          syncFigmaRestoreBtn();
+        }
         if (changed) {
           syncModelUI();
           const lbl =
@@ -3204,6 +3239,23 @@ export function renderConvListNow() {
           refreshCustomModelPills();
           refreshToolsSection();
         }
+      });
+      const figmaRestoreBtn = $('#figmaRestoreBtn');
+      // 用 setIconText 而非 innerHTML：项目统一的图标注入方式（会裹一层 .inline-ic 做对齐）
+      if (figmaRestoreBtn) setIconText(figmaRestoreBtn, FIGMA_RESTORE_ICON_SVG);
+      /** 设计稿精确还原按钮：亮/灭态跟会话级状态；aria-pressed 同步，键盘与读屏可感知 */
+      function syncFigmaRestoreBtn() {
+        if (!figmaRestoreBtn) return;
+        figmaRestoreBtn.classList.toggle('on', chatFigmaRestore);
+        figmaRestoreBtn.setAttribute('aria-pressed', String(chatFigmaRestore));
+      }
+      syncFigmaRestoreBtn();
+      figmaRestoreBtn?.addEventListener('click', () => {
+        chatFigmaRestore = !chatFigmaRestore;
+        persistPrefsToConv(); // 无会话时 no-op，首条消息由 recordMessage 快照带入
+        syncFigmaRestoreBtn();
+        // 不调 saveUiPrefs：会话级偏好，不进服务端全局默认（同 ultracode）
+        if (chatFigmaRestore) toast('设计稿还原已开启：发送含 Figma 链接的消息即自动触发');
       });
       ultracodeToggle?.addEventListener('change', () => {
         if (ultracodeToggle.checked && !canEnableUltracode(chatDisabledTools)) {
@@ -3454,6 +3506,7 @@ export function renderConvListNow() {
       // ---- 启动初始化（聊天相关行，迁自 app.js 启动节；顺序保持原样，由壳编排调用） ----
       export function initChat() {
       refreshDirLabel(); // 回填上次选择的工作目录（localStorage 快速渲染）
+      reinitializeGitSelector(); // 分支选择器首探：必须在此（闸门后）而非模块顶层，否则必踩后端冷启动
       initUiPrefs();     // 异步从服务端同步偏好（跨重启恢复；覆盖 localStorage 默认值）
       bindComposerDraft(persistDraftToConv); // 输入即写穿草稿到当前会话记录
       renderConvList(); // 渲染左侧对话历史

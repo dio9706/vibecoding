@@ -14,6 +14,7 @@
  *
  * 本模块不做 IO、不调 LLM，因此可以整段直测。
  */
+import { ignoredCodesFor } from './ignore.logic.js';
 
 /**
  * 候选原文在 prompt 里的截断长度。
@@ -320,4 +321,48 @@ export function chunk(items, size) {
   const out = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
+}
+
+/**
+ * 这个维度里「会产生 issue 的 code」集合。
+ *
+ * 注册表的 `verdicts` 同时是校验白名单、扣分表、issue 码表（见 registry.js 的字段契约），
+ * 其中 `weight` 为 0 的档位（`OK`）不产出 issue —— 它们也就无从被豁免。
+ */
+export function weightedCodesOf(dim) {
+  return Object.values(dim?.verdicts || {})
+    .filter((v) => v?.weight && v.code)
+    .map((v) => v.code);
+}
+
+/**
+ * 召回后剔除「已被完全豁免」的候选，让它们连 LLM 都不用送 —— 这是豁免机制省额度的那一半。
+ *
+ * ## 为什么规则是「全部 code 都被豁免才剔除」
+ *
+ * 豁免键含 `code`，而召回时**还不知道 code**：code 是判定的产物，候选阶段只有文件和位置。
+ * 所以只能反过来问：这个文件上被豁免的 code，是否已经覆盖了本维度全部会出 issue 的 code？
+ *   - 覆盖了 → 送去判也只会得到已被豁免的结论，纯属烧额度，剔除；
+ *   - 没覆盖 → 必须保留。剔除就等于连没被豁免的那类问题也不查了，那是静默漏报。
+ *
+ * 实践含义：用户要把一个文件从某维度里彻底免掉，通常得点两次「这不是问题」
+ * （比如 structure 的 violation 和 smell 各一次）。第一次只是不显示，第二次才真省额度。
+ *
+ * @param {Array} candidates 召回器产出的候选
+ * @param {object} dim 维度声明
+ * @param {Array} ignores 该项目的豁免记录
+ * @returns {Array} 零豁免时返回传入的同一个数组引用（最常见路径，不产生垃圾）
+ */
+export function excludeIgnoredCandidates(candidates, dim, ignores) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  const rules = (Array.isArray(ignores) ? ignores : []).filter((r) => r?.dim === dim?.id);
+  if (!rules.length || !list.length) return list;
+
+  const codes = weightedCodesOf(dim);
+  if (!codes.length) return list;
+
+  return list.filter((c) => {
+    const ignored = ignoredCodesFor(dim.id, c.file, rules);
+    return !codes.every((code) => ignored.has(code));
+  });
 }

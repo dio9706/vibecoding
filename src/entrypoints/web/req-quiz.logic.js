@@ -8,8 +8,15 @@
 import { parseJsonLoose } from './req-map.logic.js';
 import { projectRoleLines } from './req-logic.js';
 
-/** 题数上下限：少于 MIN 说明没找出真歧义（不如不问），多于 MAX 用户会答烦。 */
-export const QUIZ_MIN = 3;
+/**
+ * 题数上下限。
+ *
+ * MIN 为 1 是刻意的：原先卡在 3，把「模型很克制地只问了 2 个真歧义」和「模型啥也没
+ * 找到」判成了同一种结局（整份作废），克制反而被惩罚，模型也就没有任何动机少问——
+ * 一个改文案的小需求照样凑出七八题。现在只有「一题都没有」才算没找出东西，
+ * 少问是合法的。MAX 仍然保留：多于它用户会答烦。
+ */
+export const QUIZ_MIN = 1;
 export const QUIZ_MAX = 8;
 
 /** 每题选项数上下限。 */
@@ -57,7 +64,9 @@ export function buildQuizPrompt({ reqDocText, projects, primeText = '' }) {
     `  ]\n` +
     `}]\n\n` +
     `硬性要求：\n` +
-    `- 出 ${QUIZ_MIN}-${QUIZ_MAX} 题，每题 ${OPT_MIN}-${OPT_MAX} 个选项。\n` +
+    `- **题数随需求规模走，只问真歧义，绝不凑数**：改动面窄的小需求（如只改文案）问 1-2 题` +
+    `就够，上面五类没踩到的不要硬找；一个歧义都没有时输出空数组 \`[]\`，那是合法结果。\n` +
+    `- 最多 ${QUIZ_MAX} 题，每题 ${OPT_MIN}-${OPT_MAX} 个选项。\n` +
     `- **每题必须恰好有一个选项带 "guess": true**，即「你不问的话就会这么实现」的那个默认答案。\n` +
     `- desc 要写清代价（如「跨页导出，需要后端分页保护」），别写废话。`
   );
@@ -78,7 +87,8 @@ function normalizeOpt(o, i) {
 /**
  * LLM 输出 → 问卷题目数组。
  * 单题不合格就丢单题（模型偶尔漏个字段，不该让整份问卷作废）；
- * 有效题数低于 QUIZ_MIN 才整体抛错——那说明这次是真没找出东西，走降级路径直接 docgen。
+ * 只有一题都不剩才整体抛错——那说明这次是真没找出东西（或模型按契约输出了空数组），
+ * 走降级路径直接 docgen。抛错在这里是**降级信号**而非异常，调用方据此跳过问卷。
  */
 export function parseQuiz(text) {
   const raw = parseJsonLoose(text);
@@ -111,9 +121,39 @@ export function parseQuiz(text) {
   });
 
   if (questions.length < QUIZ_MIN) {
-    throw new Error(`有效题数不足（${questions.length}/${QUIZ_MIN}），本次不出问卷`);
+    throw new Error(`未找出需要澄清的歧义（有效题数 ${questions.length}），本次不出问卷`);
   }
   return questions.slice(0, QUIZ_MAX);
+}
+
+/**
+ * 按当前问卷清洗前端传来的答案表：只认真实存在的题与真实存在的选项。
+ *
+ * 草稿保存与最终提交共用这一份判定 —— 两处各写一遍迟早漂移，而漂移的后果是
+ * 脏数据混进 docgen prompt（模型据此写开发文档，错得无声无息）。
+ *
+ * 过期 qid 被静默丢弃是**刻意**的：用户答到一半时问卷可能被重新生成，
+ * 旧题的答案此刻已无意义，不该报错打断用户，也不该留在盘上。
+ *
+ * @param {object} quiz store 里的问卷对象 { questions, ... }
+ * @param {*} incoming 前端提交的 { [qid]: { v, note } }，任何形状都不得抛错
+ * @param {number} noteMax 补充说明截断长度
+ * @returns {object} 清洗后的答案表
+ */
+export function sanitizeAnswers(quiz, incoming, noteMax) {
+  const valid = new Map((quiz?.questions || []).map((q) => [q.id, new Set(q.opts.map((o) => o.v))]));
+  const src = incoming && typeof incoming === 'object' ? incoming : {};
+  const out = {};
+  for (const [qid, a] of Object.entries(src)) {
+    const opts = valid.get(qid);
+    if (!opts) continue;
+    const v = typeof a?.v === 'string' ? a.v.trim() : '';
+    // 必答规则下「只写补充不选项」不算作答：逃生口是每题的「不确定」，而不是留空。
+    // 否则前端的必答校验形同虚设，绕过接口就能提交半份问卷。
+    if (!opts.has(v) && v !== UNSURE_VALUE) continue;
+    out[qid] = { v, note: (typeof a?.note === 'string' ? a.note.trim() : '').slice(0, noteMax) };
+  }
+  return out;
 }
 
 /**

@@ -12,6 +12,8 @@ import {
   parseImpact,
   collectAnnotLines,
   markFreshPoints,
+  upgradeFigmas,
+  mergeFigmas,
 } from './req-map.logic.js';
 
 // ---- parseJsonLoose ----
@@ -158,21 +160,33 @@ test('normalizeMap 把 src/files 规整为字符串数组', () => {
   assert.deepEqual(m.pages[0].points[0].files, []);
 });
 
-test('normalizeMap 保留旧版的 figma / restoredAt，不被重生成抹掉', () => {
+test('normalizeMap 保留旧版的 figmas，不被重生成抹掉', () => {
   // 地图修订会全量重出 pages，用户挂的设计稿必须按页面名回迁，否则每修订一次就丢一次
   const prev = normalizeMap({ pages: [{ name: 'A', file: 'a.vue' }] });
-  prev.pages[0].figma = { url: 'u', node: 'n' };
-  prev.pages[0].restoredAt = '2026-08-25T00:00:00.000Z';
+  prev.pages[0].figmas = [
+    { id: 'fg-a', url: 'u1', label: '默认态', restoredAt: '2026-08-25T00:00:00.000Z' },
+    { id: 'fg-b', url: 'u2', label: '空态', restoredAt: null },
+  ];
   const next = normalizeMap({ pages: [{ name: 'A', file: 'a.vue' }] }, { prev });
-  assert.deepEqual(next.pages[0].figma, { url: 'u', node: 'n' });
-  assert.equal(next.pages[0].restoredAt, '2026-08-25T00:00:00.000Z');
+  assert.deepEqual(next.pages[0].figmas, prev.pages[0].figmas);
+  assert.equal(next.pages[0].figma, undefined); // 旧字段不再产出
+  assert.equal(next.pages[0].restoredAt, undefined); // restoredAt 已下沉到条目
+});
+
+test('normalizeMap 回迁旧结构的上一版地图时顺带升级为 figmas', () => {
+  // prev 可能来自历史落盘数据，仍是 { figma, restoredAt } 单对象结构
+  const prev = { pages: [{ name: 'A', figma: { url: 'u' }, restoredAt: '2026-08-25T00:00:00.000Z' }] };
+  const next = normalizeMap({ pages: [{ name: 'A' }] }, { prev });
+  assert.deepEqual(next.pages[0].figmas, [
+    { id: 'fg-legacy', url: 'u', label: '', restoredAt: '2026-08-25T00:00:00.000Z' },
+  ]);
 });
 
 test('normalizeMap 回迁只认同名页面，改名的页面不误挂设计稿', () => {
   const prev = normalizeMap({ pages: [{ name: 'A' }] });
-  prev.pages[0].figma = { url: 'u', node: 'n' };
+  prev.pages[0].figmas = [{ id: 'fg-a', url: 'u', label: '', restoredAt: null }];
   const next = normalizeMap({ pages: [{ name: 'B' }] }, { prev });
-  assert.equal(next.pages[0].figma, null);
+  assert.deepEqual(next.pages[0].figmas, []);
 });
 
 // ---- nextMapVersion ----
@@ -181,6 +195,102 @@ test('nextMapVersion 空 → 1，有 → max+1', () => {
   assert.equal(nextMapVersion(null), 1);
   assert.equal(nextMapVersion({ versions: [] }), 1);
   assert.equal(nextMapVersion({ versions: [{ v: 1 }, { v: 3 }] }), 4);
+});
+
+// ---- upgradeFigmas ----
+
+test('upgradeFigmas 把旧版单条 figma + 页面级 restoredAt 升级为 figmas 数组', () => {
+  const page = { figma: { url: 'https://figma.com/x', node: '12:3' }, restoredAt: '2026-08-25T00:00:00.000Z' };
+  assert.deepEqual(upgradeFigmas(page), [
+    { id: 'fg-legacy', url: 'https://figma.com/x', label: '', restoredAt: '2026-08-25T00:00:00.000Z' },
+  ]);
+});
+
+test('upgradeFigmas 是幂等的 —— 升级不落盘，每次读地图都会再跑一遍，同一份旧结构两次独立升级必须出同样的 id', () => {
+  const page = { figma: { url: 'https://figma.com/x' }, restoredAt: null };
+  const once = upgradeFigmas(page);
+  // 直接对同一 page 再跑一遍（模拟「用户没动手，下次读图又升级了一次」），而非只验证结果回灌
+  assert.deepEqual(upgradeFigmas(page), once);
+  assert.deepEqual(upgradeFigmas({ figmas: once }), once);
+});
+
+test('upgradeFigmas 无稿页面给出空数组而非 null', () => {
+  assert.deepEqual(upgradeFigmas({ figma: null, restoredAt: null }), []);
+  assert.deepEqual(upgradeFigmas({}), []);
+  assert.deepEqual(upgradeFigmas(null), []);
+});
+
+test('upgradeFigmas 对新结构补齐缺失字段并丢弃空 url 条目', () => {
+  const out = upgradeFigmas({ figmas: [{ url: 'u1' }, { url: '' }, { id: 'fg-x', url: 'u2', label: '空态' }] });
+  assert.deepEqual(out, [
+    { id: 'fg-1', url: 'u1', label: '', restoredAt: null },
+    { id: 'fg-x', url: 'u2', label: '空态', restoredAt: null },
+  ]);
+});
+
+test('upgradeFigmas 下标兜底 id 与显式 id 撞车时改用去重后缀，不产出重复 id', () => {
+  // 第 2 条缺 id，下标兜底本会算出 'fg-2'，与第 1 条的显式 id 撞车——
+  // 前端按 id 查条目会命中第 1 条，第 2 条的「还原」就打到第 1 条上了
+  const out = upgradeFigmas({ figmas: [{ id: 'fg-2', url: 'a' }, { url: 'b' }] });
+  assert.notEqual(out[0].id, out[1].id);
+  assert.equal(out[0].id, 'fg-2');
+});
+
+// ---- mergeFigmas ----
+
+const PREV = [
+  { id: 'fg-a', url: 'https://figma.com/a', label: '默认态', restoredAt: '2026-09-01T00:00:00.000Z' },
+  { id: 'fg-b', url: 'https://figma.com/b', label: '空态', restoredAt: null },
+];
+
+test('mergeFigmas 只改 label 时保留 restoredAt', () => {
+  const out = mergeFigmas(PREV, [{ id: 'fg-a', url: 'https://figma.com/a', label: '默认' }]);
+  assert.deepEqual(out, [
+    { id: 'fg-a', url: 'https://figma.com/a', label: '默认', restoredAt: '2026-09-01T00:00:00.000Z' },
+  ]);
+});
+
+test('mergeFigmas 换了 url 就清掉 restoredAt —— 换了稿，「已按这张稿还原过」不再成立', () => {
+  const out = mergeFigmas(PREV, [{ id: 'fg-a', url: 'https://figma.com/NEW', label: '默认态' }]);
+  assert.equal(out[0].id, 'fg-a');
+  assert.equal(out[0].restoredAt, null);
+});
+
+test('mergeFigmas 新增条目生成 fg- 前缀 id，restoredAt 为 null', () => {
+  const out = mergeFigmas(PREV, [...PREV, { url: 'https://figma.com/c', label: '导出中' }]);
+  assert.equal(out.length, 3);
+  assert.match(out[2].id, /^fg-/);
+  // 只断言前缀不够：若实现错误地复用了已有 id（如误把它当成第一条的续），/^fg-/ 照样成立
+  assert.notEqual(out[2].id, out[0].id);
+  assert.notEqual(out[2].id, out[1].id);
+  assert.equal(out[2].restoredAt, null);
+  assert.equal(out[2].label, '导出中');
+});
+
+test('mergeFigmas 空 id 的 prev 条目不会被无 id 的新增条目认领', () => {
+  // prev 里存在一条 id 缺失的历史脏数据；incoming 里同样没给 id 的新增条目
+  // 不能因为两边都归一成空串键而在 Map 里「误认亲」，继承走不相干的 restoredAt
+  const prevWithBlankId = [{ id: '', url: 'https://figma.com/old', label: '', restoredAt: '2026-09-01T00:00:00.000Z' }];
+  const out = mergeFigmas(prevWithBlankId, [{ url: 'https://figma.com/old', label: '新增' }]);
+  assert.equal(out.length, 1);
+  assert.notEqual(out[0].id, '');
+  assert.equal(out[0].restoredAt, null);
+});
+
+test('mergeFigmas 丢弃空 url 条目（前端删除就是把该条从列表里剔掉后整表覆盖）', () => {
+  const out = mergeFigmas(PREV, [PREV[0], { id: 'fg-b', url: '  ', label: '空态' }]);
+  assert.deepEqual(out.map((f) => f.id), ['fg-a']);
+});
+
+test('mergeFigmas 不认识的 id 当新增处理，不会把别人的 restoredAt 带过来', () => {
+  const out = mergeFigmas(PREV, [{ id: 'fg-ghost', url: 'https://figma.com/z' }]);
+  assert.notEqual(out[0].id, 'fg-ghost');
+  assert.equal(out[0].restoredAt, null);
+});
+
+test('mergeFigmas 非法入参退化为空数组，不抛错', () => {
+  assert.deepEqual(mergeFigmas(null, null), []);
+  assert.deepEqual(mergeFigmas(undefined, 'nope'), []);
 });
 
 // ---- prompt ----

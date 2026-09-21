@@ -140,3 +140,97 @@ export function deleteConfig(id) {
     return configs;
   });
 }
+
+/**
+ * 自动关键词的默认配额。真正的单一真相源是
+ * `plugins/action-runner/feature/keyword-guard.js` 的 `MAX_AUTO_KEYWORDS`，
+ * 调用方经 `meta.max` 传进来；此处的默认值只为「万一没传」兜底 ——
+ * store 是下层，不能 import plugins（分层单向依赖）。
+ */
+export const DEFAULT_AUTO_KEYWORD_MAX = 5;
+
+/**
+ * 追加一个自动学来的关键词（关键词自学习的专用写入口）。
+ *
+ * ⚠️ 合并全过程必须在 `updateJson` 回调**内部**完成。web 与飞书是两个进程、共享同一份
+ * action-configs.json，在外面 `getConfig()` 再 `updateConfig()` 是读-改-写竞态，
+ * 两边同时学到词会互相覆盖（见本模块 CLAUDE.md 流程 A）。
+ * 去重与配额也必须在锁内**重做一次** —— 调用方过闸时读到的是快照。
+ *
+ * @param {string} id 动作 id
+ * @param {string} word 关键词
+ * @param {{sourceText?:string, max?:number}} [meta] sourceText 为触发原句（截断存证，便于事后复盘）
+ * @returns {boolean} 是否真的写入（false = 动作不存在 / 该词已在 / 配额已满）
+ */
+export function appendAutoKeyword(id, word, meta = {}) {
+  const w = String(word ?? '').trim();
+  if (!w) return false;
+  const max = Number(meta.max) > 0 ? Number(meta.max) : DEFAULT_AUTO_KEYWORD_MAX;
+  let written = false;
+
+  updateConfigs((configs) => {
+    const i = configs.findIndex((c) => c.id === id);
+    if (i < 0) return undefined; // 动作不存在，不写盘
+
+    const cur = configs[i];
+    const keywords = Array.isArray(cur.keywords) ? cur.keywords : [];
+    const autoKeywords = Array.isArray(cur.autoKeywords) ? cur.autoKeywords : [];
+
+    if (keywords.includes(w)) return undefined;        // 锁内复核：已存在
+    if (autoKeywords.length >= max) return undefined;  // 锁内复核：配额
+
+    const now = new Date().toISOString();
+    configs[i] = {
+      ...cur,
+      keywords: [...keywords, w],
+      autoKeywords: [
+        ...autoKeywords,
+        { word: w, sourceText: String(meta.sourceText ?? '').slice(0, 200), learnedAt: now },
+      ],
+      updatedAt: now,
+    };
+    written = true;
+    return configs;
+  });
+
+  return written;
+}
+
+/**
+ * 人工编辑关键词后的元数据对账（纯函数，供 `PUT /api/actions/:id` 调用）。
+ *
+ * 语义：用户在面板上删掉某个**自动词** = 明确否决这个词，它必须进 `rejectedKeywords`。
+ * 否则下次同样的话再来一次，自学习会把用户刚删的词原样加回去 —— 撤销就形同虚设。
+ * 删手工词不算否决（那只是用户在维护自己的词表），不进黑名单。
+ *
+ * ## 已知取舍：改字会被当成删除
+ *
+ * 入参只有两个扁平字符串数组，没有稳定 id，所以分不清「改字」和「删旧词+加新词」。
+ * 用户把自动词「清掉业务表」改成「清掉业务表格」（纠正错别字），旧词会被判定为删除、
+ * 永久进 `rejectedKeywords` —— 今后自学习再也学不回「清掉业务表」这个说法。
+ *
+ * 刻意不修：被拉黑的正是用户自己刚否决掉的那个写法，而他已经有了更准的版本；
+ * 手工添加从不受 `rejectedKeywords` 限制（它只拦自学习）。真要区分，得给每个关键词加稳定 id、
+ * 前端改成结构化编辑 —— 成本远超这点收益。
+ *
+ * @param {object} prev 更新前的动作配置
+ * @param {string[]} nextKeywords 用户提交的新关键词数组
+ * @returns {{autoKeywords:object[], rejectedKeywords:string[]}}
+ */
+export function reconcileAutoKeywords(prev, nextKeywords) {
+  const kept = new Set(
+    (Array.isArray(nextKeywords) ? nextKeywords : []).map((k) => String(k ?? '').trim()),
+  );
+  const prevAuto = Array.isArray(prev?.autoKeywords) ? prev.autoKeywords : [];
+  const prevRejected = Array.isArray(prev?.rejectedKeywords) ? prev.rejectedKeywords : [];
+
+  const autoKeywords = prevAuto.filter((a) => kept.has(String(a?.word ?? '').trim()));
+  const removed = prevAuto
+    .map((a) => String(a?.word ?? '').trim())
+    .filter((w) => w && !kept.has(w));
+
+  return {
+    autoKeywords,
+    rejectedKeywords: [...new Set([...prevRejected, ...removed])],
+  };
+}

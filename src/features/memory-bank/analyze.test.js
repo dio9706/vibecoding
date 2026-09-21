@@ -243,3 +243,24 @@ test('analyzeSession：默认使用 config.intent.classifyModel', async () => {
   // 只验证 model 字段存在且是非空字符串
   assert.ok(typeof receivedOpts.model === 'string' && receivedOpts.model.length > 0);
 });
+
+// ──────────────────────────────────────────────
+// 调用预算与工作目录（2026-09-18 事故：Phase 1 大面积 30s 超时）
+// ──────────────────────────────────────────────
+
+test('analyzeSession：用自己的超时预算，不吃 llm-classify 为「一句话分类」校准的 30s 默认', async () => {
+  let seen = null;
+  const runner = async (opts) => { seen = opts; return { findings: [] }; };
+  await analyzeSession('x'.repeat(200), { _runner: runner });
+  assert.equal(typeof seen.timeoutMs, 'number');
+  // 实测单次分析（8000 字符转录）需 70s，默认 30s 必然 abort
+  assert.ok(seen.timeoutMs >= 90_000, `预算 ${seen.timeoutMs}ms 不足以跑完一次会话分析`);
+});
+
+test('analyzeSession：传干净 cwd，避免 SDK 加载项目 CLAUDE.md / skills / MCP', async () => {
+  let seen = null;
+  const runner = async (opts) => { seen = opts; return { findings: [] }; };
+  await analyzeSession('x'.repeat(200), { _runner: runner });
+  assert.equal(typeof seen.cwd, 'string');
+  assert.ok(seen.cwd.length > 0, '必须显式指定 cwd，否则落到 server 进程的项目根目录');
+});

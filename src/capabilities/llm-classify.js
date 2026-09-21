@@ -154,7 +154,7 @@ export function pickJsonObject(text, requireKeys = []) {
 }
 
 /**
- * 把一次分类调用的终局状态归结为「数据 + 失败原因」。纯函数，三条失败分支各自钉死。
+ * 把一次分类调用的终局状态归结为「数据 + 失败原因」。纯函数，四条失败分支各自钉死。
  *
  * 为什么要区分原因（2026-08-26 事故）：埋点统计的阶段 A 拿到 null 后一律回话
  * 「没听懂这个统计需求，换个说法试试」。而那次的真实情况是模型花了 52.2s 算完、
@@ -166,12 +166,18 @@ export function pickJsonObject(text, requireKeys = []) {
  * 不代表没拿到答案。模型常常早早就把 JSON 吐完了，SDK 流却迟迟不收尾（限流时尤其明显）。
  * 此时手里已有完整结果还回一句失败，是白烧一次额度又骗了用户。
  *
- * @param {{exhausted?:boolean, aborted?:boolean, text?:unknown}} [o]
- * @returns {{data: object|null, reason: 'exhausted'|'timeout'|'unparsable'|null}}
+ * **唯一的例外是 externalAbort**（用户点了中止）：它排在解析之前。此时结果即使能解析出来
+ * 也没有价值——上层 `optimize-ops.land` 的守卫会把已中止 job 的结果一律丢弃。
+ * 更要紧的是它必须与 `timeout` 分开：超时值得重试（audit-engine 就重试一次），
+ * 用户中止绝不该重试，否则「点中止」反而会多烧一轮额度。
+ *
+ * @param {{exhausted?:boolean, aborted?:boolean, externalAbort?:boolean, text?:unknown}} [o]
+ * @returns {{data: object|null, reason: 'exhausted'|'aborted'|'timeout'|'unparsable'|null}}
  */
 export function classifyOutcome(o) {
-  const { exhausted = false, aborted = false, text = '' } = o || {};
+  const { exhausted = false, aborted = false, externalAbort = false, text = '' } = o || {};
   if (exhausted) return { data: null, reason: 'exhausted' };
+  if (externalAbort) return { data: null, reason: 'aborted' };
 
   const block = extractFirstJsonObject(text);
   if (block) {
@@ -194,26 +200,49 @@ export function classifyOutcome(o) {
  * 收益不抵风险 —— runClassifierOnce 就此退化为本函数的一层薄包装。
  *
  * @param {object} opts 同 runClassifierOnce
+ * @param {AbortSignal} [opts.signal] 外部中止信号（体检 job 的 signal）。
+ *   不传即行为与从前完全一致——这是本参数唯一的兼容性承诺，10 个调用点里只有
+ *   体检链路的三处会传。
+ * @param {string} [opts.cwd] SDK 工作目录。**不传就是落到 server 进程的 cwd（本项目根目录）**，
+ *   于是每次分类都要加载该工程的 CLAUDE.md / skills / MCP 定义。对「不读任何文件的单轮分类」
+ *   而言那是纯粹的负担：实测同一 prompt，项目根 cwd 比空目录慢 2.2 倍、贵 2.7 倍，还把输出带偏
+ *   （返回的 JSON 丢了约定的顶层键）。记忆库据此传空沙箱目录，见 features/memory-bank/sandbox.js。
+ *   其余调用点维持原行为不变。
  * @returns {Promise<{data: object|null, reason: string|null}>}
  */
-export async function runClassifierDetailed({ prompt, systemPrompt, model, logTag, timeoutMs, effort }) {
+export async function runClassifierDetailed({
+  prompt, systemPrompt, model, logTag, timeoutMs, effort, signal, cwd,
+}) {
   // 额度耗尽 fail-fast：曾发生五小时限流窗口内 SDK 流永不结束 → 不发起注定失败 / 会 stall 的分类调用
   if (isPoolExhausted(getTokens())) {
     logger.warn('llm-classify', 'token 池全部耗尽，跳过分类（fail-fast）', { logTag });
     return classifyOutcome({ exhausted: true });
   }
+  // 已中止就别发起：这一整轮的结果注定会被上层丢弃，发出去就是纯粹的额度浪费。
+  // 体检有 49 批量级的调用，逐批在这里早退，「点中止」才是真的立刻止血
+  if (signal?.aborted) {
+    logger.info('llm-classify', '外部已中止，跳过本次分类调用', { logTag });
+    return classifyOutcome({ externalAbort: true });
+  }
+
   // 意图分类点传 10s（用户在等第一条回复）；其余调用点不传，沿用 30s
   const budget = Number(timeoutMs) > 0 ? Number(timeoutMs) : CLASSIFY_TIMEOUT_MS;
   const effortOpt = resolveEffort(effort);
   let out = '';
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), budget);
+  // 外部 signal 链到内部 controller。**必须在 finally 里摘掉**：一个体检 job 的 signal
+  // 会被几十个批次挂载（deadcode 实测 19 批 × 多维度并行），不摘就是长跑进程里的泄漏。
+  // `once: true` 只回收「真触发了」的那一个，正常结束的几十个仍要靠 removeEventListener。
+  const onExternalAbort = () => abort.abort();
+  signal?.addEventListener('abort', onExternalAbort, { once: true });
   try {
     // abort 走 SDK 优雅关闭（stdin EOF），限流卡死时流可能迟迟不结束（实测拖 10 分钟+）
     // → 再用 race 兜底：到点不管流死活直接返回，调用方绝不被拖死。
     const call = runClaude(prompt, {
       ...claudeAuthOpts(), // 跟随备用账号轮换，别烧主账号额度
       ...(systemPrompt ? { systemPrompt } : {}),
+      ...(cwd ? { cwd } : {}), // 不传即维持原行为（落 server 进程 cwd），见 JSDoc
       ...(effortOpt ? { effort: effortOpt } : {}),
       persistSession: false, // 内部一次性调用，不落盘 session
       model,
@@ -236,10 +265,16 @@ export async function runClassifierDetailed({ prompt, systemPrompt, model, logTa
     /* 超时 abort 或调用异常 → 落兜底 */
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onExternalAbort);
   }
   // 用 signal.aborted 判超时而不是量耗时：abort 只由上面那个 timer 触发，
   // 它是「预算用尽」的权威信号。拿耗时去猜会在「调用早早异常返回」时误判成超时。
-  return classifyOutcome({ aborted: abort.signal.aborted, text: out });
+  // externalAbort 单独判：同样是 abort.signal.aborted，成因不同、调用方处置相反。
+  return classifyOutcome({
+    aborted: abort.signal.aborted,
+    externalAbort: !!signal?.aborted,
+    text: out,
+  });
 }
 
 /**
@@ -250,6 +285,7 @@ export async function runClassifierDetailed({ prompt, systemPrompt, model, logTa
  * @param {string} opts.logTag        日志标识（如 'intent/feedback'）
  * @param {number} [opts.timeoutMs]   超时预算（默认 CLASSIFY_TIMEOUT_MS=30s；意图分类点传 10s）
  * @param {string|null} [opts.effort] 思考档位（默认 DEFAULT_EFFORT='low'；传 null 显式关闭）
+ * @param {AbortSignal} [opts.signal] 外部中止信号；不传即行为不变
  * @returns {Promise<object|null>}    首个 JSON 对象或 null（失败原因见 runClassifierDetailed）
  */
 export async function runClassifierOnce(opts) {

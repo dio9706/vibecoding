@@ -21,7 +21,7 @@ import path from 'node:path';
 import { gitTrackedFiles } from '../git-tracked.js';
 import { shouldSkipDir } from '../scan-dirs.logic.js';
 import { computeFingerprint } from '../fingerprint.logic.js';
-import { measureFile } from './units.logic.js';
+import { measureFile, scriptOnly } from './units.logic.js';
 import { collectExports } from './symbols.logic.js';
 import { logger } from '../../../shared/logger.js';
 
@@ -34,11 +34,21 @@ import { logger } from '../../../shared/logger.js';
  */
 const MAX_FILE_BYTES = 512 * 1024;
 
-/** 参与代码级维度的扩展名。这张表决定「什么算源码」，比 git 追踪清单更窄 */
-const SOURCE_EXT = new Set([
+/**
+ * 参与代码级维度的扩展名。这张表决定「什么算源码」，比 git 追踪清单更窄。
+ *
+ * 导出供 `check-tests.js` 复用：它原来自持一份只认 `.js/.mjs/.cjs` 的正则，
+ * 于是在 TS 项目上把 106 个 `.test.ts` 全部看不见，报出「项目里没有任何测试文件」——
+ * 而同一个项目的其它 16 个维度（走本表）分析得好好的。**「什么算源码」只该有一份答案。**
+ */
+export const SOURCE_EXT = new Set([
   'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'mts', 'cts',
   'py', 'pyi', 'go', 'java', 'kt', 'kts', 'rs', 'swift',
   'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'php', 'rb', 'scala', 'dart',
+  // 单文件组件：在 Vue / Svelte 项目里业务逻辑主要住在这里。漏掉它等于对半个代码库失明——
+  // 实测 kxmall-app-ui 有 485 个 .vue 对全部代码维度不可见。
+  // 取材时由 units.logic 的 scriptOnly 只留 <script> 段（保行号），template / style 不参与判定
+  'vue', 'svelte',
 ]);
 
 /** 项目自述文件的候选名，按优先级 */
@@ -265,8 +275,11 @@ export async function collectEvidence(dir) {
     if (!SOURCE_EXT.has(extOf(rel))) continue;
     if (GENERATED_FILE.test(rel)) continue;
     if (st.size > MAX_FILE_BYTES) continue;
-    const text = readText(full, MAX_FILE_BYTES);
-    if (text === null) continue;
+    const raw = readText(full, MAX_FILE_BYTES);
+    if (raw === null) continue;
+    // .vue / .svelte 只留 <script> 段（抹掉的行留空行，保住行号）。
+    // 下游拿到的 text 就是「这个文件里算代码的部分」，召回器无需各自认识 SFC
+    const text = scriptOnly(raw, rel);
 
     files.push({ rel, full, text, measure: measureFile(text) });
     sourceStats.push({ path: rel, mtime: st.mtimeMs, size: st.size });

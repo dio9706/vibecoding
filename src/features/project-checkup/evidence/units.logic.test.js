@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   familyOf, toLines, matchFunctionDecl, countParams, sliceUnits,
-  measureFile, normalizeForDuplicate,
+  measureFile, normalizeForDuplicate, scriptOnly,
 } from './units.logic.js';
 
 test('familyOf 按扩展名分家族，不认识的归 unknown', () => {
@@ -147,4 +147,65 @@ test('normalizeForDuplicate 归一字面量与空白，但保留标识符差异'
 
   const c = normalizeForDuplicate(['sendOther("hello", 1);']);
   assert.notEqual(a, c, '标识符不同不算重复');
+});
+
+// ---------- SFC：只留 <script>，且必须保住行号 ----------
+
+/** 行号标在注释里，断言直接对着它们看 */
+const VUE_LINES = [
+  '<template>', //                    1
+  '  <div class="a">{{ x }}</div>', // 2
+  '</template>', //                   3
+  '', //                              4
+  '<script setup lang="ts">', //      5
+  'function calc(n) {', //            6
+  '  return n * 2;', //               7
+  '}', //                             8
+  '</script>', //                     9
+  '', //                             10
+  '<style scoped>', //               11
+  '.a { color: red; }', //           12
+  '</style>', //                     13
+];
+const VUE = VUE_LINES.join('\n');
+
+test('scriptOnly：只保留 <script> 内容，template / style 抹成空行', () => {
+  const out = scriptOnly(VUE, 'src/C.vue').split('\n');
+  assert.equal(out.length, VUE_LINES.length, '行数必须与原文完全一致');
+  assert.equal(out[5], 'function calc(n) {', '第 6 行仍是第 6 行');
+  assert.equal(out[6], '  return n * 2;');
+  assert.equal(out[1], '', 'template 内容被抹掉');
+  assert.equal(out[11], '', 'style 里的 CSS 不该被当成代码单元');
+  assert.equal(out[4], '', '<script> 开标签本身不是代码');
+});
+
+test('scriptOnly：行号不能漂 —— 抹掉的行留空而不是删除', () => {
+  // 删行会让后续 issue 的 file:line 整体前移，静默指向隔壁代码
+  const units = sliceUnits(scriptOnly(VUE, 'a.vue'), 'a.vue');
+  assert.ok(units.length >= 1, 'script 段里的函数要能被切出来');
+  assert.equal(units[0].name, 'calc');
+  assert.equal(units[0].startLine, 6, '函数起始行等于它在真实文件里的行号');
+  assert.equal(units[0].endLine, 8);
+});
+
+test('scriptOnly：非 SFC 原样返回', () => {
+  const src = ['function f() {', '  return 1;', '}'].join('\n');
+  assert.equal(scriptOnly(src, 'src/a.ts'), src);
+  assert.equal(scriptOnly(src, 'src/a.py'), src);
+});
+
+test('scriptOnly：无 script 段 / 空输入不炸', () => {
+  assert.equal(scriptOnly('<template><div/></template>', 'a.vue').trim(), '');
+  assert.equal(scriptOnly('', 'a.vue'), '');
+  assert.equal(scriptOnly(null, 'a.vue'), '');
+});
+
+test('scriptOnly：同行自闭合的空 script 不会吞掉后面所有内容', () => {
+  const t = ['<script src="x.js"></script>', '<template>', '  <p/>', '</template>'].join('\n');
+  assert.equal(scriptOnly(t, 'a.vue').trim(), '', '开闭同行 → 不进入脚本态');
+});
+
+test('familyOf：SFC 归花括号族（其 script 段是 JS/TS）', () => {
+  assert.equal(familyOf('src/C.vue'), 'brace');
+  assert.equal(familyOf('src/C.svelte'), 'brace');
 });

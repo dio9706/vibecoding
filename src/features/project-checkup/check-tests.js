@@ -11,7 +11,8 @@ import path from 'node:path';
 import { exec as execCallback, execFileSync } from 'node:child_process';
 import { shouldSkipDir } from './scan-dirs.logic.js';
 import { gitTrackedFiles } from './git-tracked.js';
-import { findLargeFilesWithoutTest, evaluateTests } from './check-tests.logic.js';
+import { SOURCE_EXT } from './evidence/collect.js';
+import { findLargeFilesWithoutTest, evaluateTests, isTestFile } from './check-tests.logic.js';
 
 /**
  * 用 exec（走 shell、收单条命令字符串）而不是 execFile，是被 Windows 逼出来的：
@@ -23,8 +24,19 @@ import { findLargeFilesWithoutTest, evaluateTests } from './check-tests.logic.js
 const TEST_COMMAND = 'npm test --silent';
 
 const TEST_TIMEOUT_MS = 120_000;
-const CODE_EXT = /\.(m?js|cjs)$/i;
-const TEST_FILE = /\.test\.m?js$/i;
+
+/**
+ * 「什么算源码」复用 evidence 层的 SOURCE_EXT，不再自持一份。
+ *
+ * 原来这里写死 `/\.(m?js|cjs)$/i`，在 TS 项目上的后果是整个维度失真：
+ * 实测 kxmall-app-ui（675 个 .ts + 485 个 .vue + **106 个 .test.ts**）被判成
+ * 「项目里没有任何测试文件（扫到 68 个源文件）」——那 68 个是仅有的 .js。
+ * 它还和同一份报告里的「测试未通过（退出码 1）」自相矛盾：没有测试怎么会跑失败。
+ */
+function isSourceFile(name) {
+  const m = /\.([A-Za-z0-9]+)$/.exec(name);
+  return !!m && SOURCE_EXT.has(m[1].toLowerCase());
+}
 
 /**
  * 杀掉整棵进程树。
@@ -126,8 +138,9 @@ function collectFiles(projectDir, tracked) {
       if (e.isDirectory()) { walk(full, r); continue; }
       if (tracked && !tracked.has(r)) continue;
       allRel.add(r);
-      if (!CODE_EXT.test(e.name)) continue;
-      if (TEST_FILE.test(e.name)) { testFileCount += 1; continue; }
+      if (!isSourceFile(e.name)) continue;
+      // 传相对路径而不是文件名：`__tests__/` 这类目录约定只有在路径上才看得出来
+      if (isTestFile(r)) { testFileCount += 1; continue; }
       try {
         const lines = fs.readFileSync(full, 'utf8').split('\n').length;
         sources.push({ rel: r, lines });

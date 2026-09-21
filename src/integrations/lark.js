@@ -450,6 +450,48 @@ export async function searchBitableRecords(appToken, tableId, { filter } = {}) {
   return out;
 }
 
+/**
+ * 下载多维表格附件（drive media）到本地，返回绝对路径；失败返回 null（**不影响主流程**）。
+ *
+ * 与 downloadMessageResource 的区别：那个走 im 消息资源（要 messageId），
+ * bitable 附件字段给的是 drive 的 file_token，必须走 drive.media.download。
+ *
+ * 用途：BUG 巡检把「流程佐证」这类截图落到本地，再把路径交给评审门/归属判定的
+ * 只读 agent 用 Read 工具看图 —— 测试提的 BUG 关键信息大半在截图里，只给文件名等于没给。
+ *
+ * @param {string} fileToken 附件字段元素的 file_token
+ * @param {string} [fileName] 原始文件名（取扩展名用；缺失时按魔数判）
+ * @param {string} [dir] 落盘目录，默认与消息资源同目录
+ * @returns {Promise<string|null>}
+ */
+export async function downloadBitableMedia(fileToken, fileName = '', dir = RESOURCE_DIR) {
+  if (!fileToken) return null;
+  try {
+    const resp = await (await getClient()).drive.v1.media.download({
+      path: { file_token: fileToken },
+    });
+    const chunks = [];
+    for await (const c of await resp.getReadableStream()) chunks.push(c);
+    const buf = Buffer.concat(chunks);
+    if (!buf.length) throw new Error('下载内容为空');
+    fs.mkdirSync(dir, { recursive: true });
+    // 扩展名决定 Claude 能否把它当图片读，优先信原始文件名，拿不到再按魔数判
+    const extFromName = /\.(png|jpe?g|gif|webp)$/i.exec(fileName || '')?.[0];
+    const file = path.join(dir, fileToken.slice(0, 20) + (extFromName || imageExt(buf)));
+    fs.writeFileSync(file, buf);
+    logger.info('lark', '下载多维表格附件', { fileToken, file, bytes: buf.length });
+    return file;
+  } catch (e) {
+    logger.warn('lark', '下载多维表格附件失败（跳过该附件）', {
+      fileToken,
+      fileName,
+      err: e?.message || String(e),
+      feishuCode: e?.code || e?.response?.data?.code,
+    });
+    return null;
+  }
+}
+
 /** 更新单条记录的字段（fields 只含要改的字段，如 { 进展状态: '修复中' }） */
 export async function updateBitableRecord(appToken, tableId, recordId, fields) {
   const r = await (await getClient()).bitable.v1.appTableRecord.update({
@@ -615,6 +657,130 @@ export async function sendTextToUser(botCreds, openId, text) {
   } catch (e) {
     logger.warn('lark', '发送用户通知失败（不影响主流程）', { openId, err: e?.message || String(e) });
     return false; // 不抛错，fire-and-forget；由调用方按需决定要不要降级
+  }
+}
+
+/**
+ * 翻页上限：够覆盖正常规模（100/页 × 50 = 5000 条），又不至于在异常时无限翻下去。
+ */
+export const MAX_PAGES = 50;
+
+/**
+ * 翻页终止判据（纯函数，群列表 / 群成员共用）。
+ *
+ * 只看 `has_more` 是不够的 —— 它把「循环终止」完全托付给了外部服务的正确性。
+ * 飞书侧只要出现 has_more 恒真、或 page_token 不前进，`do...while` 就会无限发 HTTP：
+ * 这个 await 永不返回（前端一直转圈）、还会把对方限流打爆。三条防线缺一不可：
+ *   1. 没给 token —— 拿空 token 再请求等于重复拉首页，只能停；
+ *   2. token 与上一页相同 —— 下一次请求必然返回同样的结果，原地死循环；
+ *   3. 页数上限 —— 兜住「token 每次都在变但永远 has_more」这种最刁钻的情况。
+ *
+ * @returns {string|null} 下一页的 page_token；null 表示应当停止翻页
+ */
+export function nextPageToken({ hasMore, pageToken, prevToken, pageIndex, maxPages = MAX_PAGES }) {
+  if (!hasMore || !pageToken) return null;
+  if (pageToken === prevToken) return null;
+  if (pageIndex + 1 >= maxPages) return null;
+  return pageToken;
+}
+
+/**
+ * 机器人所在的群列表（供「从飞书群导入同事」选群）。
+ *
+ * 与 sendTextToUser 同构，**接收凭证而非用全局 singleton**：`getClient()` 的 client 是
+ * 懒建单例，web 进程里一旦建好就不随设置页换机器人而更新（`resetApiClient` 只在飞书
+ * 入口的热重载路径上调）。导入功能在 web 侧触发，用单例会拿上一个机器人的身份去拉群，
+ * 结果是「明明换了机器人却看到旧机器人的群」。
+ *
+ * 权限：`im:chat:readonly`。这是三条取 open_id 的路子里门槛最低的一条——
+ * 不需要通讯录可见范围，机器人在群里即可。
+ *
+ * @param {{ appId: string, appSecret: string }} botCreds
+ * @returns {Promise<{chats: {chatId: string, name: string}[], error: string|null}>}
+ */
+export async function listBotChats(botCreds) {
+  if (!botCreds?.appId || !botCreds?.appSecret) {
+    return { chats: [], error: '飞书机器人凭证未配置' };
+  }
+  try {
+    const Lark = await sdk();
+    const tempClient = new Lark.Client({ appId: botCreds.appId, appSecret: botCreds.appSecret });
+    const chats = [];
+    let pageToken;
+    let pageIndex = 0;
+    // 分页取全：机器人进的群可能超过一页，只取首页会让用户找不到目标群
+    do {
+      const r = await tempClient.request({
+        method: 'GET',
+        url: '/open-apis/im/v1/chats',
+        params: { page_size: 100, ...(pageToken ? { page_token: pageToken } : {}) },
+      });
+      // SDK generic request 不校验业务 code：HTTP 200 + code!=0 也是失败
+      if (r?.code) throw new Error(r.msg || `code=${r.code}`);
+      const d = r?.data || r;
+      for (const c of d?.items || []) chats.push({ chatId: c.chat_id, name: c.name || '(未命名群)' });
+      pageToken = nextPageToken({
+        hasMore: d?.has_more,
+        pageToken: d?.page_token,
+        prevToken: pageToken,
+        pageIndex,
+      });
+      pageIndex += 1;
+    } while (pageToken);
+    return { chats, error: null };
+  } catch (e) {
+    const msg = e?.response?.data?.msg || e?.message || String(e);
+    logger.warn('lark', '拉取机器人群列表失败', { err: msg });
+    return { chats: [], error: msg };
+  }
+}
+
+/**
+ * 群成员列表（open_id + 姓名），供导入时勾选。
+ *
+ * 注意成员的「职务」这里拿不到 —— `im/v1/chats/:id/members` 只回 member_id 与 name。
+ * 实测本租户 `contact/v3/users/:id` 的 `job_title` 也普遍为空，所以职位一律由用户在
+ * 导入界面指定，不做任何自动推断（猜错了会让智能体问错人）。
+ *
+ * @param {{ appId: string, appSecret: string }} botCreds
+ * @param {string} chatId
+ * @returns {Promise<{members: {openId: string, name: string}[], error: string|null}>}
+ */
+export async function listChatMembers(botCreds, chatId) {
+  if (!botCreds?.appId || !botCreds?.appSecret) {
+    return { members: [], error: '飞书机器人凭证未配置' };
+  }
+  if (!chatId) return { members: [], error: 'chatId 不能为空' };
+  try {
+    const Lark = await sdk();
+    const tempClient = new Lark.Client({ appId: botCreds.appId, appSecret: botCreds.appSecret });
+    const members = [];
+    let pageToken;
+    let pageIndex = 0;
+    do {
+      const r = await tempClient.request({
+        method: 'GET',
+        url: `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}/members`,
+        params: { member_id_type: 'open_id', page_size: 100, ...(pageToken ? { page_token: pageToken } : {}) },
+      });
+      if (r?.code) throw new Error(r.msg || `code=${r.code}`);
+      const d = r?.data || r;
+      for (const u of d?.items || []) {
+        members.push({ openId: u.member_id, name: u.name || '(无名)' });
+      }
+      pageToken = nextPageToken({
+        hasMore: d?.has_more,
+        pageToken: d?.page_token,
+        prevToken: pageToken,
+        pageIndex,
+      });
+      pageIndex += 1;
+    } while (pageToken);
+    return { members, error: null };
+  } catch (e) {
+    const msg = e?.response?.data?.msg || e?.message || String(e);
+    logger.warn('lark', '拉取群成员失败', { chatId, err: msg });
+    return { members: [], error: msg };
   }
 }
 

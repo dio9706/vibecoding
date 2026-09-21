@@ -171,7 +171,13 @@ export function mountMap(container, opts) {
     // 「入口」放在最前：先告诉用户从哪进来，再说这页是新增还是有稿
     if (isEntry) top.appendChild(el('span', 'rq-nflag rq-entry', '入口'));
     if (page.state === 'new') top.appendChild(el('span', 'rq-nflag', '新页面'));
-    if (page.figma) top.appendChild(el('span', 'rq-nflag rq-figma', page.restoredAt ? '🎨 已还原' : '🎨 已挂稿'));
+    // 多张稿时一眼看出「挂了几张、还原了几张」，比单个「已挂稿/已还原」信息量大
+    const figmas = page.figmas || [];
+    if (figmas.length) {
+      const done = figmas.filter((f) => f.restoredAt).length;
+      const txt = '🎨 ' + figmas.length + ' 张稿' + (done ? ' · ' + done + ' 已还原' : '');
+      top.appendChild(el('span', 'rq-nflag rq-figma', txt));
+    }
     head.appendChild(top);
     head.appendChild(el('div', 'rq-nfile', page.file || '—'));
     const cnt = el('div', 'rq-ncount');
@@ -460,67 +466,103 @@ export function mountMap(container, opts) {
     return s;
   }
 
+  /**
+   * UI 设计稿区块：一页可以挂多张稿（同一页面的不同状态：默认态 / 空态 / 加载中…），
+   * 每张各自还原一次——多状态共用一个组件，逐条还原时靠 prompt 里的护栏防止后一轮覆盖前一轮。
+   */
   function buildFigmaSection(page) {
     const s = section('UI 设计稿');
-    if (!page.figma) {
-      const row = el('div', 'rq-figrow');
-      const input = el('input');
-      input.placeholder = '粘贴 Figma 链接（可稍后补）';
-      const add = el('button', 'btn primary', '挂载');
-      add.addEventListener('click', () => saveFigma(page, input.value.trim()));
-      row.append(input, add);
-      s.appendChild(row);
-      s.appendChild(el('div', 'rq-tip', '没有设计稿时先按需求地图搭骨架；设计稿到位后回这里挂载，再触发一次 UI 还原。'));
-      return s;
+    const list = page.figmas || [];
+    if (list.length) {
+      const card = el('div', 'rq-figcard');
+      for (const fg of list) card.appendChild(buildFigmaItem(page, fg));
+      s.appendChild(card);
     }
-    const card = el('div', 'rq-figcard');
-    const head = el('div', 'rq-fh');
-    head.appendChild(el('span', 'rq-ok', '✓'));
-    head.appendChild(el('span', 'rq-furl', page.figma.url));
-    card.appendChild(head);
-    const body = el('div', 'rq-fb');
-    if (page.restoredAt) body.appendChild(el('div', 'rq-restored', '已触发还原 · ' + page.restoredAt.slice(0, 16).replace('T', ' ')));
-    const acts = el('div', 'rq-facts');
-    const go = el('button', 'btn primary', page.restoredAt ? '再还原一次' : '按 UI 规范还原此页 →');
-    go.addEventListener('click', () => doRestore(page, go));
-    const unlink = el('button', 'btn', '解绑');
-    unlink.addEventListener('click', () => saveFigma(page, ''));
-    acts.append(go, unlink);
-    body.appendChild(acts);
-    card.appendChild(body);
-    s.appendChild(card);
+    s.appendChild(buildFigmaAddRow(page));
+    if (!list.length) {
+      s.appendChild(el('div', 'rq-tip', '没有设计稿时先按需求地图搭骨架；设计稿到位后回这里挂载，再触发一次 UI 还原。'));
+    }
     return s;
   }
 
-  async function saveFigma(page, url) {
+  /** 单条稿：状态名徽标 + 链接 + 还原/删除。条目间的分隔线交给 CSS 相邻选择器。 */
+  function buildFigmaItem(page, fg) {
+    const box = el('div', 'rq-figitem');
+    const head = el('div', 'rq-fh');
+    head.appendChild(el('span', 'rq-ok', fg.restoredAt ? '✓' : '○'));
+    if (fg.label) head.appendChild(el('span', 'rq-flabel', fg.label));
+    head.appendChild(el('span', 'rq-furl', fg.url));
+    box.appendChild(head);
+
+    const body = el('div', 'rq-fb');
+    body.appendChild(
+      fg.restoredAt
+        ? el('div', 'rq-restored', '已还原 · ' + fg.restoredAt.slice(0, 16).replace('T', ' '))
+        : el('div', 'rq-unrestored', '未还原'),
+    );
+    const acts = el('div', 'rq-facts');
+    const go = el('button', 'btn primary', fg.restoredAt ? '再还原一次' : '按 UI 规范还原 →');
+    go.addEventListener('click', () => doRestore(page, fg, go));
+    const del = el('button', 'btn', '删除');
+    // 不做二次确认：误删把链接重新粘一遍即可，代价远低于每次都弹框
+    del.addEventListener('click', () => saveFigmas(page, (page.figmas || []).filter((x) => x.id !== fg.id)));
+    acts.append(go, del);
+    body.appendChild(acts);
+    box.appendChild(body);
+    return box;
+  }
+
+  /** 添加行：状态名可空，链接为空不提交；提交后抽屉整体重绘，输入框自然回到空态。 */
+  function buildFigmaAddRow(page) {
+    const row = el('div', 'rq-figrow');
+    const label = el('input');
+    label.className = 'rq-figlabel';
+    label.placeholder = '状态名（可空）';
+    const url = el('input');
+    url.placeholder = '粘贴 Figma 链接';
+    const add = el('button', 'btn primary', '添加');
+    const submit = () => {
+      const u = url.value.trim();
+      if (!u) return;
+      saveFigmas(page, [...(page.figmas || []), { url: u, label: label.value.trim() }]);
+    };
+    add.addEventListener('click', submit);
+    url.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submit();
+    });
+    row.append(label, url, add);
+    return row;
+  }
+
+  /** 全量覆盖提交（增 / 删都走这一个端点）。服务端补 id 与 restoredAt 存废，回填后重绘。 */
+  async function saveFigmas(page, figmas) {
     try {
       const r = await fetch('/api/req/map/figma', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: reqId, pageId: page.id, url, node: '' }),
+        body: JSON.stringify({ id: reqId, pageId: page.id, figmas }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || '保存失败');
-      page.figma = d.page.figma;
-      page.restoredAt = d.page.restoredAt;
-      openPage(page.id);
-      window.toast.success(url ? '已挂载设计稿' : '已解绑');
+      page.figmas = d.page.figmas;
+      openPage(page.id); // 内含 renderNodes()，画布旗标同步刷新
+      window.toast.success('已保存设计稿');
     } catch (e) {
       window.toast.error('设计稿保存失败：' + (e?.message || e));
     }
   }
 
-  async function doRestore(page, btn) {
+  async function doRestore(page, fg, btn) {
     btn.disabled = true;
     try {
       const r = await fetch('/api/req/map/restore', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: reqId, pageId: page.id }),
+        body: JSON.stringify({ id: reqId, pageId: page.id, figmaId: fg.id }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || '触发失败');
-      page.restoredAt = new Date().toISOString();
+      fg.restoredAt = new Date().toISOString();
       openPage(page.id);
       if (!d.hasSpec) window.toast.error('本项目还没配 UI 规范，已按现有代码风格还原');
       onRestore?.(d.prompt);

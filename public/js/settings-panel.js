@@ -198,6 +198,22 @@ const SUBSCRIPTION_TYPES = [
         }
       }
 
+      /** 复制取 key 的命令。
+       *  命令文本从 DOM 读而不是在 JS 里写死第二份：写死就成了两处真相，
+       *  改命令必漏一处，而漏的那一处恰恰是用户真正复制走的那一处。 */
+      async function copySetupTokenCmd() {
+        const cmd = $('#setupTokenCmd')?.textContent?.trim();
+        if (!cmd) return;
+        try {
+          await navigator.clipboard.writeText(cmd);
+          toast('已复制：' + cmd);
+        } catch {
+          // 剪贴板不可用（无安全上下文 / 用户拒权）。命令块挂了 user-select:all，
+          // 点一下就能整条选中，所以这里指路手选而不是干巴巴报「复制失败」
+          toast('复制失败，请点击命令后手动复制');
+        }
+      }
+
       async function renameToken(id, cur) {
         const label = await promptDialog({
           title: '重命名账号',
@@ -574,6 +590,11 @@ const SUBSCRIPTION_TYPES = [
         } catch {
           $('#cleanupTotal').textContent = '读取失败';
         }
+        // 复位选择：换目录后沿用上个目录的时间窗，算出的「将删除 N 个」是对不上的
+        // （注释原本就写着「重置选择」，但只重置了按钮态——这里补齐）
+        const checked = document.querySelector('input[name="cleanupRange"]:checked');
+        if (checked) checked.checked = false;
+        setCleanupCustom(false);
         $('#cleanupWillDelete').textContent = '0';
         $('#cleanupExecBtn').disabled = true;
       }
@@ -628,14 +649,39 @@ const SUBSCRIPTION_TYPES = [
         }
       }
 
+      /**
+       * 快捷档与自定义日期二选一，切换时**清掉另一侧的值**。
+       *
+       * 不是洁癖：cleanupWindow() 是快捷档优先（`if (checked) return {range}`），而 radio
+       * 点过就无法取消。原先用户先点「一周前」再填自定义日期，日期会被静默忽略——预览数和
+       * 真正删除的都按 range 走，界面上没有任何提示。删除不可恢复，这种静默走错分支代价太大。
+       * 自定义面板能正常收起之后，残留值还会被藏起来，比一直展开时更隐蔽，所以必须成对修。
+       */
+      function setCleanupCustom(open) {
+        const box = $('#cleanupCustom');
+        const toggle = $('#cleanupCustomToggle');
+        if (!box) return;
+        box.hidden = !open;
+        if (toggle) toggle.textContent = (open ? '⌃' : '⌄') + ' 自定义日期范围';
+        if (open) {
+          const checked = document.querySelector('input[name="cleanupRange"]:checked');
+          if (checked) checked.checked = false;
+        } else {
+          $('#cleanupFrom').value = '';
+          $('#cleanupTo').value = '';
+        }
+        previewCleanup();
+      }
+
       // 绑定清理页交互（只绑一次，随 bindConfigTransfer 初始化）
       function bindCleanup() {
-        $('#cleanupRanges')?.addEventListener('change', previewCleanup);
+        $('#cleanupRanges')?.addEventListener('change', () => {
+          setCleanupCustom(false); // 选了快捷档 → 收起并清空自定义，避免两套输入并存
+        });
         $('#cleanupFrom')?.addEventListener('change', previewCleanup);
         $('#cleanupTo')?.addEventListener('change', previewCleanup);
         $('#cleanupCustomToggle')?.addEventListener('click', () => {
-          const box = $('#cleanupCustom');
-          if (box) box.hidden = !box.hidden;
+          setCleanupCustom($('#cleanupCustom')?.hidden);
         });
         $('#cleanupExecBtn')?.addEventListener('click', executeCleanup);
       }
@@ -657,6 +703,7 @@ const SUBSCRIPTION_TYPES = [
       });
       bindCleanup();
       $('#tokenAddBtn').addEventListener('click', addTokenUI);
+      $('#setupTokenCopyBtn')?.addEventListener('click', copySetupTokenCmd);
       $('#credAddBtn')?.addEventListener('click', addCredentialUI);
       $('#mcpAddBtn')?.addEventListener('click', submitMcpForm);
       $('#mcpCancelBtn')?.addEventListener('click', resetMcpForm);

@@ -168,3 +168,12 @@ test('isPoolExhausted：存在 healthy / warning → false（仍可用）', () =
 test('isPoolExhausted：全部 exhausted → true（应 fail-fast，跳过注定失败的分类调用）', () => {
   assert.equal(isPoolExhausted([{ status: 'exhausted' }, { status: 'exhausted' }]), true);
 });
+
+test('L2 关键词命中不带 via 标记（自学习据此判断「这次没花钱」）', async () => {
+  // 关键词自学习只在 L3 兜底命中时才该触发。L2 是本地匹配，本来就零成本，
+  // 若它也带 via 会导致每次执行都白调一次提词模型。
+  const r = await classify('帮我清一下 test 环境');
+  assert.equal(r.intent, 'action');
+  assert.equal(r.actionId, 'ac_clean');
+  assert.equal(r.via, undefined, 'L2 命中必须不带 via');
+});

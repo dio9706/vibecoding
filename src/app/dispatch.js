@@ -95,7 +95,12 @@ export async function dispatch(ctx, { featureList = features, classifyFn = class
       const permOK = f.permission === 'any' || f.permission === ctx.user.role;
       if (permOK && f.intents.includes(intent.intent)) {
         logger.info('dispatch', `→ ${f.name}（intent=${intent.intent}）`);
-        return await f.handle(ctx, intent);
+        // 与上面 hasPending 段对齐：feature 接进去后发现不该自己管，可返回 PASS 还回来。
+        // colleague-relay 正是这样——它声明了 bug/feature/question 等意图，但只在
+        // 「发信人是某个开发期需求的开发人员」时才接管，否则必须让回 feedback。
+        const r = await f.handle(ctx, intent);
+        if (r !== PASS) return r;
+        logger.info('dispatch', `← ${f.name} 放弃接管（PASS），继续匹配`);
       }
     }
 

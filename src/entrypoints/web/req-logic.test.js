@@ -5,6 +5,7 @@ import {
   buildDevelopPrompt, buildApiFixPrompt, buildBugFixPrompt,
   verdictToBug, mergeBugs, buildArchiveSummary, reqBranchName, pickCwdAndDirs,
   buildSeedPrompt, extractPitfalls, splitPitfallsByProject, mergePitfalls, parseFeatureTag,
+  runningSessions, buildFeatureSnapshot,
 } from './req-logic.js';
 
 const PROJECTS = {
@@ -398,4 +399,245 @@ test('buildSeedPrompt：有 featureSnapshot 时注入快照及开发规范', () 
   assert.ok(seed.includes('src/views/BabyFood.vue（出现 3 次）'));
   assert.ok(seed.includes('禁止全局 glob/grep'));
   assert.ok(seed.includes('[快照过期]'));
+});
+
+// ==== 二期：定稿时给开发人员发消息 ====
+
+const { buildAssigneeNotices, buildAssigneeSnapshot } = await import('./req-logic.js');
+
+const A = [
+  { id: 'cl_p', name: '产品甲', role: 'product', roleLabel: '产品', feishuOpenId: 'ou_p', missing: false },
+  { id: 'cl_f', name: '前端乙', role: 'frontend', roleLabel: '前端', feishuOpenId: 'ou_f', missing: false },
+  { id: 'cl_b', name: '后端丙', role: 'backend', roleLabel: '后端', feishuOpenId: 'ou_b', missing: false },
+];
+
+test('buildAssigneeNotices：三类各自文案，[需求名] 替换为标题', () => {
+  const r = buildAssigneeNotices({ title: '扫码支付', assigneeList: A, backendOnly: false });
+  assert.equal(r.notices.length, 3);
+  const byRole = Object.fromEntries(r.notices.map((n) => [n.role, n.text]));
+  assert.equal(byRole.product, '新需求已收到，扫码支付，后续有需求变动可以直接和我说 ~');
+  assert.equal(byRole.frontend, '新需求已收到，扫码支付，后续有需要我配合可以直接和我说 ~');
+  assert.equal(byRole.backend, '新需求已收到，扫码支付，后续接口文档到了可以直接发送给我');
+});
+
+test('buildAssigneeNotices：纯后端工程时只改后端文案，产品/前端不变', () => {
+  const r = buildAssigneeNotices({ title: '对账补偿', assigneeList: A, backendOnly: true });
+  const byRole = Object.fromEntries(r.notices.map((n) => [n.role, n.text]));
+  assert.equal(byRole.backend, '新需求已收到，对账补偿，后续有需要配合可以直接发送给我');
+  assert.equal(byRole.product, '新需求已收到，对账补偿，后续有需求变动可以直接和我说 ~');
+  assert.equal(byRole.frontend, '新需求已收到，对账补偿，后续有需要我配合可以直接和我说 ~');
+});
+
+test('buildAssigneeNotices：运营/UI设计不发（没有为它们定过文案，不凭空编）', () => {
+  const list = [
+    { id: 'cl_o', name: '运营丁', role: 'ops', feishuOpenId: 'ou_o' },
+    { id: 'cl_d', name: '设计戊', role: 'design', feishuOpenId: 'ou_d' },
+    ...A,
+  ];
+  const r = buildAssigneeNotices({ title: 'X', assigneeList: list, backendOnly: false });
+  assert.deepEqual(r.notices.map((n) => n.role).sort(), ['backend', 'frontend', 'product']);
+  assert.deepEqual(r.skippedNoRole.sort(), ['设计戊', '运营丁']);
+});
+
+test('buildAssigneeNotices：没填 open_id 的进 skippedNoId，不产生发送项', () => {
+  const list = [{ id: 'cl_x', name: '没号的', role: 'product', feishuOpenId: '' }, A[1]];
+  const r = buildAssigneeNotices({ title: 'X', assigneeList: list, backendOnly: false });
+  assert.equal(r.notices.length, 1);
+  assert.equal(r.notices[0].role, 'frontend');
+  assert.deepEqual(r.skippedNoId, ['没号的']);
+});
+
+test('buildAssigneeNotices：已移除的同事（missing）不发', () => {
+  const list = [{ id: 'cl_gone', name: '已移除的同事', role: '', feishuOpenId: '', missing: true }, A[0]];
+  const r = buildAssigneeNotices({ title: 'X', assigneeList: list, backendOnly: false });
+  assert.equal(r.notices.length, 1);
+  assert.equal(r.notices[0].role, 'product');
+});
+
+test('buildAssigneeNotices：空/非数组不炸', () => {
+  for (const v of [[], null, undefined, 'x']) {
+    const r = buildAssigneeNotices({ title: 'X', assigneeList: v, backendOnly: false });
+    assert.deepEqual(r.notices, []);
+  }
+});
+
+test('buildAssigneeNotices：同一人被同时算进两类不会重复发（按 openId 去重）', () => {
+  const list = [A[0], { ...A[0], id: 'cl_p2', role: 'frontend' }];
+  const r = buildAssigneeNotices({ title: 'X', assigneeList: list, backendOnly: false });
+  assert.equal(r.notices.length, 1, '同一个 open_id 只该收到一条，否则同事被连发两遍');
+});
+
+test('buildAssigneeSnapshot：归档快照留姓名/职位/open_id，不留 id 引用', () => {
+  const snap = buildAssigneeSnapshot(A);
+  assert.equal(snap.length, 3);
+  assert.deepEqual(snap[0], { name: '产品甲', role: 'product', roleLabel: '产品', feishuOpenId: 'ou_p' });
+});
+
+test('buildAssigneeSnapshot：已移除的同事也留痕（当时确实指派过）', () => {
+  const snap = buildAssigneeSnapshot([{ id: 'cl_gone', name: '已移除的同事', role: '', roleLabel: '', feishuOpenId: '', missing: true }]);
+  assert.equal(snap.length, 1);
+  assert.equal(snap[0].name, '已移除的同事');
+});
+
+test('buildAssigneeSnapshot：空/非数组归空数组', () => {
+  for (const v of [[], null, undefined, 'x']) assert.deepEqual(buildAssigneeSnapshot(v), []);
+});
+
+test('buildArchiveSummary：带开发人员段；无人时写「（未指派）」', () => {
+  const withA = buildArchiveSummary({
+    req: { title: 'T', devDoc: { versions: [{ v: 1, path: '/p' }] }, branches: [], bugs: [], archiveAssignees: buildAssigneeSnapshot(A) },
+    note: '',
+  });
+  assert.ok(withA.includes('## 开发人员'), '归档摘要要写明这需求当时归谁');
+  assert.ok(withA.includes('产品甲（产品）'));
+  assert.ok(withA.includes('后端丙（后端）'));
+
+  const none = buildArchiveSummary({
+    req: { title: 'T', devDoc: { versions: [] }, branches: [], bugs: [] },
+    note: '',
+  });
+  assert.ok(none.includes('（未指派）'));
+});
+
+// ==== 定稿通知的重试语义：按 openId 记已送达 ====
+
+const { pickPendingNotices } = await import('./req-logic.js');
+
+test('pickPendingNotices：跳过已送达的 openId —— 定稿重试只补发没收到的人', () => {
+  // 曾经只记一个 assigneeNotifiedAt 时间戳且「sent>0 就打标」：3 人里 1 成 2 败，
+  // 标一打，那 2 人永远收不到通知，也没有补发路径。按 openId 记才能既不漏也不重复。
+  const { notices } = buildAssigneeNotices({ title: '扫码支付', assigneeList: A, backendOnly: false });
+  assert.equal(notices.length, 3);
+  const pending = pickPendingNotices(notices, { ou_p: '2026-09-16T00:00:00.000Z', ou_f: '2026-09-16T00:00:00.000Z' });
+  assert.deepEqual(pending.map((n) => n.openId), ['ou_b'], '已送达的不再发，没送达的必须补发');
+});
+
+test('pickPendingNotices：无有效送达记录时全发（脏数据一律当没记录）', () => {
+  const { notices } = buildAssigneeNotices({ title: '扫码支付', assigneeList: A, backendOnly: false });
+  assert.equal(pickPendingNotices(notices, {}).length, 3);
+  assert.equal(pickPendingNotices(notices, null).length, 3);
+  assert.equal(pickPendingNotices(notices, 'garbage').length, 3);
+  assert.deepEqual(pickPendingNotices(null, {}), [], 'notices 非数组不炸');
+});
+
+// ---- runningSessions（阶段流转守卫）----
+
+const SESSIONS = [
+  { convId: 'c_dev_main', title: '主会话', kind: 'main', phase: 'dev' },
+  { convId: 'c_dev_sub', title: '登录页修复', kind: 'sub', phase: 'dev' },
+  { convId: 'c_test_main', title: '测试期主会话', kind: 'main', phase: 'test' },
+];
+
+test('runningSessions：无会话在跑 → 空数组', () => {
+  assert.deepEqual(runningSessions(SESSIONS, 'dev', () => false), []);
+});
+
+test('runningSessions：只回当前阶段在跑的会话，别的阶段不计入', () => {
+  const hasActive = (convId) => convId === 'c_dev_sub' || convId === 'c_test_main';
+  assert.deepEqual(runningSessions(SESSIONS, 'dev', hasActive), [
+    { convId: 'c_dev_sub', title: '登录页修复' },
+  ]);
+});
+
+test('runningSessions：多条同阶段在跑时全部返回，顺序与 sessions 一致', () => {
+  const result = runningSessions(SESSIONS, 'dev', () => true);
+  assert.deepEqual(result, [
+    { convId: 'c_dev_main', title: '主会话' },
+    { convId: 'c_dev_sub', title: '登录页修复' },
+  ]);
+});
+
+test('runningSessions：无 convId 的会话跳过，不调用 hasActive', () => {
+  const calls = [];
+  const sessions = [{ convId: '', title: '半截会话', kind: 'sub', phase: 'dev' }];
+  const result = runningSessions(sessions, 'dev', (c) => {
+    calls.push(c);
+    return true;
+  });
+  assert.deepEqual(result, []);
+  assert.deepEqual(calls, []);
+});
+
+test('runningSessions：缺 phase 的老会话一律纳入检查（守卫宁可多拦一次）', () => {
+  const sessions = [{ convId: 'c_old', title: '老会话', kind: 'main' }];
+  // 冗余防御分支：绕过 normalizeSessions 直接传裸对象时也要拦住（真正的迁移保障在 store 层）
+  assert.deepEqual(runningSessions(sessions, 'dev', () => true), [
+    { convId: 'c_old', title: '老会话' },
+  ]);
+  assert.deepEqual(runningSessions(sessions, 'test', () => true), [
+    { convId: 'c_old', title: '老会话' },
+  ]);
+});
+
+test('runningSessions：无标题的会话用 convId 兜底（弹窗不能显示空行）', () => {
+  const sessions = [{ convId: 'c_x', title: '', kind: 'sub', phase: 'dev' }];
+  assert.deepEqual(runningSessions(sessions, 'dev', () => true), [
+    { convId: 'c_x', title: 'c_x' },
+  ]);
+});
+
+test('runningSessions：sessions 非数组不炸（与本文件 pickPendingNotices 同款约定）', () => {
+  assert.deepEqual(runningSessions(null, 'dev', () => true), []);
+  assert.deepEqual(runningSessions(undefined, 'dev', () => true), []);
+});
+
+// ---- buildBugFixPrompt 的需求背景注入 ----
+
+const BUG = { title: '扫码页白屏', detail: '点击扫码按钮后页面空白，控制台报 undefined' };
+
+// golden string：这条 prompt 在仓库里此前没有任何全等覆盖，正则断言挡不住措辞被悄悄改写
+test('buildBugFixPrompt：无 seed 时输出与原行为逐字节相同', () => {
+  assert.equal(
+    buildBugFixPrompt({ bug: BUG }),
+    '修复以下 BUG：「扫码页白屏」\n详情：\n点击扫码按钮后页面空白，控制台报 undefined\n\n修复后自查；只读参考工程禁止修改。',
+  );
+});
+
+test('buildBugFixPrompt：有 seed 时前置需求背景段，BUG 正文仍在', () => {
+  const p = buildBugFixPrompt({ bug: BUG, seed: '【需求】扫码支付改造 · 分支 req/abc' });
+  assert.match(p, /^【需求背景】/);
+  assert.match(p, /扫码支付改造/);
+  assert.match(p, /修复以下 BUG：「扫码页白屏」/);
+  // 背景必须排在 BUG 正文之前
+  assert.ok(p.indexOf('【需求背景】') < p.indexOf('修复以下 BUG'));
+});
+
+test('buildBugFixPrompt：seed 为空串等同无 seed（不留空标题段）', () => {
+  assert.doesNotMatch(buildBugFixPrompt({ bug: BUG, seed: '' }), /【需求背景】/);
+});
+
+// ---- buildFeatureSnapshot（功能文件快照，注入 store reader）----
+
+const FILES = [{ path: 'src/a.js', count: 3 }];
+
+test('buildFeatureSnapshot：开发/测试期且有 featureTag 且有文件 → 返回快照', () => {
+  for (const phase of ['dev', 'test']) {
+    assert.deepEqual(
+      buildFeatureSnapshot({ featureTag: '扫码支付', phase }, () => FILES),
+      { tag: '扫码支付', files: FILES },
+    );
+  }
+});
+
+test('buildFeatureSnapshot：无 featureTag → null，且不去读 store', () => {
+  let called = false;
+  const read = () => { called = true; return FILES; };
+  assert.equal(buildFeatureSnapshot({ featureTag: null, phase: 'dev' }, read), null);
+  assert.equal(buildFeatureSnapshot({ featureTag: '', phase: 'dev' }, read), null);
+  assert.equal(called, false);
+});
+
+test('buildFeatureSnapshot：评审/归档等非开发测试期 → null', () => {
+  for (const phase of ['review', 'archiving', 'archived', 'discarded', undefined]) {
+    assert.equal(buildFeatureSnapshot({ featureTag: '扫码支付', phase }, () => FILES), null);
+  }
+});
+
+test('buildFeatureSnapshot：账本里没有该标签（reader 回 null）→ null', () => {
+  assert.equal(buildFeatureSnapshot({ featureTag: '扫码支付', phase: 'dev' }, () => null), null);
+});
+
+test('buildFeatureSnapshot：reader 回空数组也算无快照（不产出空的 files 节）', () => {
+  // getTopFiles 现在恒返回 null 而非 []，但本函数不该依赖那个实现细节
+  assert.equal(buildFeatureSnapshot({ featureTag: '扫码支付', phase: 'dev' }, () => []), null);
 });

@@ -1,32 +1,55 @@
-// 「一键优化」按钮的纯逻辑层：可用性判定、文案、结果统计。
-// 不碰 DOM，不 import 其它模块，方便单测和后续被 optimize-view 等宿主复用。
+// 修复流程的纯逻辑层：步骤文案、结果统计、确认文案。
+// 不碰 DOM，不 import 其它模块，方便单测和被 optimize-view / optimize-report 复用。
+//
+// 注：按钮的可用性判定与文案（原 canFix / fixButtonLabel）已移交
+// `optimize-plan.logic.js` 的 `topButtonsState` —— 风险从「按钮档位」改成「逐项标签」后，
+// 按钮状态不再由「勾了几个维度」决定，而由计划项的已处理/未处理与勾选共同决定，
+// 旧的两个函数无法表达 done-all 这类状态，留着只会有两套并存的判定。
 
 /**
- * 判断「一键优化」按钮是否可点。
- * 三个条件缺一不可：
- * - 必须已经跑出报告（否则不知道要优化什么）
- * - 必须至少勾选了一项（避免用户误触发全量操作）
- * - 不能正在跑（避免重复提交并发请求）
- * 参数按可选处理，未传时一律视为「不满足」，避免调用方漏传字段导致误判为可点。
- */
-export function canFix({ hasReport, selected, running } = {}) {
-  return hasReport === true && Array.isArray(selected) && selected.length > 0 && running !== true;
-}
-
-/**
- * 主优化按钮的文案。三态，缺一个用户就会误判：
- *   优化中   —— 不说就会以为卡死了，然后反复点
- *   体检中   —— 按钮此时是禁用的，**光禁不说理由，用户只会以为按钮坏了**
- *   空闲     —— 标出「低风险」，让人知道这个按钮不会碰既有代码
+ * 一条 issue 行在本轮修复里的进度态。
  *
- * @param {boolean} running 优化在跑
- * @param {string} [checkupBusy] 体检忙碌态（`''` / `'posting'` / `'analyzing'`）
+ * ## 为什么粒度是「维度 + 文件」而不是逐条 issue
+ *
+ * 后端进度流给不出 planId：`step` 事件带的是 `{phase, dim, text}`，`file` 事件带的是
+ * `{file, kind, status}`。所以只能用两个可观测量合成：
+ *   - **维度**：修复管线按 `fixOrder` **串行**跑维度，`step.dim` 就是「现在在修哪一维」；
+ *   - **文件**：`file` 事件一到，说明那个文件的结果已经落定。
+ * 靠文件名反查 planId 是不行的——一个文件常对应多条 issue，会把同文件的行全部标掉。
+ *
+ * ## 维度已跑过、但这一条没等到 file 事件时，为什么算 'done' 而不是「排队中」
+ *
+ * 修复引擎有一条硬规则：**没有 issue 会被静默丢掉**——任何策略都不认领的、被测试闸挡下的，
+ * 一律写进整改清单（见 fix-engine.js 头注释）。那份清单是整维一个文件，不会逐条回报。
+ * 所以维度过去了就意味着这一条已被处理过，继续显示「排队中」是明确的假话，
+ * 而且看起来像卡死了。真实结果以结束后的修复报告为准。
+ *
+ * @param {object} args
+ * @param {boolean} args.inRound 是否在本轮提交的计划项里
+ * @param {string} args.dim 该条所属维度 id
+ * @param {string} args.file 该条对应的文件路径
+ * @param {string} args.activeDim 当前正在跑的维度 id（''=还没开跑或已跑完全部）
+ * @param {Set<string>} args.seenDims 已经开跑过的维度 id（含当前这个）
+ * @param {Map<string,string>} args.doneFiles 文件 → 后端回报的 status
+ * @returns {'idle'|'queued'|'running'|'done'|'failed'}
  */
-export function fixButtonLabel(running, checkupBusy = '') {
-  if (running) return '优化中…';
-  if (checkupBusy) return '体检中…';
-  return '一键优化（低风险）';
+export function fixRowState({ inRound, dim, file, activeDim, seenDims, doneFiles }) {
+  if (!inRound) return 'idle';
+  const st = doneFiles?.get?.(file);
+  // status 只有 'done' 算成功，其余（failed / skipped / 任何将来新增的值）一律按未完成显示 —— fail-closed
+  if (st) return st === 'done' ? 'done' : 'failed';
+  if (dim && dim === activeDim) return 'running';
+  if (dim && seenDims?.has?.(dim)) return 'done'; // 维度已跑过，见上方说明
+  return 'queued';
 }
+
+/** 进度态 → 行尾文案。'idle' 不显示任何标签（那是常态，加字只会变成噪声） */
+export const FIX_STATE_LABEL = {
+  queued: '排队中',
+  running: '修复中',
+  done: '已处理',
+  failed: '未完成',
+};
 
 /**
  * SSE step 事件里 phase 的中文说明。

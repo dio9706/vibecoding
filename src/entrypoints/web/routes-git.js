@@ -134,7 +134,9 @@ export async function handleGitCheckout(cwd, req, res) {
     return sendJson(res, 400, { error: '缺少工作目录' });
   }
 
-  return withJsonBody(req, async (body) => {
+  // 签名是 withJsonBody(req, res, fn)：漏掉 res 会让回调被当成 res、fn 变 undefined，
+  // 于是 `await fn()` 抛 TypeError → catch 里又拿函数当 res 写头二次抛错 → 本请求永不响应。
+  return withJsonBody(req, res, async (body) => {
     const branch = str(body?.branch);
     if (!branch || !validateBranchName(branch)) {
       return sendJson(res, 400, { error: '无效的分支名' });

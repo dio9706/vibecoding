@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildQuizPrompt, parseQuiz, answersToPromptPart, UNSURE_VALUE, QUIZ_MIN, QUIZ_MAX } from './req-quiz.logic.js';
+import {
+  buildQuizPrompt, parseQuiz, answersToPromptPart, sanitizeAnswers,
+  UNSURE_VALUE, QUIZ_MIN, QUIZ_MAX,
+} from './req-quiz.logic.js';
 
 const okQuiz = (n = 3) =>
   JSON.stringify(
@@ -26,10 +29,12 @@ test('buildQuizPrompt 带上需求文档全文与工程角色', () => {
   assert.match(p, /JSON/);
 });
 
-test('buildQuizPrompt 把题数上下限写进契约', () => {
+test('buildQuizPrompt 只写上限，并明示题数随规模缩放', () => {
+  // 刻意不写下限：写了下限模型就会往那个锚点凑，小需求也硬出满额
   const p = buildQuizPrompt({ reqDocText: 'x', projects: {} });
-  assert.match(p, new RegExp(String(QUIZ_MIN)));
   assert.match(p, new RegExp(String(QUIZ_MAX)));
+  assert.match(p, /不凑数/);
+  assert.match(p, /空数组/); // 「一个歧义都没有」必须有合法出口，否则模型只能硬编
 });
 
 test('parseQuiz 解析合法问卷', () => {
@@ -42,8 +47,14 @@ test('parseQuiz 剥围栏', () => {
   assert.equal(parseQuiz('```json\n' + okQuiz(3) + '\n```').length, 3);
 });
 
-test('parseQuiz 题数不足下限时抛错', () => {
-  assert.throws(() => parseQuiz(okQuiz(1)), /题数/);
+test('parseQuiz 只出 1 题也是合法问卷', () => {
+  // 小需求就该少问；卡下限会把「克制」和「没找到」判成同一种结局
+  assert.equal(parseQuiz(okQuiz(1)).length, 1);
+  assert.equal(QUIZ_MIN, 1);
+});
+
+test('parseQuiz 空数组时抛错（降级信号）', () => {
+  assert.throws(() => parseQuiz('[]'), /题数/);
 });
 
 test('parseQuiz 题数超上限时截断而不抛', () => {
@@ -89,11 +100,52 @@ test('parseQuiz 顶层不是数组时抛错', () => {
   assert.throws(() => parseQuiz('{"a":1}'), /数组/);
 });
 
-test('parseQuiz 有效题数不足下限时抛错', () => {
+test('parseQuiz 所有题都不合格时抛错', () => {
+  // 单题不合格只丢单题，全丢光才等同「没找出东西」，走降级
   const raw = JSON.parse(okQuiz(3));
+  raw[0].opts = [];
   raw[1].opts = [];
   raw[2].title = '';
   assert.throws(() => parseQuiz(JSON.stringify(raw)), /题数/);
+});
+
+// ---- sanitizeAnswers（草稿保存与定稿提交共用）----
+
+const quizOf = (n = 3) => ({ questions: parseQuiz(okQuiz(n)) });
+
+test('sanitizeAnswers 保留合法作答并截断补充说明', () => {
+  const out = sanitizeAnswers(quizOf(2), { Q1: { v: 'b', note: 'x'.repeat(50) } }, 10);
+  assert.deepEqual(out, { Q1: { v: 'b', note: 'x'.repeat(10) } });
+});
+
+test('sanitizeAnswers 放行「不确定」', () => {
+  const out = sanitizeAnswers(quizOf(2), { Q1: { v: UNSURE_VALUE, note: '' } }, 100);
+  assert.equal(out.Q1.v, UNSURE_VALUE);
+});
+
+test('sanitizeAnswers 丢弃不存在的题与不存在的选项', () => {
+  const out = sanitizeAnswers(quizOf(2), { Q9: { v: 'a' }, Q1: { v: '不存在' } }, 100);
+  assert.deepEqual(out, {});
+});
+
+test('sanitizeAnswers 丢弃「只写补充不选项」', () => {
+  // 逃生口是「不确定」而不是留空，否则绕过接口就能提交半份问卷
+  const out = sanitizeAnswers(quizOf(2), { Q1: { v: '', note: '我再想想' } }, 100);
+  assert.deepEqual(out, {});
+});
+
+test('sanitizeAnswers 对任何脏形状都不抛错', () => {
+  const q = quizOf(2);
+  for (const bad of [null, undefined, 'x', 42, [], { Q1: null }, { Q1: { v: 7 } }]) {
+    assert.deepEqual(sanitizeAnswers(q, bad, 100), {});
+  }
+  assert.deepEqual(sanitizeAnswers(null, { Q1: { v: 'a' } }, 100), {});
+});
+
+test('sanitizeAnswers 允许部分作答（草稿态的立足点）', () => {
+  // 定稿的「必答」校验在路由层做；本函数不判完整性，否则草稿就存不下半份答案
+  const out = sanitizeAnswers(quizOf(3), { Q2: { v: 'a', note: '' } }, 100);
+  assert.deepEqual(Object.keys(out), ['Q2']);
 });
 
 // ---- answersToPromptPart ----

@@ -20,9 +20,10 @@
 ### memory-bank/（后台偏好提炼流水线，不走 dispatch）
 - `memory-bank/index.js` — 胶水层：`runOnce` 跑一轮提炼、`startMemoryBankTicker` 定时 tick、`writeRenders` 渲染落盘并挂接 CLAUDE.md。全模块唯一的 IO 编排点。
 - `memory-bank/schedule.js` — `shouldRun`：双窗口（额度重置前 30 分钟 / 凌晨保底）+ busy / cooldown / exhausted 判定。纯函数，token 语义就地复刻 token-rotation。
-- `memory-bank/scan-sessions.js` — `scanForUnanalyzedSessions`：扫描 `~/.claude/projects` 下未分析或已修改的 `.jsonl` 文件，返回待处理列表。纯函数、零 LLM。
-- `memory-bank/analyze.js` — Phase 1 LLM 层：`analyzeSession` 对单个会话转录提取 findings（bug/solution/pattern/preference）；返回 `null`(调用失败) / `[]`(正常无产出)。
-- `memory-bank/synthesize.js` — Phase 2 LLM 层：`synthesizeMemories` 把多会话 findings 合成为 memories 写入 bank；返回 `null`(调用失败) / `[]`(正常无产出)。
+- `memory-bank/scan-sessions.js` — `scanForUnanalyzedSessions`：扫描 `~/.claude/projects` 下未分析或已修改的 `.jsonl` 文件，返回待处理列表。纯函数、零 LLM。`isSubagentTranscript` 把 `subagents/` 整棵剪掉——子代理转录里没有用户的话，占过全库 71% 却产不出偏好。
+- `memory-bank/analyze.js` — Phase 1 LLM 层：`analyzeSession` 对单个会话转录提取 findings（bug/solution/pattern/preference）；返回 `null`(调用失败) / `[]`(正常无产出)。自带 `ANALYZE_TIMEOUT_MS`=180s。
+- `memory-bank/synthesize.js` — Phase 2 LLM 层：`synthesizeMemories` 把多会话 findings 合成为 memories 写入 bank；返回 `null`(调用失败) / `[]`(正常无产出)。自带 `SYNTHESIS_TIMEOUT_MS`=180s。
+- `memory-bank/sandbox.js` — `classifyCwd`：记忆库两个 LLM 调用的空工作目录。**两个提炼调用都不读任何文件**，落到项目根只会加载整份 CLAUDE.md / skills / MCP：实测慢 2.2 倍、贵 2.7 倍，还把输出带偏。
 - `memory-bank/render.js` — 条目 → Markdown：`selectForInjection` / `renderMarkdown`（含注入预算截断）；支持 v2 memories（自动归一化 status/inject/scope 字段），`FINDING_TYPE_LABEL` 常量供 UI 层使用。纯函数。
 - `memory-bank/prefilter.js` — **v1 主链路（已不作为默认链路使用）**：`buildExtractionInput` 从 user-log 游标读取并按字节偏移组织会话输入。
 - `memory-bank/extract.js` — **v1 主链路（已不作为默认链路使用）**：`extractFromSessions` 整批一次 LLM 调用提取候选条目。
@@ -45,6 +46,8 @@
 - `project-checkup/evidence/selectors-project.logic.js` — 项目级召回器：依赖图与环 / 依赖清单 / 上手文档 / 仓库卫生深化。**聚合粒度是这层的关键**（依赖问题天生是「目录对」级而非逐文件级）。
 - `project-checkup/check-holistic.js` + `.logic.js` — 维度「整体智能评估」：读**其它维度的结论** + 项目结构，经只读 agent 产出优先级行动计划（topActions / contradictions / strengths）。不参与总分加权。
 - `project-checkup/index.js` — `runStaticCheckup` 同步跑静态维度(map / rules)、其余按注册表留占位待异步回填；`LLM_DIM_KEYS` 由注册表取补集得出；`recomputeReport` 原地重算总分。
+- `project-checkup/ignore.logic.js` — 豁免的纯函数层：三元组匹配、issue 过滤、已豁免 code 集合、说明文案、`IGNORED.md` 渲染。
+- `project-checkup/ignore.js` — 豁免的 IO 层：读写 store + 重渲染 `.claude/optimize/IGNORED.md` + 按维度精确作废指纹缓存（三件事收口在一处，调用方不必知道）。
 - `project-checkup/check-map.js` + `.logic.js` — 项目地图：遍历模块、比对 mtime 判过期、扫死链。
 - `project-checkup/check-prompts.js` + `.logic.js` — 提示词质量：静态捞候选 + LLM 判分。
 - `project-checkup/check-comments.js` + `.logic.js` — 注释合理性：抽样注释块 + LLM 判「是否解释为什么」。
@@ -94,9 +97,13 @@
 `server.js` 调 `startMemoryBankTicker`（`memory-bank/index.js`），每 10 分钟 tick：
 1. `schedule.shouldRun`（注入 now / settings / tokens / activeRunCount）判是否进窗口，不进就 return；
 2. 进窗口 → `runOnce` 跑两阶段：
-   - **Phase 1（逐会话分析）**：`scan-sessions.scanForUnanalyzedSessions` 扫 `~/.claude/projects/**/*.jsonl`，找出未分析或文件已变更的会话文件 → 逐文件读取转录内容 → `analyze.analyzeSession`（LLM）提取 findings（bug / solution / pattern / preference）→ `store.addSession` / `patchSession` 把 findings 写入 bank；`analyzeSession` 返回 `null` 表示调用失败、该文件跳过不推进，返回 `[]` 表示正常无产出、推进游标；
-   - **Phase 2（批量合成）**：汇总 bank 中所有 sessions 的 findings → `synthesize.synthesizeMemories`（LLM）合成为跨会话 memories → `store.addMemory` 写入 bank；返回值语义同 Phase 1；
+   - **Phase 1（逐会话分析）**：`scan-sessions.scanForUnanalyzedSessions` 扫 `~/.claude/projects/**/*.jsonl`（**`subagents/` 整棵剪枝**），找出未分析或文件已变更的会话文件 → 逐文件读取转录内容 → `analyze.analyzeSession`（LLM）提取 findings（bug / solution / pattern / preference）→ `store.addSession` / `patchSession` 把 findings 写入 bank；`analyzeSession` 返回 `null` 表示调用失败、该文件跳过不推进，返回 `[]` 表示正常无产出、推进游标；
+   - **Phase 2（增量分批合成）**：`synthesize.batchSessionsForSynthesis` 挑出**尚未合成**（无 `synthesizedAt`）的 session，按 4 万字符预算切批、单轮最多 3 批 → 逐批 `synthesize.synthesizeMemories`（LLM，prompt 带上已有 memories 的 statement 供模型自行去重）→ 成功才给该批 session 打 `synthesizedAt` 推进游标，失败即收手留待下轮；返回值语义同 Phase 1。**不可退回「全量 flatMap 一次送出」**：实测 6081 条 findings 会撑出 71.5 万 token（上限 20 万），且随使用单调恶化，是记忆库停更八天的直接原因；
 3. `writeRenders`：`render.renderMarkdown` 渲染 → 落盘 `memory-bank.md` → `ensureImport` 挂进 CLAUDE.md。
+
+**两条不可回退的调用约定**（2026-09-18 事故换来，两个 LLM 调用点都必须满足）：
+- **自带超时预算**。`llm-classify` 的 30s 默认是为「一句话意图分类」校准的，而这里 prompt 大一个数量级：实测 analyze 需 70s、synthesize 需 51.5s。吃默认值的后果是 Phase 2 自 9/10 起 **83 次调用成功 0 次**（日志里「调用次数」与「无结果次数」每天完全相等），记忆永远为 0；Phase 1 成功率也只有 10~25%，且失败会把记录重置成 `pending` 而 `analyzedAt` 留 0 —— 下轮扫描必然再选中它，形成「超时 → 待分析 → 重扫 → 再超时」的死循环，面板上看就是「分析完还是待分析、一轮轮重复分析」。
+- **传 `classifyCwd()` 而非默认 cwd**。同一 prompt 的对照实验：项目根 cwd 用 156s / $0.104 且返回的 JSON **丢了 `findings` 键**，空目录 cwd 用 70s / $0.039 且输出完全正确。
 
 另有手动触发路径：`src/entrypoints/web/routes-memory.js` 直接调 `runOnce`。
 数据流：`~/.claude/projects/**/*.jsonl → scan-sessions → analyze(LLM, Phase 1) → store(sessions/findings) → synthesize(LLM, Phase 2) → store(memories) → render → 磁盘 memory-bank.md`，纯函数各司其职，只在 `index.js` 汇成 IO。
@@ -134,3 +141,5 @@
 - 要改 **rules→skill 降级逻辑** → 文本变换在 `fix-rules.logic.js`、fs 执行 / 失败分级在 `fix-rules.js`。
 - 要改 **地图修复 / 生成** → 写盘在 `fix-map.js`、选材 / 幂等合成在 `fix-map.logic.js`、正文生成在 `gen-map.js`、喂给模型的事实包在 `map-facts.js`。
 - 要改 **备份 / 还原 / 二次修改检测** → 改 `project-optimize/backup.js`（纯逻辑在 `backup.logic.js`）。
+- 要改**「这不是问题」的匹配粒度或 IGNORED.md 的格式** → 改 `project-checkup/ignore.logic.js`（纯函数，动它先看 `.test.js`）；要改**落盘副作用的次序**（store / md / 缓存作废）→ 改 `project-checkup/ignore.js`。
+- 要改**豁免在体检里的生效点** → 召回排除在 `audit-engine.logic.js` 的 `excludeIgnoredCandidates`（只对 10 个 audit 维度、省额度），落地前兜底过滤在 `entrypoints/web/optimize-ops.js` 的 `applyIgnores`（覆盖全 17 维）。**两道都要在**：前者省额度但覆盖不全，后者覆盖全但省不了额度。

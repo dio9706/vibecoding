@@ -43,6 +43,15 @@ import { parseAliasLines, formatAliasLines, buildVarDecl } from './actions-panel
         }
       }
 
+      /**
+       * 关键词展示：自动学来的词标上「·自动」，让人一眼看出哪些不是自己配的。
+       * 删掉某个自动词 = 否决它（后端 reconcileAutoKeywords 会记进 rejectedKeywords，永不再学）。
+       */
+      function formatKeywords(a) {
+        const auto = new Set((a.autoKeywords || []).map((x) => x && x.word).filter(Boolean));
+        return (a.keywords || []).map((k) => (auto.has(k) ? `${k} ·自动` : k)).join(', ');
+      }
+
       async function renderActionsList() {
         const actions = await loadActions();
         const container = $('#actionsList');
@@ -51,7 +60,7 @@ import { parseAliasLines, formatAliasLines, buildVarDecl } from './actions-panel
           : actions.map((a) => `
           <div class="action-card">
             <div class="action-name">${escapeHtml(a.name)}${a.enabled === false ? ' <span style="color:var(--faint);font-size:11px;">(已禁用)</span>' : ''}</div>
-            <div class="action-meta">关键词：${escapeHtml((a.keywords || []).join(', ') || '—')}</div>
+            <div class="action-meta">关键词：${escapeHtml(formatKeywords(a) || '—')}</div>
             <div class="action-meta">脚本：${escapeHtml(a.scriptName || '—')} · 权限：${escapeHtml(a.permission || 'guest')}</div>
             <div style="margin-top: 8px; display:flex; gap:6px;">
               <button data-action-id="${escapeHtml(a.id)}" class="editActionBtn btn">编辑</button>

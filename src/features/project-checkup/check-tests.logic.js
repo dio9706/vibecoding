@@ -16,10 +16,64 @@ const DEDUCT_NO_TESTS = 30;
 const DEDUCT_LARGE_UNTESTED = 5;
 const MAX_LARGE_DEDUCT = 30; // 大文件缺口的扣分上限，避免 20 个文件把分数打到 0
 
-/** 项目既有约定：x.js 的测试是 x.test.js 或 x.logic.test.js */
+/** 单文件组件的测试文件用什么扩展名写。见 testPathsFor 里的说明 */
+const SFC_TEST_EXT = { vue: ['ts', 'js'], svelte: ['ts', 'js'] };
+
+/**
+ * 这条路径是不是一个测试文件。
+ *
+ * 三种约定都要认，少认一种就会把「有测试」误判成「零测试」（S3 是 -30 分的重扣项）：
+ *   1. `x.test.ts` / `x.spec.ts` —— 同级同名，最通用
+ *   2. `__tests__/x.ts` —— Jest / Vitest 的目录约定，**本项目实测就是这一种**
+ *   3. `tests/` / `test/` 目录下的文件 —— Python、Go 之外的通用布局
+ *
+ * 原实现只认 `/\.test\.m?js$/`，在 kxmall-app-ui 上 106 个 `src/**\/__tests__/*.test.ts`
+ * 一个都没认出来。
+ *
+ * @param {string} rel 相对项目根的正斜杠路径
+ */
+export function isTestFile(rel) {
+  const p = String(rel || '');
+  if (/\.(test|spec)\.[A-Za-z0-9]+$/i.test(p)) return true;
+  if (/(^|\/)(__tests__|__test__)\//i.test(p)) return true;
+  if (/(^|\/)tests?\//i.test(p)) return true;
+  return false;
+}
+
+/**
+ * 一个源文件的配对测试候选路径。
+ *
+ * **保留原扩展名**：`src/a.ts` 的测试是 `src/a.test.ts`，不是 `src/a.test.js`。
+ * 原实现写死 `.js`，于是在 TS 项目里永远查不到配对测试——S2「大文件缺测试」会对
+ * 每个大文件误报，而那些文件其实测试齐全。
+ *
+ * 同时给出 `__tests__/` 变体：那是本项目实测使用的组织方式。
+ */
 export function testPathsFor(rel) {
-  const base = String(rel).replace(/\.js$/, '');
-  return [`${base}.test.js`, `${base}.logic.test.js`];
+  const s = String(rel);
+  const m = /^(.*)\.([A-Za-z0-9]+)$/.exec(s);
+  if (!m) return [`${s}.test.js`];
+  const [, base, ext] = m;
+  const slash = base.lastIndexOf('/');
+  const dir = slash >= 0 ? base.slice(0, slash + 1) : '';
+  const name = slash >= 0 ? base.slice(slash + 1) : base;
+
+  // 单文件组件的测试**不会**是 `.test.vue`——组件测试写在 .test.ts / .test.js 里。
+  // 不特判的话，每个超过 500 行的 .vue 都会因为「找不到 x.test.vue」被误报成缺测试，
+  // 而它其实在 __tests__/x.test.ts 里测得好好的
+  const exts = SFC_TEST_EXT[ext.toLowerCase()] || [ext];
+
+  const out = [];
+  for (const e of exts) {
+    out.push(
+      `${base}.test.${e}`,
+      `${base}.spec.${e}`,
+      `${base}.logic.test.${e}`,
+      `${dir}__tests__/${name}.test.${e}`,
+      `${dir}__tests__/${name}.spec.${e}`,
+    );
+  }
+  return out;
 }
 
 /**
@@ -47,9 +101,17 @@ export function evaluateTests({
   testFileCount = 0,
   sourceFileCount = 0,
 } = {}) {
+  // 每个分支都要原样带上 testRun：修复侧的测试闸（decideGate）靠它决定要不要放行
+  // 源码重构，而前端要在**用户点修复之前**就能预判闸的开合。
+  // 从 issues 里反推（「有没有 S1」）也能算，但那是把判据藏在文案里——
+  // 加一个结构化字段，`decideGate(report.dims.tests.testRun)` 一行就是答案。
+  const run = { status: testRun?.status || 'na', reason: testRun?.reason || '' };
+
   // 空仓库/没有源码：不是缺陷，不扣分也不计入总分
   if (!sourceFileCount) {
-    return { score: null, status: 'na', issues: [], reason: '项目里没有可分析的源文件' };
+    return {
+      score: null, status: 'na', issues: [], testRun: run, reason: '项目里没有可分析的源文件',
+    };
   }
 
   // 超时必须判 partial 而不是「测试失败」。混为一谈会让所有大项目永久不及格——
@@ -59,6 +121,7 @@ export function evaluateTests({
       score: null,
       status: 'partial',
       issues: [],
+      testRun: run,
       reason: testRun.reason || '测试执行超时，本维度不计入总分',
     };
   }
@@ -109,7 +172,7 @@ export function evaluateTests({
         // 有明确目标（新建 `<源文件>.test.js`），且只新建不改源码，
         // 产出物还要真跑通才保留。交给 llm-create
         fixable: true,
-        fixHint: `新建 ${String(f.file).replace(/\.js$/, '')}.test.js；文件过大时可先把纯逻辑拆到 .logic.js 再测`,
+        fixHint: `新建 ${testPathsFor(f.file)[0]}；文件过大时可先把纯逻辑拆到单独模块再测`,
         meta: { lines: f.lines },
       });
     }
@@ -119,6 +182,7 @@ export function evaluateTests({
     score: Math.max(0, Math.min(100, Math.round(score))),
     status: 'done',
     issues,
+    testRun: run,
     reason: testRun?.status === 'na' ? testRun.reason || '未执行测试命令' : '',
   };
 }

@@ -361,7 +361,7 @@ function validateVerdicts(raw, expectedCount) {
  *
  * @returns {Promise<Array|null>} null 表示这批失败（超时/额度耗尽/结构不合法/条数不符）
  */
-async function judgeBatch(batch, index) {
+async function judgeBatch(batch, index, signal) {
   const payloadText = buildBatchPayload(batch);
   if (payloadText === null) {
     // 载荷被截断意味着实际送出去的块数少于 batch.length，条数校验必然失败；
@@ -372,12 +372,15 @@ async function judgeBatch(batch, index) {
 
   const prompt = buildPrompt(payloadText, batch.length);
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    // 重试前先看中止：用户已经停了，第二次尝试是纯粹的额度浪费
+    if (signal?.aborted) return null;
     const raw = await runClassifierOnce({
       prompt,
       systemPrompt: SYSTEM_PROMPT,
       model: JUDGE_MODEL,
       logTag: `checkup/comments#${index}`,
       timeoutMs: BATCH_TIMEOUT_MS,
+      signal,
     });
     const list = raw ? validateVerdicts(raw, batch.length) : null;
     if (list) return list;
@@ -449,11 +452,13 @@ function toFindings(verdicts) {
  * @param {object} [opts]
  * @param {{fingerprint:string, result:object}|null} [opts.cache] 上次的缓存条目（由上层持久化后传入）
  * @param {boolean} [opts.force] 忽略缓存强制重跑
+ * @param {AbortSignal} [opts.signal] 中止信号：用户点「中止体检」时立刻停掉正在跑的批，
+ *   不再烧额度（结果由上层 land 的守卫丢弃）
  * @returns {Promise<{score:number|null, status:string, issues:Array, verdictLog:Array, cached:boolean,
  *   cacheEntry:{fingerprint:string, result:object}|null, fingerprint:string}>}
  *   `cacheEntry` 即下次要传回 `opts.cache` 的东西；status 非 done 时为 null（见 finish 的说明）
  */
-export async function checkComments(projectDir, { cache = null, force = false } = {}) {
+export async function checkComments(projectDir, { cache = null, force = false, signal } = {}) {
   // 只看 git 追踪的文件：构建产物副本会让同一处注释被重复报告并重复烧额度（详见 git-tracked.js）
   const tracked = await gitTrackedFiles(projectDir);
   const all = collectSourceFiles(projectDir, tracked);
@@ -504,7 +509,7 @@ export async function checkComments(projectDir, { cache = null, force = false } 
   for (let i = 0; i < blocks.length; i += BATCH_SIZE) batches.push(blocks.slice(i, i + BATCH_SIZE));
 
   // 限并发跑各批：批之间互不依赖，串行会把耗时线性放大（4 批 × 最长 5 分钟）
-  const results = await mapLimited(batches, MAX_CONCURRENCY, (b, i) => judgeBatch(b, i + 1));
+  const results = await mapLimited(batches, MAX_CONCURRENCY, (b, i) => judgeBatch(b, i + 1, signal));
 
   // 任何一批失败 → 整体走 partial。
   // 不做「部分判定 + 部分未判定」的混合态：evaluateComments 的 findings 语义是二元的

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   strategiesOf, claims, partitionIssues, selectFixableDims, needsTestGate, BESPOKE_DIMS,
-  riskOf, risksFor, dimHasWorkAt,
+  riskOf, risksFor, dimHasWorkAt, strategyForIssue,
 } from './fix-engine.logic.js';
 
 const issue = (over = {}) => ({ code: 'X1_MUST_SPLIT', file: 'src/a.js', line: 1, message: 'm', ...over });
@@ -283,4 +283,41 @@ test('不需要基线的策略不受闸影响（闸关也照常跑）', () => {
   });
   assert.deepEqual(r.byStrategy.map((s) => s.strategy), ['deterministic']);
   assert.equal(r.degraded, false, '机械修复不碰代码行为，与测试基线无关');
+});
+
+// ---------- strategyForIssue：认领顺序的唯一实现 ----------
+
+test('strategyForIssue：按策略顺序取第一个认领者，advisory 兜底', () => {
+  const srcIssue = { file: 'src/a.js', line: 1, message: 'x' };
+  const docIssue = { file: 'README.md', line: 1, message: 'x' };
+
+  // llm-refactor 认领源码
+  assert.equal(strategyForIssue(['llm-refactor', 'advisory'], srcIssue), 'llm-refactor');
+  // llm-rewrite 只认文档，源码落到 advisory
+  assert.equal(strategyForIssue(['llm-rewrite', 'advisory'], srcIssue), 'advisory');
+  assert.equal(strategyForIssue(['llm-rewrite'], docIssue), 'llm-rewrite');
+  // 检测器逐条否决 → 一律 advisory
+  assert.equal(strategyForIssue(['llm-refactor'], { ...srcIssue, fixable: false }), 'advisory');
+  // 没有任何策略 → advisory
+  assert.equal(strategyForIssue([], srcIssue), 'advisory');
+  assert.equal(strategyForIssue(null, srcIssue), 'advisory');
+});
+
+test('strategyForIssue 与 partitionIssues 的认领结果一致（防二次实现漂移）', () => {
+  const dim = { id: 'complexity', fix: ['llm-refactor'] };
+  const issues = [
+    { file: 'src/a.js', line: 1, message: 'a' },
+    { file: 'README.md', line: 2, message: 'b' },
+    { file: 'src/c.js', line: 3, message: 'c', fixable: false },
+  ];
+  const part = partitionIssues({ dim, issues });
+
+  // 从 partitionIssues 的分组反推每条 issue 的策略
+  const fromPartition = issues.map((it) => {
+    const hit = part.byStrategy.find((g) => g.issues.includes(it));
+    return hit ? hit.strategy : 'advisory';
+  });
+  const fromHelper = issues.map((it) => strategyForIssue(['llm-refactor'], it));
+
+  assert.deepEqual(fromHelper, fromPartition);
 });

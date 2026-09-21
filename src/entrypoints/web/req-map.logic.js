@@ -5,6 +5,7 @@
  * 也不让 LLM 出——见 spec §3.1，坐标由前端 req-map-layout.logic.js 分层布局算出来。
  */
 
+import { randomUUID } from 'node:crypto';
 import { jsonrepair } from 'jsonrepair';
 
 /** 逻辑点类型别名归一：模型中英夹杂是常态，非法值一律落到 mod（宁可标成「修改」也不丢点）。 */
@@ -95,6 +96,62 @@ function toStrList(v) {
   return v.map((x) => String(x ?? '').trim()).filter(Boolean);
 }
 
+/**
+ * 旧结构升级：页面级 `figma` 单对象 + `restoredAt` → 条目级 `figmas` 数组。
+ *
+ * **必须确定性且幂等**：升级不落盘（用户不动手时盘上一直是旧结构），每次读地图都会再跑一遍。
+ * id 若随机生成，前端拿到的 id 与下次 restore 时重新升级出的 id 会对不上，还原直接报「设计稿不存在」。
+ * 旧结构必然只有一条稿，故固定 `fg-legacy`；新结构缺 id 的（理论上不会有）按下标兜底。
+ */
+export function upgradeFigmas(page) {
+  if (Array.isArray(page?.figmas)) {
+    // 下标兜底 id 必须过 uniqueId 去重：显式 id 与下标兜底 id 可能撞车（如显式给了 'fg-2'，
+    // 又有条目缺 id 排在第 2 位），撞车会导致前端按 id 定位查到错误条目、还原打到别的稿上。
+    const used = new Set();
+    return page.figmas
+      .map((f, i) => ({
+        id: uniqueId(String(f?.id ?? '').trim() || `fg-${i + 1}`, used),
+        url: String(f?.url ?? '').trim(),
+        label: String(f?.label ?? '').trim(),
+        restoredAt: f?.restoredAt ?? null,
+      }))
+      .filter((f) => f.url);
+  }
+  const url = String(page?.figma?.url ?? '').trim();
+  if (!url) return [];
+  return [{ id: 'fg-legacy', url, label: '', restoredAt: page?.restoredAt ?? null }];
+}
+
+/**
+ * 设计稿列表全量覆盖：以入参为准，按 id 把已有条目的 `restoredAt` 带过来。
+ *
+ * url 变了必须清掉 `restoredAt` —— 换了一张稿，「已按这张稿还原过」就不再成立
+ *（与旧版「解绑连带清 restoredAt」同一条理由）。只改 label 不算换稿。
+ * 空 url 条目直接丢弃：前端的「删除」就是把该条从列表里剔掉后整表提交。
+ */
+export function mergeFigmas(prevList, incoming) {
+  const prevById = new Map(
+    (Array.isArray(prevList) ? prevList : []).map((f) => [String(f?.id ?? '').trim(), f]),
+  );
+  const out = [];
+  for (const raw of Array.isArray(incoming) ? incoming : []) {
+    const url = String(raw?.url ?? '').trim();
+    if (!url) continue;
+    const id = String(raw?.id ?? '').trim();
+    // 空 id 不构成身份，一律走新增：否则 prev 里 id 缺失的条目与 incoming 里同样没给 id 的
+    // 新增条目会在 Map 里用同一个空串键撞到一起，新增条目被误判成「找到了旧条目」，
+    // 白白继承了不相干的 restoredAt。
+    const old = id ? prevById.get(id) : null;
+    out.push({
+      id: old ? old.id : `fg-${randomUUID().slice(0, 8)}`,
+      url,
+      label: String(raw?.label ?? '').trim(),
+      restoredAt: old && old.url === url ? (old.restoredAt ?? null) : null,
+    });
+  }
+  return out;
+}
+
 function normalizePoints(raw, pageId, usedPointIds) {
   if (!Array.isArray(raw)) return [];
   const out = [];
@@ -122,7 +179,8 @@ function normalizePoints(raw, pageId, usedPointIds) {
  * @param {object} raw - 模型产出的 { pages, edges }
  * @param {object} [opts]
  * @param {object|null} [opts.prev] - 上一版地图。修订会全量重出 pages，用户挂过的设计稿
- *   （figma/restoredAt）必须**按页面名**回迁，否则每修订一次就把设计稿丢一次。
+ *   （`figmas`，含各条的 `restoredAt`）必须**按页面名**回迁，否则每修订一次就把设计稿丢一次。
+ *   prev 可能仍是旧的 `{ figma, restoredAt }` 结构，交给 upgradeFigmas 顺带升级。
  */
 export function normalizeMap(raw, { prev = null } = {}) {
   const pagesIn = Array.isArray(raw?.pages) ? raw.pages : [];
@@ -144,8 +202,7 @@ export function normalizeMap(raw, { prev = null } = {}) {
       name,
       file: String(p?.file ?? '').trim(),
       state,
-      figma: old?.figma ?? null,
-      restoredAt: old?.restoredAt ?? null,
+      figmas: upgradeFigmas(old),
       points,
     });
   });

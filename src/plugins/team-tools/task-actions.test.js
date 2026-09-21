@@ -98,13 +98,14 @@ test('isAwaitingMerge：任一要素缺失 / null 入参 → false', () => {
   assert.equal(isAwaitingMerge(null), false, 'null 入参不得抛错');
 });
 
-test('isDiscardable：与合并同源但不要求 baseBranch（分支还在就删得掉）', () => {
+test('isDiscardable：合并前后都可放弃（已合并走 revert，不是不能放弃）', () => {
   const base = { auto: true, status: 'done', merged: false, branch: 'task/x', baseBranch: 'main' };
   assert.equal(isDiscardable(base), true);
-  assert.equal(isDiscardable({ ...base, baseBranch: '' }), true, '没记住合并目标不该妨碍放弃');
-  assert.equal(isDiscardable({ ...base, branch: '' }), false, '无分支可删');
-  assert.equal(isDiscardable({ ...base, merged: true }), false, '已合并不该再删分支');
-  assert.equal(isDiscardable({ ...base, status: 'developing' }), false, '执行中不能删');
+  assert.equal(isDiscardable({ ...base, baseBranch: '' }), true, '没记住合并目标不该妨碍删分支');
+  assert.equal(isDiscardable({ ...base, merged: true }), true, '已合并改为走 revert，仍可放弃');
+  assert.equal(isDiscardable({ ...base, branch: '' }), false, '无分支');
+  assert.equal(isDiscardable({ ...base, status: 'developing' }), false, '执行中不能放弃');
+  assert.equal(isDiscardable({ ...base, discarded: true }), false, '已放弃不得重复放弃');
   assert.equal(isDiscardable(null), false, 'null 入参不得抛错');
 });
 
@@ -147,7 +148,7 @@ test('discardTaskById：非自动任务 → 400', async () => {
   const r = await discardTaskById(t.id);
   assert.equal(r.ok, false);
   assert.equal(r.code, 400);
-  assert.equal(r.error, '任务不满足放弃条件（须为自动完成且未合并）');
+  assert.equal(r.error, '任务不满足放弃条件（须为自动完成且未放弃）');
 });
 
 // ---- merge 的 git 路径 ----
@@ -207,6 +208,28 @@ test('mergeTaskById：提交钩子拦截 → hookBypassed，history 追加钩子
   assert.equal(r.task.history.at(-1).event, '已合并 task/h → main（提交钩子拦截，已跳过钩子校验完成合并）');
 });
 
+test('mergeTaskById：成功落 mergeCommit 与 autoMerged（放弃改动的锚点 + 面板文案依据）', async () => {
+  const repo = makeRepo('merge-fields');
+  commitOnBranch(repo, 'task/mf', 'mf.txt', 'x\n');
+  const t = seedTask({ repo, branch: 'task/mf', baseBranch: 'main' });
+
+  const r = await mergeTaskById(t.id, { auto: true });
+  assert.equal(r.ok, true, `应合并成功，实际：${r.error || ''}`);
+  assert.match(r.task.mergeCommit, /^[0-9a-f]{40}$/);
+  assert.equal(r.task.autoMerged, true);
+  assert.equal(getTask(t.id).mergeCommit, r.task.mergeCommit, 'mergeCommit 必须落盘');
+});
+
+test('mergeTaskById：人工合并 autoMerged 为 false', async () => {
+  const repo = makeRepo('merge-manual');
+  commitOnBranch(repo, 'task/mm', 'mm.txt', 'x\n');
+  const t = seedTask({ repo, branch: 'task/mm', baseBranch: 'main' });
+
+  const r = await mergeTaskById(t.id);
+  assert.equal(r.ok, true);
+  assert.equal(r.task.autoMerged, false);
+});
+
 // ---- discard 的 git 路径 ----
 
 test('discardTaskById：删分支成功 → 200，任务置为已放弃（不要求 baseBranch）', async () => {
@@ -240,4 +263,52 @@ test('discardTaskById：删分支失败 → 409，任务状态一行不动（不
   assert.equal(stored.status, 'done', '落盘状态不得被改');
   assert.notEqual(stored.discarded, true);
   assert.notEqual(sh(['branch', '--list', 'task/f'], repo).trim(), '', '分支仍在');
+});
+
+test('discardTaskById：已合并任务走 revert，改动从基线分支撤销并落 revertedAt', async () => {
+  const repo = makeRepo('discard-revert');
+  commitOnBranch(repo, 'task/dr', 'dr.txt', 'x\n');
+  const t = seedTask({ repo, branch: 'task/dr', baseBranch: 'main' });
+  const m = await mergeTaskById(t.id, { auto: true });
+  assert.equal(m.ok, true, `前置合并应成功，实际：${m.error || ''}`);
+  assert.equal(fs.existsSync(path.join(repo, 'dr.txt')), true);
+
+  const r = await discardTaskById(t.id);
+  assert.equal(r.ok, true, `应撤销成功，实际：${r.error || ''}`);
+  assert.equal(r.code, 200);
+  assert.equal(r.task.status, 'rejected');
+  assert.equal(r.task.discarded, true);
+  assert.ok(r.task.revertedAt, 'revertedAt 必须落值（面板据此区分「撤销」与「删分支」文案）');
+  assert.equal(r.task.revertedBy, 'git');
+  assert.equal(fs.existsSync(path.join(repo, 'dr.txt')), false, '合并进来的文件应被撤销');
+  assert.equal(sh(['branch', '--list', 'task/dr'], repo).trim(), '', '撤销后任务分支应一并删除');
+});
+
+test('discardTaskById：已合并但撤销失败 → 409，任务状态一行不动', async () => {
+  const repo = makeRepo('discard-revert-fail');
+  commitOnBranch(repo, 'task/drf', 'drf.txt', 'x\n');
+  // 基线分支指向一个不存在的分支 → revertMergeCommit 在 branchExists 处确定性早退。
+  // ⚠️ 刻意不用「假 sha 触发 revert 冲突」来造失败：那条路会走进真实的 LLM 兜底，
+  // 在无 Claude 凭证的测试环境里要么抛错要么挂满 5 分钟超时，把单测拖垮。
+  const t = seedTask({ repo, branch: 'task/drf', baseBranch: 'no-such-branch', merged: true, mergeCommit: 'a'.repeat(40) });
+
+  const r = await discardTaskById(t.id);
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 409);
+  assert.match(r.error, /基线分支不存在/);
+  const stored = getTask(t.id);
+  assert.equal(stored.status, 'done', '落盘状态不得被改（绝不留「已放弃但改动还在」的半放弃态）');
+  assert.notEqual(stored.discarded, true);
+  assert.notEqual(sh(['branch', '--list', 'task/drf'], repo).trim(), '', '撤销没成功，分支不得被删');
+});
+
+test('discardTaskById：未合并任务仍走删分支路径（行为不变）', async () => {
+  const repo = makeRepo('discard-unmerged');
+  commitOnBranch(repo, 'task/du', 'du.txt', 'x\n');
+  const t = seedTask({ repo, branch: 'task/du', baseBranch: 'main', merged: false });
+
+  const r = await discardTaskById(t.id);
+  assert.equal(r.ok, true, `应放弃成功，实际：${r.error || ''}`);
+  assert.equal(r.task.revertedAt, undefined, '没合并过就没有「撤销」这回事');
+  assert.equal(r.task.history.at(-1).event, '放弃改动，已删除分支 task/du');
 });

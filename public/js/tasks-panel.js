@@ -10,7 +10,6 @@ export function bindTasksNav(openFn, isActiveFn) { _openTasksView = openFn; _isT
 
       // ---- 需求 / 故障任务 ----
       let taskTimer = null;
-      let filterAuto = false; // [自动处理] 筛选：只看自动完成且未合并的任务
       // [🔔 飞书通知] 开关的本地镜像。真值在服务端 settings.json 的 uiPrefs.taskNotifyFeishu：
       // 通知是由后端进程发出的，只有服务端的值才算数；存 localStorage 会出现「这台浏览器显示开着、
       // 另一台显示关着」而实际行为只由服务端决定的假象。故每次 loadTasks 都从服务端读回。
@@ -35,8 +34,13 @@ export function bindTasksNav(openFn, isActiveFn) { _openTasksView = openFn; _isT
       const TYPE_ICON_BUG =
         '<svg class="type-icon" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M940 512H792V412c76.8 0 139-62.2 139-139 0-4.4-3.6-8-8-8h-60c-4.4 0-8 3.6-8 8 0 34.8-28.2 63-63 63H232c-34.8 0-63-28.2-63-63 0-4.4-3.6-8-8-8h-60c-4.4 0-8 3.6-8 8 0 76.8 62.2 139 139 139v100H84c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h148v96c0 6.5 0.2 13 0.7 19.3C164.1 728.6 116 796.7 116 876c0 4.4 3.6 8 8 8h56c4.4 0 8-3.6 8-8 0-44.2 23.9-82.9 59.6-103.7 6 17.2 13.6 33.6 22.7 49 24.3 41.5 59 76.2 100.5 100.5S460.5 960 512 960s99.8-13.9 141.3-38.2c41.5-24.3 76.2-59 100.5-100.5 9.1-15.5 16.7-31.9 22.7-49C812.1 793.1 836 831.8 836 876c0 4.4 3.6 8 8 8h56c4.4 0 8-3.6 8-8 0-79.3-48.1-147.4-116.7-176.7 0.4-6.4 0.7-12.8 0.7-19.3v-96h148c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM716 680c0 36.8-9.7 72-27.8 102.9-17.7 30.3-43 55.6-73.3 73.3-20.1 11.8-42 20-64.9 24.3V484c0-4.4-3.6-8-8-8h-60c-4.4 0-8 3.6-8 8v396.5c-22.9-4.3-44.8-12.5-64.9-24.3-30.3-17.7-55.6-43-73.3-73.3C317.7 752 308 716.8 308 680V412h408v268z" fill="currentColor"></path><path d="M304 280h56c4.4 0 8-3.6 8-8 0-28.3 5.9-53.2 17.1-73.5 10.6-19.4 26-34.8 45.4-45.4C450.9 142 475.7 136 504 136h16c28.3 0 53.2 5.9 73.5 17.1 19.4 10.6 34.8 26 45.4 45.4C650 218.9 656 243.7 656 272c0 4.4 3.6 8 8 8h56c4.4 0 8-3.6 8-8 0-40-8.8-76.7-25.9-108.1-17.2-31.5-42.5-56.8-74-74C596.7 72.8 560 64 520 64h-16c-40 0-76.7 8.8-108.1 25.9-31.5 17.2-56.8 42.5-74 74C304.8 195.3 296 232 296 272c0 4.4 3.6 8 8 8z" fill="currentColor"></path></svg>';
 
-      /** 自动完成且待合并（筛选与合并按钮共用判定，与后端 merge 校验条件对齐） */
+      /** 自动完成但还没合并（与后端 merge 校验条件对齐）。
+       *  自动合并已是默认路径（auto-dev 在 status=done 后直接调 mergeTaskById），
+       *  所以这个谓词如今只兜降级情形：自动合并撞冲突/脏文件失败，任务停在 done+mergeError，
+       *  卡片据此给出「合并到主分支」按钮由人接手。 */
       const isAwaitingMerge = (t) => !!t.auto && t.status === 'done' && !t.merged && !!t.branch && !!t.baseBranch;
+      /** 可放弃（与后端 task-actions.js#isDiscardable 同口径）：合并前删分支、合并后 revert 撤销 */
+      const isDiscardable = (t) => !!t.auto && t.status === 'done' && !!t.branch && !t.discarded;
 
       // ---- 未读需求/故障：红点 + 桌面通知 ----
       // 提醒键模型：任务「出现」即一条 new 提醒；status=done 再加一条 done 提醒。
@@ -137,21 +141,20 @@ export function bindTasksNav(openFn, isActiveFn) { _openTasksView = openFn; _isT
 
       async function loadTasks() {
         const body = $('#taskBody');
-        await syncNotifyPref(); // 须在 renderFilterBar 之前完成，否则首帧 chip 状态是错的
+        await syncNotifyPref(); // 须在 renderToolbar 之前完成，否则首帧 chip 状态是错的
         try {
           const data = await (await fetch('/api/tasks')).json();
           const tasks = data.tasks || [];
           latestAlerts = tasks.flatMap(taskAlerts);
           body.innerHTML = '';
-          body.appendChild(renderFilterBar(tasks));
-          const shown = filterAuto ? tasks.filter(isAwaitingMerge) : tasks;
-          if (!shown.length) {
+          body.appendChild(renderToolbar());
+          if (!tasks.length) {
             const empty = document.createElement('div');
             empty.style.cssText = 'color:var(--faint);padding:8px';
-            empty.textContent = filterAuto ? '暂无待合并的自动完成任务' : '暂无需求 / 故障';
+            empty.textContent = '暂无需求 / 故障';
             body.appendChild(empty);
           } else {
-            for (const t of shown) body.appendChild(renderTask(t));
+            for (const t of tasks) body.appendChild(renderTask(t));
           }
           markAllTasksSeen();
         } catch {
@@ -159,20 +162,11 @@ export function bindTasksNav(openFn, isActiveFn) { _openTasksView = openFn; _isT
         }
       }
 
-      // 筛选栏：[自动处理] chip（自动完成且未合并），带数量角标
-      function renderFilterBar(tasks) {
+      // 工具栏。原先这里还有个 [自动处理] 筛选 chip（只看自动完成且未合并的任务），
+      // 已随「自动合并成为默认」下线：auto-dev 跑完就直接合并，这个筛选常态永远是空集。
+      function renderToolbar() {
         const bar = document.createElement('div');
         bar.className = 'task-filter-bar';
-        const pending = tasks.filter(isAwaitingMerge).length;
-        const chip = document.createElement('button');
-        chip.className = 'btn task-filter-chip' + (filterAuto ? ' active' : '');
-        chip.textContent = `自动处理${pending ? `（${pending} 待合并）` : ''}`;
-        chip.title = '只看自动完成且未合并的任务';
-        chip.onclick = () => {
-          filterAuto = !filterAuto;
-          loadTasks();
-        };
-        bar.appendChild(chip);
         // [🔔 飞书通知] 总开关：任务落 done 时后端是否推飞书私聊卡片（task-notify 的第一道守卫）
         const notifyChip = document.createElement('button');
         notifyChip.className = 'btn task-filter-chip' + (taskNotifyFeishu ? ' active' : '');
@@ -240,7 +234,8 @@ export function bindTasksNav(openFn, isActiveFn) { _openTasksView = openFn; _isT
           const auto = document.createElement('span');
           auto.className = 'badge';
           auto.style.color = 'var(--accent-hi)';
-          auto.textContent = t.merged ? '自动完成 · 已合并' : '自动完成';
+          // 自动合并是常态，人工合并是降级后补的 —— 文案分开，便于一眼看出哪些是自己收的尾
+          auto.textContent = t.merged ? (t.autoMerged ? '自动完成 · 已自动合并' : '自动完成 · 已合并') : '自动完成';
           top.appendChild(auto);
         }
         top.appendChild(when);
@@ -269,8 +264,11 @@ export function bindTasksNav(openFn, isActiveFn) { _openTasksView = openFn; _isT
           const br = document.createElement('div');
           br.style.cssText = 'font-size:11px;color:var(--faint);margin-top:4px';
           if (t.discarded) {
-            // 已放弃改动：分支已删除，不能再显示「→ 主分支」与合并失败信息（会让人误以为还能合并）
-            br.textContent = `分支 ${t.branch} 已删除（已放弃改动）`;
+            // 已放弃：撤销过的（曾合并）与纯删分支的，事实不同，文案必须分开 ——
+            // 都写「分支已删除」会让人以为主干上什么都没发生过
+            br.textContent = t.revertedAt
+              ? `分支 ${t.branch} 的改动已从 ${t.baseBranch || '基线分支'} 撤销（已放弃）`
+              : `分支 ${t.branch} 已删除（已放弃改动）`;
           } else {
             br.textContent = `分支 ${t.branch} → ${t.baseBranch || '?'}` + (t.mergeError ? ` · 上次合并失败：${t.mergeError}` : '');
             if (t.mergeError) br.style.color = 'var(--red)';
@@ -333,9 +331,12 @@ export function bindTasksNav(openFn, isActiveFn) { _openTasksView = openFn; _isT
           add('移除', 'danger', () => rejectTask(t));
         } else if (isAwaitingMerge(t)) {
           add('合并到主分支', 'primary', () => mergeTask(t));
-          add('放弃改动', 'danger', () => discardTask(t));
+          add('放弃修改', 'danger', () => discardTask(t));
+        } else if (isDiscardable(t)) {
+          // 已自动合并：没有合并按钮可点了，但改动仍可撤（revert，冲突时交 AI 处理）
+          add('放弃修改', 'danger', () => discardTask(t));
         } else {
-          return null; // developing/已合并/rejected 无操作
+          return null; // developing/已放弃/非自动任务 无操作
         }
         return wrap;
       }
@@ -352,11 +353,15 @@ export function bindTasksNav(openFn, isActiveFn) { _openTasksView = openFn; _isT
         taskAction(t.id, 'merge');
       }
 
-      // 放弃改动确认：明示要删除的分支名与不可恢复（与合并同一档二次提醒）
+      // 放弃确认：合并前后是两件不同的事，文案必须分开说清后果
       async function discardTask(t) {
+        const name = t.title || t.detail || '(无标题)';
+        const message = t.merged
+          ? `确认放弃「${name}」的自动改动？\n将从「${t.baseBranch || '基线分支'}」撤销这次已合并的改动（自动 revert，冲突时交由 AI 处理）。`
+          : `确认放弃「${name}」的自动改动？\n将删除分支「${t.branch}」，改动不可恢复。`;
         const ok = await confirmDialog({
-          title: '放弃改动',
-          message: `确认放弃「${t.title || t.detail || '(无标题)'}」的自动改动？\n将删除分支「${t.branch}」，改动不可恢复。`,
+          title: '放弃修改',
+          message,
           confirmText: '确认放弃',
           danger: true,
         });

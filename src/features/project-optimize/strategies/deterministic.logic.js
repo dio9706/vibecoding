@@ -115,12 +115,19 @@ export const HANDLED_CODES = new Set([
   'H1_RUNTIME_DATA_TRACKED',
   'H2_ONESHOT_TRACKED',
   'H3_SHOULD_IGNORE',
+  'H4_TOOL_BACKUP_TRACKED',
   'P4_DUPLICATE',
 ]);
 
-/** 需要「加 .gitignore + 从索引移除」的那几个码 */
+/**
+ * 需要「加 .gitignore + 从索引移除」的那几个码。
+ *
+ * H4 的 `file` 是**目录**（`.claude/optimize-backup`）而非单个文件，这是本表里唯一的一条——
+ * 所以 `deterministic.js` 的 `git rm --cached` 必须带 `-r`（见那里的说明）。
+ */
 export const IGNORE_CODES = new Set([
   'H1_RUNTIME_DATA_TRACKED',
   'H2_ONESHOT_TRACKED',
   'H3_SHOULD_IGNORE',
+  'H4_TOOL_BACKUP_TRACKED',
 ]);

@@ -278,3 +278,161 @@ test('POST /rollback 结束后释放闸，可以连着还原第二次', async ()
 test('未知路径 → 404', async () => {
   assert.equal((await get('/api/optimize/nope')).status, 404);
 });
+
+// ---------- GET /api/optimize/fix-plan ----------
+
+test('fix-plan 缺 dir 回 400', async () => {
+  const r = await get('/api/optimize/fix-plan');
+  assert.equal(r.status, 400);
+});
+
+test('fix-plan 没体检过时回空计划而不是报错', async () => {
+  const dir = project(null);
+  const r = await get(`/api/optimize/fix-plan?dir=${encodeURIComponent(dir)}`);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.items, []);
+});
+
+test('fix-plan 逐条列出可勾选项，带 id / 动作 / 风险', async () => {
+  const dir = project([ghostIssue]);
+  const r = await get(`/api/optimize/fix-plan?dir=${encodeURIComponent(dir)}`);
+  assert.equal(r.status, 200);
+  assert.equal(r.json.items.length, 1);
+
+  const it = r.json.items[0];
+  assert.equal(it.id, 'rules#0');
+  assert.equal(it.dim, 'rules');
+  assert.equal(it.file, '.claude/rules/ghost.md');
+  // rules 会删文件 + 改写全仓引用，风险取注册表的 high（不是 deterministic 的 low）
+  assert.equal(it.risk, 'high');
+  assert.equal(it.action, '降级为技能');
+  assert.ok(r.json.at, 'at 必须带回，前端提交时要用它做计划快照校验');
+});
+
+// ---------- 细粒度修复：items 选材与计划快照校验 ----------
+
+test('fix 传过期的 reportAt 回 409 + stalePlan（防止旧下标改错文件）', async () => {
+  const dir = project([ghostIssue]);
+  const r = await post('/api/optimize/fix', {
+    dir,
+    items: ['rules#0'],
+    reportAt: '1999-01-01T00:00:00.000Z',
+  });
+  assert.equal(r.status, 409);
+  assert.equal(r.json.stalePlan, true);
+  assert.ok(r.json.reportAt === undefined || typeof r.json.reportAt === 'string');
+});
+
+test('fix 传 items 时只处理选中的项', async () => {
+  const dir = project([
+    ghostIssue,
+    { code: 'R1_SHOULD_DEMOTE', file: '.claude/rules/ghost2.md', fixable: true, message: 'y' },
+  ]);
+  const plan = await get(`/api/optimize/fix-plan?dir=${encodeURIComponent(dir)}`);
+  assert.equal(plan.json.items.length, 2);
+
+  // 只勾第二条
+  const r = await post('/api/optimize/fix', { dir, items: ['rules#1'], reportAt: plan.json.at });
+  assert.equal(r.status, 200);
+  assert.ok(r.json.jobId, '应当开跑');
+
+  const done = await waitFixDone(r.json.jobId);
+  // 只有 ghost2 被处理，ghost 没被碰过
+  assert.match(done.text, /ghost2\.md/);
+  assert.ok(!/"file":"\.claude\/rules\/ghost\.md"/.test(done.text), '没勾的项不该出现在结果里');
+});
+
+test('fix 的 items 全是无效 id 时不误伤（当作没勾任何东西）', async () => {
+  const dir = project([ghostIssue]);
+  const plan = await get(`/api/optimize/fix-plan?dir=${encodeURIComponent(dir)}`);
+  const r = await post('/api/optimize/fix', {
+    dir,
+    items: ['rules#999', '../../etc/passwd#0', 'nosuch#0'],
+    reportAt: plan.json.at,
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.nothing, true, '无效 id 一律丢弃，不该退回「全都修」');
+});
+
+// ---------- 中止体检 ----------
+
+test('checkup/cancel 缺 checkupId 回 400', async () => {
+  const r = await post('/api/optimize/checkup/cancel', {});
+  assert.equal(r.status, 400);
+});
+
+test('checkup/cancel 任务不存在回 404（不是静默 200）', async () => {
+  // 回 200 会让用户以为点停止生效了，然后继续等一个不会来的停止事件
+  const r = await post('/api/optimize/checkup/cancel', { checkupId: 'ckup_nosuch' });
+  assert.equal(r.status, 404);
+});
+
+test('fix 完成事件带 retest 与 handledIds（报告弹窗要用）', async () => {
+  const dir = project([ghostIssue]);
+  const plan = await get(`/api/optimize/fix-plan?dir=${encodeURIComponent(dir)}`);
+  const r = await post('/api/optimize/fix', { dir, items: ['rules#0'], reportAt: plan.json.at });
+  assert.equal(r.status, 200);
+
+  const done = await waitFixDone(r.json.jobId);
+  assert.match(done.text, /"retest":/, 'done 负载必须含复测清单字段');
+  assert.match(done.text, /"handledIds":\["rules#0"\]/, '本次提交的计划项要原样带回');
+});
+
+// ---------- 豁免（这不是问题） ----------
+
+test('豁免接口：登记 → 列出 → 撤销 的完整闭环', async () => {
+  const dir = project();
+
+  // 空清单也要回 200 + 空数组：前端据此渲染「没有豁免」，404 会被它当成请求失败
+  const empty = await get(`/api/optimize/ignores?dir=${encodeURIComponent(dir)}`);
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.json.items, []);
+
+  const added = await post('/api/optimize/ignore', {
+    dir, dim: 'map', code: 'M4_DEAD_LINK', file: 'CLAUDE.md',
+    message: '死链 ./gone.md', note: '那份文档是故意删的，链接下个版本一起清',
+  });
+  assert.equal(added.status, 200);
+  assert.equal(added.json.count, 1);
+
+  const listed = await get(`/api/optimize/ignores?dir=${encodeURIComponent(dir)}`);
+  assert.equal(listed.json.items.length, 1);
+  assert.equal(listed.json.items[0].note, '那份文档是故意删的，链接下个版本一起清');
+
+  // 副本必须落到项目里：它是这个功能「记录到一个单独的文档」的交付物
+  const md = fs.readFileSync(path.join(dir, '.claude/optimize/IGNORED.md'), 'utf8');
+  assert.match(md, /M4_DEAD_LINK/);
+  assert.match(md, /那份文档是故意删的/);
+
+  const removed = await post('/api/optimize/ignore/remove', {
+    dir, dim: 'map', code: 'M4_DEAD_LINK', file: 'CLAUDE.md',
+  });
+  assert.equal(removed.status, 200);
+  assert.equal(removed.json.count, 0);
+});
+
+test('豁免登记缺 note 时回 400', async () => {
+  // 空备注等于没记录 —— 三个月后没人知道为什么豁免。前端必填只是第一道，服务端也要卡
+  const dir = project();
+  const r = await post('/api/optimize/ignore', {
+    dir, dim: 'map', code: 'M4_DEAD_LINK', file: 'CLAUDE.md', note: '   ',
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /为什么/);
+});
+
+test('豁免登记缺 dim / code / file 时回 400', async () => {
+  const dir = project();
+  const r = await post('/api/optimize/ignore', { dir, code: 'M4_DEAD_LINK', file: 'a.md', note: '理由' });
+  assert.equal(r.status, 400);
+});
+
+test('撤销不存在的豁免不报错，返回剩余条数 0', async () => {
+  // 用户在两个标签页各点一次撤销时会走到这里，报错只会让人以为出了问题
+  const dir = project();
+  const r = await post('/api/optimize/ignore/remove', {
+    dir, dim: 'map', code: 'NOPE', file: 'a.md',
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.count, 0);
+});

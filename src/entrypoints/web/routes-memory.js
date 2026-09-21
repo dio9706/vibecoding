@@ -1,6 +1,7 @@
 /**
  * 记忆库 HTTP 接口。沿用本项目单入口子路由范式（对齐 routes-requirements.js）。
  */
+import fs from 'node:fs';
 import { sendJson } from './http-util.js';
 import { withJsonBody } from './body.js';
 import { str } from './input.js';
@@ -89,37 +90,137 @@ function handleAck(req, res) {
   });
 }
 
-// ==== GET /api/memory/sessions ====
-function handleSessions(res) {
+/**
+ * 纯函数。算一条 session 在面板上的展示状态。
+ *
+ * `missing` 这一档是事故换来的：Phase 1 分析失败会把记录重置为 `pending` 并把 analyzedAt 留在 0，
+ * 等待下轮重扫。可一旦源 `.jsonl` 被删（Claude Code 会清理旧会话），
+ * `scanForUnanalyzedSessions` 从此再也扫不到这个路径 —— 重试永远不会发生。
+ * 实测生产库 91 条 pending 里有 74 条是这种「僵尸」。继续显示「待分析」是在让用户
+ * 等一个不会到来的结果，必须如实标注。
+ *
+ * 反过来，**已分析成功的记录不看文件在不在**：findings 早已入库、仍参与 Phase 2 合成，
+ * 源文件被删不影响它，标成 missing 只会让人以为数据丢了。
+ *
+ * @param {object} s bank 里的 session 记录
+ * @param {{running?:boolean, exists?:boolean}} [ctx] running=当前是否有提炼在跑；exists=源文件是否还在
+ * @returns {'analyzing'|'pending'|'missing'|'outdated'|'analyzed'}
+ */
+export function sessionDisplayStatus(s, ctx) {
+  const { running = false, exists = true } = ctx || {};
+  // bank 里是 analyzing 但当前没有提炼在跑（如重启后残留），降级为正常计算
+  if (s?.status === 'analyzing' && running) return 'analyzing';
+  const analyzedAt = Number(s?.analyzedAt) || 0;
+  if (analyzedAt === 0) return exists ? 'pending' : 'missing';
+  if (Number(s?.mtime) > analyzedAt) return 'outdated';
+  return 'analyzed';
+}
+
+/**
+ * 纯函数。从扫描结果里剔除已在 bank 登记过的路径。
+ *
+ * 前端把这个数组当「扫描到但**尚未登记**的路径」渲染（见 memory-view.js 的 makeUnanalyzedRow，
+ * 它硬写一个「待分析」badge）。此前后端返回的是本轮全部待分析路径、混着已登记的，
+ * 于是同一个会话在列表里出现两行：一行显示它真实的状态，一行永远写着「待分析」。
+ * 实测 28 条扫描结果里有 22 条是这种重影，`totalSessions` 也跟着重复计数。
+ *
+ * @param {Array<{path:string}>} scanned scanForUnanalyzedSessions 的产出
+ * @param {Array<{path:string}>} sessions bank.sessions
+ */
+export function pickUnregisteredPaths(scanned, sessions) {
+  const known = new Set((sessions || []).map((s) => s?.path));
+  return (scanned || []).filter((x) => x && !known.has(x.path));
+}
+
+/** 源文件是否还在。stat 失败（已删 / 无权限）一律当不在 */
+function fileExists(p) {
+  try {
+    return fs.existsSync(p);
+  } catch {
+    return false;
+  }
+}
+
+/** 近 30 天窗口，与 scan-sessions 的扫描范围对齐 */
+const PANEL_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+/** scope=analyzed 的分页默认值与上限 */
+const PAGE_DEFAULT = 50;
+const PAGE_MAX = 200;
+
+/**
+ * 纯函数。把 bank.sessions 归类成「待办」与「已分析」两组，各按 mtime 倒序（最近的在前）。
+ *
+ * `missing`（源文件已删）两组都不进：它既不是待办（重试永远不会发生），也没有 findings 可看，
+ * 留在列表里只会让人以为还有活要干。
+ *
+ * `exists` 由调用方注入而不是在这里 stat，是为了让本函数可测；同时**只对未分析成功的会话探测** ——
+ * 已分析的 findings 早已入库，文件在不在都不改变展示，对 1500+ 条全量 stat 纯属浪费。
+ *
+ * @param {Array} sessions bank.sessions
+ * @param {{running:boolean, cutoff:number, exists:(path:string)=>boolean}} ctx
+ * @returns {{pending:Array, analyzed:Array}}
+ */
+export function groupSessionsForPanel(sessions, ctx) {
+  const { running = false, cutoff = 0, exists = () => true } = ctx || {};
+  const pending = [];
+  const analyzed = [];
+
+  for (const s of Array.isArray(sessions) ? sessions : []) {
+    if (!s) continue;
+    if (s.mtime && s.mtime < cutoff) continue;
+    const analyzedOk = Number(s.analyzedAt) > 0;
+    const status = sessionDisplayStatus(s, { running, exists: analyzedOk ? true : exists(s.path) });
+    if (status === 'missing') continue;
+    (status === 'analyzed' ? analyzed : pending).push({ ...s, status });
+  }
+
+  const byMtimeDesc = (a, b) => (Number(b.mtime) || 0) - (Number(a.mtime) || 0);
+  return { pending: pending.sort(byMtimeDesc), analyzed: analyzed.sort(byMtimeDesc) };
+}
+
+// ==== GET /api/memory/sessions[?scope=analyzed&offset=&limit=] ====
+//
+// 默认（无 scope）只回**待办组** + 已分析的计数。面板把「已分析」做成默认收起、点开才拉的分组：
+// 实测生产库 1219 条已分析会话连着 findings 有 2.7MB，每次刷新都整份传是页面卡顿的根源。
+// scope=analyzed 才按 offset/limit 分页取已分析的那一组。
+function handleSessions(res, url) {
   try {
     const bank = readBank();
-    const settings = getMemoryBankSettings();
-    const now = Date.now();
-    const cutoff = now - 30 * 24 * 60 * 60 * 1000; // 近 30 天
-    const sessions = bank.sessions
-      .filter((s) => !s.mtime || s.mtime >= cutoff) // 过滤超过 30 天的
-      .map((s) => {
-        // 若 bank 里是 analyzing 但当前没有提炼在跑（如重启后残留），降级为正常计算
-        let status = (s.status === 'analyzing' && isRunning()) ? 'analyzing' : null;
-        if (!status) {
-          if (!s.analyzedAt || s.analyzedAt === 0) {
-            status = 'pending';
-          } else if (s.mtime > s.analyzedAt) {
-            status = 'outdated';
-          } else {
-            status = 'analyzed';
-          }
-        }
-        return { ...s, status };
+    const running = isRunning();
+    const cutoff = Date.now() - PANEL_WINDOW_MS;
+    const { pending, analyzed } = groupSessionsForPanel(bank.sessions, {
+      running,
+      cutoff,
+      exists: fileExists,
+    });
+
+    if (str(url?.searchParams.get('scope')) === 'analyzed') {
+      const rawOffset = Number(url.searchParams.get('offset'));
+      const rawLimit = Number(url.searchParams.get('limit'));
+      const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0
+        ? Math.min(Math.floor(rawLimit), PAGE_MAX)
+        : PAGE_DEFAULT;
+      return sendJson(res, 200, {
+        ok: true,
+        scope: 'analyzed',
+        sessions: analyzed.slice(offset, offset + limit),
+        total: analyzed.length,
+        offset,
+        limit,
+        hasMore: offset + limit < analyzed.length,
       });
-    const unanalyzedPaths = scanForUnanalyzedSessions(bank); // 内部已过滤 30 天
-    const analyzedCount = sessions.filter((s) => s.status === 'analyzed').length;
+    }
+
+    const settings = getMemoryBankSettings();
+    // 内部已过滤 30 天；再剔除已登记的，避免同一会话渲染两行
+    const unanalyzedPaths = pickUnregisteredPaths(scanForUnanalyzedSessions(bank), bank.sessions);
     sendJson(res, 200, {
       ok: true,
-      sessions,
+      sessions: pending,
       unanalyzedPaths,
-      totalSessions: sessions.length,
-      analyzedCount,
+      totalSessions: pending.length + unanalyzedPaths.length,
+      analyzedCount: analyzed.length,
       // v2：记忆条目与设置状态一并返回，前端单次请求获取完整面板数据
       memories: bank.memories || [],
       enabled: settings.enabled,
@@ -215,7 +316,7 @@ function handleExport(url, res) {
 export function handleMemoryRoutes(req, res, url) {
   const { pathname } = url;
   const { method } = req;
-  if (pathname === '/api/memory/sessions' && method === 'GET') return handleSessions(res);
+  if (pathname === '/api/memory/sessions' && method === 'GET') return handleSessions(res, url);
   if (pathname === '/api/memory/settings' && method === 'POST') return handleSettings(req, res);
   if (pathname === '/api/memory/list' && method === 'GET') return handleList(res);
   if (pathname === '/api/memory/confirm' && method === 'POST') return handleConfirm(req, res);

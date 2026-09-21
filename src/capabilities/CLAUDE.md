@@ -35,7 +35,7 @@ llm-classify ────────────→ token-rotation
 
 ### 流程二：单轮分类（`llm-classify`）
 
-`runClassifierOnce(opts)` 是 `runClassifierDetailed(opts).data` 的薄包装（多数调用点只关心「拿到没拿到」，只有 tracking-stats 需要失败原因才直接用 Detailed）。Detailed 的路径：`isPoolExhausted(getTokens())` 额度耗尽 fail-fast → `runClaude(..., maxTurns:1, disallowedTools:['*'])`（通配符禁全部工具，防分类模型把消息当真任务起子代理）→ `abort` 定时器 + `Promise.race` 双保险（限流时 SDK 流可能永不结束）→ 收集 `onText` → `classifyOutcome({aborted, text})`：**先** `extractFirstJsonObject`+`JSON.parse` 试解析、**再**看是否 aborted 判超时（模型常早早吐完 JSON 而流迟迟不收尾）→ 归结 `{data, reason:'exhausted'|'timeout'|'unparsable'|null}`。
+`runClassifierOnce(opts)` 是 `runClassifierDetailed(opts).data` 的薄包装（多数调用点只关心「拿到没拿到」，只有 tracking-stats 需要失败原因才直接用 Detailed）。Detailed 的路径：`isPoolExhausted(getTokens())` 额度耗尽 fail-fast → `runClaude(..., maxTurns:1, disallowedTools:['*'])`（通配符禁全部工具，防分类模型把消息当真任务起子代理）→ `abort` 定时器 + `Promise.race` 双保险（限流时 SDK 流可能永不结束）→ 收集 `onText` → `classifyOutcome({aborted, text})`：**先** `extractFirstJsonObject`+`JSON.parse` 试解析、**再**看是否 aborted 判超时（模型常早早吐完 JSON 而流迟迟不收尾）→ 归结 `{data, reason:'exhausted'|'aborted'|'timeout'|'unparsable'|null}`。其中 `aborted` 是**外部中止**（调用方传了 `signal` 且已触发），它排在「先尝试解析」之前，且必须与 `timeout` 分开——超时值得重试，用户中止绝不该重试（否则点中止反而多烧一轮额度）。
 
 ### 流程三：只读多轮（`llm-readonly-agent`）
 
@@ -57,3 +57,4 @@ llm-classify ────────────→ token-rotation
 - 要**改「模型回复里抽 JSON」的规则**，只改 `llm-classify.js` 的 `extractFirstJsonObject`（只读骨架也复用它，改一处两处生效）。
 - 要**放宽/收紧只读调用允许的工具**，就改 `llm-readonly-agent.js` 的 `READONLY_TOOLS` 白名单（第 2 层是真正的闸）；`DENIED_TOOLS` 只是减少无用尝试，别指望它兜底。
 - 要**新增一种「读代码作答」的多轮只读任务**，复用 `runReadonlyAgent`（传 `cwd`/`prompt`/`signal`），把业务逻辑放到 `features`/`plugins`——本模块只提供无业务语义的骨架。
+- 要**让某个分类调用点支持中止**，就在该调用点传 `signal`（`llm-classify` 已支持，不传即行为不变）；目前只有体检链路的三处传了（`audit-engine` / `check-prompts` / `check-comments`）。

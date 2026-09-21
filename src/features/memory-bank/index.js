@@ -16,7 +16,7 @@ import { renderMarkdown } from './render.js';
 import { shouldRun } from './schedule.js';
 import { scanForUnanalyzedSessions } from './scan-sessions.js';
 import { analyzeSession } from './analyze.js';
-import { synthesizeMemories } from './synthesize.js';
+import { synthesizeMemories, batchSessionsForSynthesis } from './synthesize.js';
 
 const TICK_MS = 10 * 60 * 1000;
 
@@ -93,6 +93,11 @@ export async function runOnce(opts = {}) {
   _shouldStop = false;
   try {
     const { _runner, model } = opts;
+    // `now` 必须在这里取出来。曾经漏解构它，而函数体末尾的 writeRenders / updateBank 都在用 ——
+    // ESM 是 strict mode，读未声明标识符直接 ReferenceError，于是**每一轮**都在 Phase 2 之后
+    // 抛 `now is not defined`：渲染从未落盘、lastExtractAt 永远是 0（冷却判定随之失效）。
+    // 手动触发路径不传 now，退回 Date.now()，不能让它变成 0。
+    const now = Number(opts.now) > 0 ? Number(opts.now) : Date.now();
     const settings = getMemoryBankSettings();
 
     // ── Phase 1: 扫描 + 逐会话分析 ──────────────────────────────────────────
@@ -116,13 +121,15 @@ export async function runOnce(opts = {}) {
       }
 
       // 分析前先标记为「分析中」，供 UI 实时展示进度
+      // analyzingAt 是这个标记的保质期：进程若在此处被杀，状态会永久留在磁盘上，
+      // 没有时间戳就没法判断它是「正在跑」还是「早就死了」（见 scan-sessions.isStaleAnalyzing）。
       const preBank = readBank();
       const preExisting = preBank.sessions.find((s) => s.path === sessionPath);
       if (preExisting) {
-        patchSession(preExisting.id, { status: 'analyzing' });
+        patchSession(preExisting.id, { status: 'analyzing', analyzingAt: Date.now() });
       } else {
         const preId = `ses_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-        addSession({ id: preId, path: sessionPath, mtime, analyzedAt: 0, findings: [], status: 'analyzing' });
+        addSession({ id: preId, path: sessionPath, mtime, analyzedAt: 0, findings: [], status: 'analyzing', analyzingAt: Date.now() });
       }
 
       const findings = await analyzeSession(content, { model, _runner });
@@ -149,20 +156,41 @@ export async function runOnce(opts = {}) {
       analyzedCount++;
     }
 
-    // ── Phase 2: 合成记忆 ────────────────────────────────────────────────────
+    // ── Phase 2: 合成记忆（增量 + 分批）────────────────────────────────────────
     // 重新读取含最新 sessions 的 bank
     bank = readBank();
-    const allFindings = bank.sessions
-      .filter((s) => Array.isArray(s.findings) && s.findings.length > 0)
-      .flatMap((s) => s.findings);
+    const batches = batchSessionsForSynthesis(bank.sessions);
+    // 已有记忆的 statement 随 prompt 下发，让模型自己避开重复 ——
+    // addMemory 只按 `mem_<时间戳>_<随机>` 去重，那个 id 必然唯一，拦不住任何重复内容。
+    const existingStatements = (bank.memories || []).map((m) => m.statement);
 
-    let newMemories;
-    if (allFindings.length > 0) {
-      newMemories = await synthesizeMemories(allFindings, { model, _runner });
-    } else {
-      // 没有任何 findings，跳过 LLM 合成（[] 不是失败）
-      newMemories = [];
+    let newMemories = [];
+    let synthFailed = false;
+    for (const batch of batches) {
+      if (_shouldStop) {
+        _shouldStop = false;
+        logger.info('memory-bank', '收到暂停信号，提前终止 Phase 2');
+        break;
+      }
+      const got = await synthesizeMemories(batch.findings, { model, _runner, existingStatements });
+      if (got === null) {
+        // LLM 失败：不给这批打标记，留待下轮重试。后续批大概率同样失败（多为额度/超时这类
+        // 与内容无关的原因），继续跑只是白烧额度 —— 就此收手。
+        synthFailed = true;
+        logger.warn('memory-bank', '批次合成失败，剩余批次留待下轮', {
+          sessionCount: batch.sessionIds.length,
+          remaining: batches.length - batches.indexOf(batch) - 1,
+        });
+        break;
+      }
+      // 合成成功才推进游标。以 session 为粒度打标记，与切批粒度严格对应。
+      const at = Date.now();
+      for (const sid of batch.sessionIds) patchSession(sid, { synthesizedAt: at });
+      newMemories = newMemories.concat(got);
+      existingStatements.push(...got.map((m) => m.statement));
     }
+    // 一批都没跑成、且确实有活要干 → 对外报失败（null），与旧契约一致
+    if (synthFailed && newMemories.length === 0) newMemories = null;
 
     // ── 渲染落盘（保留 CLAUDE.md 注入链路）──────────────────────────────────
     // v2 memories 尚无 scope/projectDir 字段，projectDirs 传空列表；

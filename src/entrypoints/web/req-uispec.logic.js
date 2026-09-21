@@ -9,23 +9,40 @@
  */
 
 /**
- * 按 UI 规范还原某个页面的 prompt。规范为空时不能假装有规范——
+ * 按 UI 规范还原某个页面**某一张设计稿**的 prompt。规范为空时不能假装有规范——
  * 改口径为「对齐现有代码风格」并显式说明未配置，否则模型会凭空编一套 token 出来。
+ *
+ * 同页多张稿是逐条还原的，固有风险是后一轮把前一轮覆盖掉，所以要把同页其他状态名带进来做护栏。
+ * **只给名字不给链接**：给了链接模型会一次把所有状态都做掉，逐条还原就失去意义了。
+ *
+ * @param {object} opts.page - 页面节点（用 name / file / figmas）
+ * @param {object} opts.figma - 本轮要还原的那一条 `{ id, url, label }`
+ * @param {string} opts.specText - 项目 UI 规范全文，可空
  */
-export function buildRestorePrompt({ page, specText }) {
-  const url = page?.figma?.url;
+export function buildRestorePrompt({ page, figma, specText }) {
+  const url = String(figma?.url ?? '').trim();
   if (!url) throw new Error('该页面尚未挂载设计稿，无法还原');
-  const node = page?.figma?.node ? `（节点 ${page.figma.node}）` : '';
+  const label = String(figma?.label ?? '').trim();
+  const scope = label ? `的【${label}】` : '的';
   const spec = String(specText ?? '').trim();
+
+  const others = (Array.isArray(page?.figmas) ? page.figmas : [])
+    .filter((f) => f && f.id !== figma?.id)
+    .map((f) => String(f?.label ?? '').trim() || '未命名状态');
+  const guard = others.length
+    ? `⚠ 本页还有其他状态的设计稿：${others.join('、')}。这些状态共用同一个组件实现，因此：\n` +
+      `  不要把组件写死成只有当前这一个状态；不要改动其他状态已有的实现。\n\n`
+    : '';
 
   const specPart = spec
     ? `本项目 UI 规范全文（**优先级高于设计稿**，下称「规范」）：\n---\n${spec}\n---\n`
     : `本项目**尚未配置 UI 规范**。请对齐工程内现有同类组件的写法，不要自创一套样式体系。\n`;
 
   return (
-    `请按设计稿还原页面「${page.name}」的视觉实现。\n\n` +
-    `设计稿：${url}${node}\n` +
+    `请按设计稿还原页面「${page.name}」${scope}视觉实现。\n\n` +
+    `设计稿：${url}\n` +
     `目标文件：${page.file || '（按页面名在工程内定位）'}\n\n` +
+    guard +
     specPart +
     `\n还原要求：\n` +
     `1. 组件一律用规范指定的那个，不要自己写裸标签或自造弹框。\n` +

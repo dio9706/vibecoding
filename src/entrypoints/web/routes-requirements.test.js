@@ -22,6 +22,7 @@ const { handleRequirementRoutes } = await import('./routes-requirements.js');
 const { updateRequirement, getRequirement } = await import('../../store/requirements.js');
 const { hasQueuedTasks, reqDir } = await import('./requirement-ops.js');
 const { setMyFeishuOpenId } = await import('../../store/settings.js');
+const { appendMessage, getThread } = await import('../../store/colleague-messages.js');
 
 function startServer() {
   const server = createServer((req, res) => {
@@ -969,4 +970,340 @@ test('PUT /api/req/prime：保存/回读/清空，且不留 history、不触发�
 test('PUT /api/req/prime：需求不存在回 404', async () => {
   const res = await put('/api/req/prime', { id: 'r_nope', text: 'x' });
   assert.equal(res.status, 404);
+});
+
+// ==== 开发人员指派 ====
+
+const { addColleague } = await import('../../store/colleagues.js');
+
+test('PUT /api/req/assignees：review 期写入成功并回读；重复 id 去重', async () => {
+  const c1 = addColleague({ role: 'frontend', name: '张三', feishuOpenId: 'ou_zs' });
+  const c2 = addColleague({ role: 'backend', name: '李四' });
+  const r = await createReq('指派测试A');
+
+  const put1 = await put('/api/req/assignees', { id: r.id, assignees: [c1.id, c2.id, c1.id] });
+  assert.equal(put1.status, 200);
+  assert.deepEqual(put1.json.assignees, [c1.id, c2.id], '重复 id 必须去重');
+
+  const got = await get('/api/req/get?id=' + r.id);
+  assert.deepEqual(got.json.assignees, [c1.id, c2.id]);
+});
+
+test('GET /api/req/get：assigneeList 服务端 join 姓名/职位，缺失的标 missing', async () => {
+  const c = addColleague({ role: 'design', name: '王五' });
+  const r = await createReq('指派测试B');
+  await put('/api/req/assignees', { id: r.id, assignees: [c.id] });
+  updateRequirement(r.id, { assignees: [c.id, 'cl_gone'] }); // 绕过路由，模拟同事被删后的悬空引用
+
+  const got = await get('/api/req/get?id=' + r.id);
+  assert.equal(got.json.assigneeList.length, 2);
+  assert.deepEqual(got.json.assigneeList[0], {
+    id: c.id, name: '王五', role: 'design', roleLabel: 'UI设计', feishuOpenId: '', missing: false,
+    unreadCount: 0, // 三期新增：未读数随 assigneeList 一起回，复用右栏既有轮询
+  });
+  assert.equal(got.json.assigneeList[1].missing, true);
+  assert.equal(got.json.assigneeList[1].name, '已移除的同事');
+});
+
+test('PUT /api/req/assignees：悬空 id 被拒 400', async () => {
+  const r = await createReq('指派测试C');
+  const res = await put('/api/req/assignees', { id: r.id, assignees: ['cl_nope'] });
+  assert.equal(res.status, 400);
+  assert.match(res.json.error, /同事不存在/);
+});
+
+test('PUT /api/req/assignees：非数组 400；未知需求 404', async () => {
+  const r = await createReq('指派测试D');
+  assert.equal((await put('/api/req/assignees', { id: r.id, assignees: 'x' })).status, 400);
+  assert.equal((await put('/api/req/assignees', { id: 'r_none', assignees: [] })).status, 404);
+});
+
+test('PUT /api/req/assignees：dev 期放行、test 期 409', async () => {
+  const c = addColleague({ role: 'ops', name: '赵六' });
+  const r = await createReq('指派测试E');
+
+  updateRequirement(r.id, { phase: 'dev' });
+  assert.equal((await put('/api/req/assignees', { id: r.id, assignees: [c.id] })).status, 200);
+
+  updateRequirement(r.id, { phase: 'test' });
+  const res = await put('/api/req/assignees', { id: r.id, assignees: [] });
+  assert.equal(res.status, 409);
+  assert.match(res.json.error, /评审期与开发期/);
+});
+
+test('createRequirement：assignees 初始为空数组', async () => {
+  const r = await createReq('指派测试F');
+  assert.deepEqual(getRequirement(r.id).assignees, []);
+});
+
+// ==== 二期：归档快照 + 定稿通知 ====
+
+test('归档：assignees 固化成快照（姓名/职位/open_id），名册后续改名不影响历史', async () => {
+  const c = addColleague({ role: 'product', name: '产品甲', feishuOpenId: 'ou_pm1' });
+  const r = await createReq('归档快照验证');
+  await put('/api/req/assignees', { id: r.id, assignees: [c.id] });
+  // 直接推到 archiving（archiveRequirement 只认相邻流转）；branches 留空以免真跑 git
+  updateRequirement(r.id, { phase: 'archiving', branches: [], devDoc: { versions: [{ v: 1, path: '/tmp/x.md' }] } });
+
+  const res = await post('/api/req/archive', { id: r.id, note: '上线正常' });
+  assert.equal(res.status, 200);
+
+  const after = getRequirement(r.id);
+  assert.equal(after.phase, 'archived');
+  assert.deepEqual(after.archive.assignees, [
+    { name: '产品甲', role: 'product', roleLabel: '产品', feishuOpenId: 'ou_pm1' },
+  ]);
+  assert.ok(after.archive.summary.includes('## 开发人员'), '归档摘要要写明当时归谁');
+  assert.ok(after.archive.summary.includes('产品甲（产品）'));
+
+  // 名册改名后，已归档记录不得被反向改写
+  const { updateColleague } = await import('../../store/colleagues.js');
+  updateColleague(c.id, { role: 'backend', name: '产品甲改名了' });
+  assert.equal(getRequirement(r.id).archive.assignees[0].name, '产品甲');
+  assert.equal(getRequirement(r.id).archive.assignees[0].role, 'product');
+});
+
+test('归档：未指派开发人员时快照为空数组，摘要写「（未指派）」', async () => {
+  const r = await createReq('归档无人验证');
+  updateRequirement(r.id, { phase: 'archiving', branches: [], devDoc: { versions: [] } });
+  assert.equal((await post('/api/req/archive', { id: r.id, note: '' })).status, 200);
+  const after = getRequirement(r.id);
+  assert.deepEqual(after.archive.assignees, []);
+  assert.ok(after.archive.summary.includes('（未指派）'));
+});
+
+test('定稿通知：无启用飞书机器人时回 botMissing，且不阻塞定稿', async () => {
+  const { buildAssigneeNotices } = await import('./req-logic.js');
+  const { notifyAssigneesOnFinalize } = await import('./requirement-ops.js');
+  const c = addColleague({ role: 'frontend', name: '前端乙', feishuOpenId: 'ou_fe1' });
+  const r = await createReq('定稿通知验证');
+  await put('/api/req/assignees', { id: r.id, assignees: [c.id] });
+
+  // 测试环境的 settings 是隔离空目录，没有任何启用中的机器人
+  const out = await notifyAssigneesOnFinalize(getRequirement(r.id), [{ dir: '/x', dev: true }]);
+  assert.equal(out.botMissing, true);
+  assert.equal(out.sent, 0);
+
+  // 文案仍按前端那套生成（与机器人是否存在无关）
+  const { notices } = buildAssigneeNotices({
+    title: '定稿通知验证',
+    assigneeList: [{ name: '前端乙', role: 'frontend', feishuOpenId: 'ou_fe1', missing: false }],
+    backendOnly: false,
+  });
+  assert.match(notices[0].text, /后续有需要我配合可以直接和我说/);
+});
+
+test('定稿通知：纯后端工程（devProjects 只含 backend）切换后端文案', async () => {
+  const { notifyAssigneesOnFinalize } = await import('./requirement-ops.js');
+  const c = addColleague({ role: 'backend', name: '后端丙', feishuOpenId: 'ou_be1' });
+  const r = await createReq('纯后端验证');
+  await put('/api/req/assignees', { id: r.id, assignees: [c.id] });
+  const backendSlot = { dir: '/srv/api', dev: true };
+  updateRequirement(r.id, { projects: { frontend: null, backend: backendSlot } });
+
+  // devProjects 只含 backend 槽位本体 → backendOnly=true
+  const out = await notifyAssigneesOnFinalize(getRequirement(r.id), [getRequirement(r.id).projects.backend]);
+  assert.equal(out.botMissing, true, '无机器人，但判定逻辑已走完');
+  assert.deepEqual(out.skippedNoId, []);
+  assert.deepEqual(out.skippedNoRole, []);
+});
+
+test('定稿通知：未填 open_id / 运营职位 分别进不同的跳过桶', async () => {
+  const { notifyAssigneesOnFinalize } = await import('./requirement-ops.js');
+  const noId = addColleague({ role: 'product', name: '没号产品' });
+  const ops = addColleague({ role: 'ops', name: '运营丁', feishuOpenId: 'ou_ops1' });
+  const r = await createReq('跳过桶验证');
+  await put('/api/req/assignees', { id: r.id, assignees: [noId.id, ops.id] });
+
+  const out = await notifyAssigneesOnFinalize(getRequirement(r.id), [{ dir: '/x', dev: true }]);
+  assert.deepEqual(out.skippedNoId, ['没号产品']);
+  assert.deepEqual(out.skippedNoRole, ['运营丁']);
+  assert.equal(out.botMissing, false, '一个可发的都没有 → 提前返回，不该去查机器人');
+});
+
+// ==== 三期：同事消息中继 ====
+
+const { appendMessage: cmAppend } = await import('../../store/colleague-messages.js');
+
+test('GET /api/req/get：assigneeList 回填 unreadCount', async () => {
+  const c = addColleague({ role: 'backend', name: '后端丙', feishuOpenId: 'ou_be9' });
+  const r = await createReq('未读回填验证');
+  await put('/api/req/assignees', { id: r.id, assignees: [c.id] });
+
+  let got = await get('/api/req/get?id=' + r.id);
+  assert.equal(got.json.assigneeList[0].unreadCount, 0, '无消息时必须是 0 而不是 undefined');
+
+  cmAppend(r.id, c.id, { dir: 'in', text: '接口文档发你了', role: 'backend' });
+  cmAppend(r.id, c.id, { dir: 'out', text: '收到', status: 'read' });
+  got = await get('/api/req/get?id=' + r.id);
+  assert.equal(got.json.assigneeList[0].unreadCount, 1, 'out 方向不计未读');
+});
+
+test('GET /api/req/colleague-messages：回读会话；缺参 400', async () => {
+  const c = addColleague({ role: 'product', name: '产品甲', feishuOpenId: 'ou_pm9' });
+  const r = await createReq('会话回读验证');
+  await put('/api/req/assignees', { id: r.id, assignees: [c.id] });
+  cmAppend(r.id, c.id, { dir: 'in', text: '需求要改', role: 'product' });
+
+  const ok = await get(`/api/req/colleague-messages?reqId=${r.id}&colleagueId=${c.id}`);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.messages.length, 1);
+  assert.equal(ok.json.messages[0].text, '需求要改');
+
+  assert.equal((await get('/api/req/colleague-messages?reqId=' + r.id)).status, 400);
+  assert.equal((await get('/api/req/colleague-messages')).status, 400);
+});
+
+test('POST /api/req/colleague-messages/read：清零未读', async () => {
+  const c = addColleague({ role: 'frontend', name: '前端乙', feishuOpenId: 'ou_fe9' });
+  const r = await createReq('已读验证');
+  await put('/api/req/assignees', { id: r.id, assignees: [c.id] });
+  cmAppend(r.id, c.id, { dir: 'in', text: 'a', role: 'frontend' });
+
+  assert.equal((await post('/api/req/colleague-messages/read', { reqId: r.id, colleagueId: c.id })).status, 200);
+  const got = await get('/api/req/get?id=' + r.id);
+  assert.equal(got.json.assigneeList[0].unreadCount, 0);
+});
+
+test('POST /api/req/colleague-messages/send：未指派该同事 → 400；无机器人 → 502 且不落消息', async () => {
+  const c = addColleague({ role: 'ops', name: '运营丁', feishuOpenId: 'ou_ops9' });
+  const r = await createReq('发送校验验证');
+  const notAssigned = await post('/api/req/colleague-messages/send', {
+    reqId: r.id, colleagueId: c.id, text: 'hi',
+  });
+  assert.equal(notAssigned.status, 400);
+
+  await put('/api/req/assignees', { id: r.id, assignees: [c.id] });
+  const noBot = await post('/api/req/colleague-messages/send', {
+    reqId: r.id, colleagueId: c.id, text: 'hi',
+  });
+  assert.equal(noBot.status, 502);
+  const thread = await get(`/api/req/colleague-messages?reqId=${r.id}&colleagueId=${c.id}`);
+  assert.deepEqual(thread.json.messages, [], '发送失败不得落消息——否则界面显示一条其实没发出去的');
+});
+
+test('POST /api/req/colleague-messages/send：空文本 400；未知需求 404', async () => {
+  const r = await createReq('发送参数验证');
+  assert.equal((await post('/api/req/colleague-messages/send', { reqId: r.id, colleagueId: 'cl_x', text: '  ' })).status, 400);
+  assert.equal((await post('/api/req/colleague-messages/send', { reqId: 'r_none', colleagueId: 'cl_x', text: 'hi' })).status, 404);
+});
+
+test('discard → delete：仅 discarded 可移除，且记录/磁盘目录/同事对话/convIds 一并交代清楚', async () => {
+  assert.equal((await post('/api/req/delete', { id: 'r_not_exist' })).status, 404);
+  assert.equal((await post('/api/req/delete', {})).status, 400);
+
+  const req = await createReq('待移除需求');
+  // review 期直接删 → 409：侧栏只对废弃行给「移除」，服务端把同一条契约再钉一遍
+  assert.equal((await post('/api/req/delete', { id: req.id })).status, 409);
+
+  // 铺开「一条需求的全部关联数据」：磁盘产物 + 会话 + 同事对话
+  const docPath = reqDir(req.id, 'dev-doc-v1.md');
+  fs.writeFileSync(docPath, '# 开发文档');
+  updateRequirement(req.id, {
+    sessions: [
+      { convId: 'conv_del_1', sessionId: null, title: '主', kind: 'main', createdAt: '2026-09-20T00:00:00Z' },
+      { convId: 'conv_del_2', sessionId: null, title: '子', kind: 'sub', createdAt: '2026-09-20T00:00:00Z' },
+    ],
+  });
+  appendMessage(req.id, 'cl_del', { dir: 'in', text: '同事留言' });
+
+  assert.equal((await post('/api/req/discard', { id: req.id })).status, 200);
+  const del = await post('/api/req/delete', { id: req.id });
+  assert.equal(del.status, 200);
+  // convIds 必须回给前端：localStorage 的会话只有前端删得掉，后端不报就成了永久孤儿
+  assert.deepEqual(del.json.convIds, ['conv_del_1', 'conv_del_2']);
+
+  assert.equal(getRequirement(req.id), null);
+  assert.equal(fs.existsSync(docPath), false, '磁盘产物必须跟着走');
+  assert.deepEqual(getThread(req.id, 'cl_del').messages, [], '同事对话必须跟着走');
+  assert.equal((await post('/api/req/delete', { id: req.id })).status, 404, '重复移除 → 404');
+});
+
+test('delete：已归档需求不可移除（409）——归档是终态存档，侧栏也不给右键菜单', async () => {
+  const req = await createReq('归档后不可移除');
+  updateRequirement(req.id, { phase: 'archived' });
+  const r = await post('/api/req/delete', { id: req.id });
+  assert.equal(r.status, 409);
+  assert.ok(getRequirement(req.id), '被拒后记录必须还在');
+});
+
+test('delete：busy 中的废弃需求 → 409（不在任务跑着时抽掉它的盘）', async () => {
+  const req = await createReq('busy 时移除');
+  updateRequirement(req.id, { phase: 'discarded', busy: { kind: 'docgen', runId: 'x', startedAt: Date.now() } });
+  assert.equal((await post('/api/req/delete', { id: req.id })).status, 409);
+  assert.ok(getRequirement(req.id));
+});
+
+// ---- POST /api/req/colleague-messages/auto（四期触发口）----
+// 注：addColleague 已在文件前面「开发人员指派」一节 import 过（同一模块顶层 const，此处直接复用，
+// 不重复 import——重复 `const { addColleague } = await import(...)` 会撞出「重复声明」语法错误）。
+
+test('/auto：需求不存在 404', async () => {
+  const r = await post('/api/req/colleague-messages/auto', { reqId: 'r_nope', colleagueId: 'c', msgIds: ['m'] });
+  assert.equal(r.status, 404);
+});
+
+test('/auto：非 dev 期 409', async () => {
+  const req = await createReq('auto 非 dev');
+  const c = addColleague({ name: 'b', role: 'backend' });
+  const m = appendMessage(req.id, c.id, { dir: 'in', text: 'x', role: 'backend' });
+  const r = await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [m.id] });
+  assert.equal(r.status, 409);
+  assert.match(r.json.error, /开发期/);
+});
+
+test('/auto：非后端同事 400', async () => {
+  const req = await createReq('auto 非后端');
+  updateRequirement(req.id, { phase: 'dev' });
+  const c = addColleague({ name: 'p', role: 'product' });
+  const m = appendMessage(req.id, c.id, { dir: 'in', text: 'x', role: 'product' });
+  const r = await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [m.id] });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /后端/);
+  // 同事不存在与非后端是两条独立错误：飞书侧 warn 要能看出真实原因
+  const ghost = await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: 'cl_ghost', msgIds: [m.id] });
+  assert.equal(ghost.status, 400);
+  assert.match(ghost.json.error, /不存在/);
+});
+
+test('/auto：msgIds 为空 / 不属于线程 / 已 handled → 400', async () => {
+  const req = await createReq('auto msgIds');
+  updateRequirement(req.id, { phase: 'dev' });
+  const c = addColleague({ name: 'b', role: 'backend' });
+  const done = appendMessage(req.id, c.id, { dir: 'in', text: 'x', role: 'backend', handledBy: 'manual' });
+  assert.equal((await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [] })).status, 400);
+  assert.equal((await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: ['cm_ghost'] })).status, 400);
+  assert.equal((await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [done.id] })).status, 400);
+});
+
+test('/auto：校验通过 202 并回 accepted 数（只数有效 id）', async () => {
+  const req = await createReq('auto 202');
+  updateRequirement(req.id, { phase: 'dev' });
+  const c = addColleague({ name: 'b', role: 'backend' });
+  // 空文本无附件 → autoHandleMessages 同步走 skip:empty，不触发真实 LLM 调用；不依赖扩展名白名单
+  const m = appendMessage(req.id, c.id, { dir: 'in', text: '', role: 'backend' });
+  const r = await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [m.id, 'cm_ghost'] });
+  assert.equal(r.status, 202);
+  assert.deepEqual(r.json, { ok: true, accepted: 1 });
+
+  // Set 去重：同一个 id 传两次只算一条
+  const m2 = appendMessage(req.id, c.id, { dir: 'in', text: '', role: 'backend' });
+  const dup = await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [m2.id, m2.id] });
+  assert.deepEqual(dup.json, { ok: true, accepted: 1 });
+});
+
+test('/auto：colleague-relay 插件停用 → 409（附件链路绕过插件开关，只能在这里认）', async () => {
+  const { setPluginEnabled } = await import('../../store/settings.js');
+  const req = await createReq('auto 插件停用');
+  updateRequirement(req.id, { phase: 'dev' });
+  const c = addColleague({ name: 'b', role: 'backend' });
+  const m = appendMessage(req.id, c.id, { dir: 'in', text: 'x', role: 'backend' });
+  setPluginEnabled('colleague-relay', false);
+  try {
+    const r = await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [m.id] });
+    assert.equal(r.status, 409);
+    assert.match(r.json.error, /停用/);
+  } finally {
+    setPluginEnabled('colleague-relay', true);
+  }
 });

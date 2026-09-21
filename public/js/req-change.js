@@ -1,14 +1,18 @@
 /**
- * 需求变动弹框 —— 开发期右栏「需求变动」入口。
+ * 需求变动抽屉 —— 开发期右栏「需求变动」入口。
  *
  * 解决的问题：开发中途需求变了，现在只能跟 Claude 反复对话描述，token 贵且没留痕。
  * 这里把它变成一次结构化提交：写清变了什么 → AI 先比对需求地图算出**命中哪些逻辑点** →
  * 用户决定「只改地图」还是「地图+代码一起改」。
  *
+ * 容器是右侧抽屉而非居中弹框（req-drawer.js）：描述变动时要照着刚才的对话写，
+ * 居中弹框把聊天区盖住又压暗，用户只能关掉看一眼再重开。
+ *
  * 依赖方向：req-change → chat.js（发消息）；不反向依赖 req-chat，由后者调用 openChangeDialog。
  */
 import { sendMessageProgrammatically } from './chat.js';
 import { iconHtml, CHANGE_ICON_SVG } from './icons.js';
+import { openReqDrawer } from './req-drawer.js';
 
 const IMPACT_MIN_CHARS = 10; // 太短的描述预估不出东西，白跑一次 LLM
 const IMPACT_DEBOUNCE_MS = 900;
@@ -21,40 +25,40 @@ const IMPACT_DEBOUNCE_MS = 900;
  * @param {Function} [opts.onDone] - 提交成功后的回调（刷新右栏/时间线）
  */
 export function openChangeDialog({ reqId, hasMap, hasConv, onDone }) {
-  const mask = document.createElement('div');
-  mask.className = 'mask';
-  mask.innerHTML =
-    '<div class="modal rq-change-modal">' +
-    '<div class="head"><h3>' + iconHtml(CHANGE_ICON_SVG) + ' 需求变动</h3></div>' +
-    '<div class="body">' +
-    '<p class="rq-change-sub"></p>' +
-    '<textarea class="rq-change-text" rows="6" placeholder="例：产品刚说导出范围要支持「全部筛选结果」，不能只导选中行；另外导出格式砍掉 CSV，只留 xlsx。"></textarea>' +
-    '<div class="rq-impact" hidden></div>' +
-    '<div class="rq-scope">' +
-    '<button type="button" data-scope="both" class="on">同步改地图 + 改代码</button>' +
-    '<button type="button" data-scope="map">只改地图，先不动代码</button>' +
-    '</div>' +
-    '</div>' +
-    '<div class="confirm-foot">' +
-    '<button class="btn cancel">取消</button>' +
-    '<button class="btn primary ok">提交变动</button>' +
-    '</div>' +
-    '</div>';
-  document.body.appendChild(mask);
-
-  const ta = mask.querySelector('.rq-change-text');
-  const impactBox = mask.querySelector('.rq-impact');
-  const okBtn = mask.querySelector('.ok');
-  const scopeBtns = [...mask.querySelectorAll('.rq-scope button')];
-  mask.querySelector('.rq-change-sub').textContent = hasMap
-    ? '描述这次变了什么。提交前会先比对需求地图，算出命中哪些逻辑点。'
-    : '描述这次变了什么。当前需求还没有需求地图，本次只记录并转达给 Claude。';
-
   let scope = 'both';
   let hits = [];
   let impactToken = 0; // 竞态令牌：用户还在打字时旧请求回来了要丢弃
   let debounceTimer = null;
-  let submitting = false;
+  let submitting = false; // 必须先于 openReqDrawer 声明：canClose 闭包引用它
+
+  const { root: drawer, close } = openReqDrawer({
+    title: '需求变动',
+    icon: iconHtml(CHANGE_ICON_SVG),
+    cls: 'rq-change-drawer',
+    bodyHtml:
+      '<p class="rq-change-sub"></p>' +
+      '<textarea class="rq-change-text" rows="6" placeholder="例：产品刚说导出范围要支持「全部筛选结果」，不能只导选中行；另外导出格式砍掉 CSV，只留 xlsx。"></textarea>' +
+      '<div class="rq-impact" hidden></div>' +
+      '<div class="rq-scope">' +
+      '<button type="button" data-scope="both" class="on">同步改地图 + 改代码</button>' +
+      '<button type="button" data-scope="map">只改地图，先不动代码</button>' +
+      '</div>',
+    footHtml: '<button class="btn cancel">取消</button><button class="btn primary ok">提交变动</button>',
+    canClose: () => !submitting,
+    // Esc / 点外部的关闭发生在抽屉内部，这份清理必须挂在这里才拦得到
+    onClose: () => {
+      clearTimeout(debounceTimer);
+      impactToken++; // 让在途的影响预估响应作废
+    },
+  });
+
+  const ta = drawer.querySelector('.rq-change-text');
+  const impactBox = drawer.querySelector('.rq-impact');
+  const okBtn = drawer.querySelector('.ok');
+  const scopeBtns = [...drawer.querySelectorAll('.rq-scope button')];
+  drawer.querySelector('.rq-change-sub').textContent = hasMap
+    ? '描述这次变了什么。提交前会先比对需求地图，算出命中哪些逻辑点。'
+    : '描述这次变了什么。当前需求还没有需求地图，本次只记录并转达给 Claude。';
 
   if (!hasConv) {
     // 会话没就绪时「改代码」这条路走不通（消息发不出去），直接锁到「只改地图」
@@ -68,20 +72,7 @@ export function openChangeDialog({ reqId, hasMap, hasConv, onDone }) {
     });
   }
 
-  const close = () => {
-    clearTimeout(debounceTimer);
-    impactToken++; // 让在途的预估响应作废
-    document.removeEventListener('keydown', onKey);
-    mask.remove();
-  };
-  const onKey = (e) => {
-    if (e.key === 'Escape' && !submitting) close();
-  };
-  document.addEventListener('keydown', onKey);
-  mask.addEventListener('mousedown', (e) => {
-    if (e.target === mask && !submitting) close();
-  });
-  mask.querySelector('.cancel').addEventListener('click', () => !submitting && close());
+  drawer.querySelector('.cancel').addEventListener('click', () => !submitting && close());
 
   scopeBtns.forEach((b) =>
     b.addEventListener('click', () => {

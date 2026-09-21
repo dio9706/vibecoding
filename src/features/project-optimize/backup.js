@@ -18,6 +18,35 @@ import { buildManifest, restoreActionsOf, backupDirName } from './backup.logic.j
 const BACKUP_ROOT = '.claude/optimize-backup';
 const KEEP = 5;
 
+/**
+ * 让备份目录自我忽略 —— 在 `.claude/optimize-backup/.gitignore` 里写一个 `*`。
+ *
+ * ## 为什么必须有
+ *
+ * 备份目录下是整个源码树的完整快照。它一旦被 `git add .` 收进索引，就成了取材层
+ * （`git ls-files`）眼里的「真实源码」，下一轮体检会把副本当代码重新分析一遍。
+ * 这形成自我污染的正反馈：修一次 → 多一份快照 → 下次问题更多 → 再修再备份。
+ * 实测（kxmall-app-ui，2026-09-21）：317 项问题里 140 项（44%）出自上一轮的备份目录。
+ *
+ * ## 为什么写子目录的 .gitignore，而不是追加用户的根 .gitignore
+ *
+ * 子目录自忽略是 git 的标准惯例，且**完全不碰用户的配置文件**——
+ * 备份是工具自己的产物，清理它的规则就该自包含，不该在用户的根 .gitignore 里留痕迹
+ * （那还会牵扯「还原」要不要撤销这一行）。
+ *
+ * 注意它管不了**已经在索引里**的文件（gitignore 对已追踪文件无效）：
+ * 那种存量由体检的 `H4_TOOL_BACKUP_TRACKED` 报出、deterministic 策略用 `git rm -r --cached` 清。
+ *
+ * 失败静默：这是卫生措施，不该让一次写不进去就挡住整个备份流程（备份本身才是安全底线）。
+ */
+function ensureSelfIgnore(projectDir) {
+  try {
+    const f = path.join(projectDir, BACKUP_ROOT, '.gitignore');
+    if (fs.existsSync(f)) return;
+    fs.writeFileSync(f, '# 项目优化功能的快照备份，不应进入版本库\n*\n', 'utf8');
+  } catch { /* 写不进去也不影响备份本身 */ }
+}
+
 /** 文件内容哈希；文件不存在返回 null（null 本身也是一种有效的「优化后状态」） */
 function hashFile(abs) {
   try {
@@ -38,6 +67,8 @@ export function createBackup(projectDir, entries, { at, dimensions } = {}) {
   const relDir = `${BACKUP_ROOT}/${backupDirName(stamp)}`;
   const absDir = path.join(projectDir, relDir);
   fs.mkdirSync(path.join(absDir, 'files'), { recursive: true });
+  // 紧跟在建目录之后：必须早于任何文件落进去，否则中间有个窗口能被 `git add .` 收走
+  ensureSelfIgnore(projectDir);
 
   const manifest = buildManifest({ at: stamp, dir: projectDir, dimensions, entries });
   // 还没记录优化后状态，还原时据此判断能不能做二次修改检测

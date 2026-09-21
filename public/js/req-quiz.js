@@ -11,6 +11,10 @@
  * 虚设），而是每题末尾的「不确定」—— 用户至少被迫看过一遍这些点，而看一遍本身就
  * 常常触发「哦这个不对」。选「不确定」时自动展开补充框，那是唯一能从「不知道」里
  * 榨出信息的时刻。
+ *
+ * 进度即时落盘：每答一题就打一次 `/api/req/quiz/draft`，答案是服务端状态而非前端内存。
+ * 早先只在全部答完时才 PUT，中途关页 / 切需求 / 点取消都会让已答的题白答——问卷本来
+ * 就有七八题，白答一次用户下回就不愿意认真答了。回来时从第一道未答题接着走。
  */
 
 /**
@@ -29,12 +33,75 @@ let panelHost = null; // 当前挂载的面板根节点，翻页/选答后就地
 // 只在「刚展开补充框」那一次抢焦点。paint 每次都重建 textarea，若无条件 focus，
 // 用户点选项触发的重绘会把焦点从选项区抢到输入框里。
 let focusNote = false;
+let hydratedKey = null; // 已灌过服务端进度的问卷身份（reqId + 出题时间），见 hydrate
+let draftTimer = null;
+let draftReqId = null; // 待发草稿属于哪个需求 —— flush 时模块态可能已经在被清
 
-/** 每次进入问卷重置游标与答案（换需求 / 重新出题都要从头来）。 */
+const DRAFT_DEBOUNCE_MS = 600; // 补充说明逐字符发请求会把 store 的文件锁打爆
+
+/**
+ * 每次进入问卷重置游标与答案（换需求 / 重新出题都要从头来）。
+ * 清空前先把待发的草稿送出去：用户在补充框里写到一半就切走，那段字不该丢。
+ */
 export function resetQuizState() {
+  flushDraft();
   answers = {};
   noteOpen = {};
   idx = 0;
+  hydratedKey = null;
+  draftReqId = null;
+}
+
+function cancelDraft() {
+  if (draftTimer) clearTimeout(draftTimer);
+  draftTimer = null;
+}
+
+/** 把防抖中的草稿立刻发出（不等到点）。没有待发内容时是空操作。 */
+function flushDraft() {
+  if (!draftTimer) return;
+  cancelDraft();
+  if (draftReqId) void postJson('/api/req/quiz/draft', { id: draftReqId, answers });
+}
+
+/**
+ * 保存作答进度。
+ *
+ * 选项点击走 immediate：用户点一下的预期就是「记下了」，压 600ms 再发的话，
+ * 点完立刻关页就白点了。补充说明走防抖，理由见 DRAFT_DEBOUNCE_MS。
+ *
+ * 失败刻意不 toast：防抖期间可能连发多次，逐次报错会把答题打断得没法用；
+ * 且最坏后果只是退回「进度没存住」这个老行为，最终提交的 PUT 仍会如实报错。
+ */
+function saveDraft(reqId, { immediate = false } = {}) {
+  draftReqId = reqId;
+  cancelDraft();
+  if (immediate) {
+    void postJson('/api/req/quiz/draft', { id: reqId, answers });
+    return;
+  }
+  draftTimer = setTimeout(() => {
+    draftTimer = null;
+    void postJson('/api/req/quiz/draft', { id: reqId, answers });
+  }, DRAFT_DEBOUNCE_MS);
+}
+
+/**
+ * 从服务端已存的进度灌回模块态，并把游标落到第一道未答题上。
+ *
+ * 只在「这份问卷还没灌过」时做：renderQuizPanel 会被 req-view 的 3s 轮询反复调用，
+ * 无条件灌会把用户刚点、草稿还没落盘的那一下覆盖回旧值（表现为选项自己跳回去）。
+ * key 带上出题时间 —— 重新出题就是另一份问卷，答案与游标都得从头来。
+ */
+function hydrate(req) {
+  const key = req.id + ':' + (req.quiz?.at || '');
+  if (hydratedKey === key) return;
+  hydratedKey = key;
+  const saved = req.quiz?.answers;
+  answers = saved && typeof saved === 'object' ? { ...saved } : {};
+  const qs = req.quiz?.questions || [];
+  const miss = qs.findIndex((q) => !answers[q.id]?.v);
+  idx = miss >= 0 ? miss : 0;
 }
 
 function el(tag, cls, text) {
@@ -130,6 +197,7 @@ async function postJson(url, body) {
  * @param {{onClose: Function, onRefresh: Function}} ctx onClose 收回面板，onRefresh 刷新需求页
  */
 export function renderQuizPanel(req, ctx) {
+  hydrate(req); // 中途离开再回来：接着服务端已存的进度答，而不是从头
   const questions = req.quiz?.questions || [];
   if (idx >= questions.length) idx = 0; // 换了一份题目时游标可能越界
   panelHost = el('div', 'rqw-quiz');
@@ -139,7 +207,8 @@ export function renderQuizPanel(req, ctx) {
 
 /** 取消 = 放弃本次生成。不提供「跳过问卷继续生成」，否则必答形同虚设。 */
 function cancel(ctx) {
-  // 题目已经出好了（存在 store 里），下次点生成会复用，不会白花一次额度
+  // 题目和已答的进度都在 store 里（onClose 会经 resetQuizState 把待发草稿 flush 掉），
+  // 下次点生成接着答，既不白花一次出题额度，也不用重答
   panelHost = null;
   ctx?.onClose?.();
 }
@@ -158,7 +227,7 @@ function paint(req, questions, ctx) {
   head.appendChild(el('span', 'gap'));
   const closeBtn = el('button', 'rqw-mclose', '取消');
   closeBtn.type = 'button';
-  closeBtn.title = '放弃本次生成，题目会保留，下次点生成可继续作答';
+  closeBtn.title = '放弃本次生成。题目和已答的内容都会保留，下次点生成接着答';
   closeBtn.onclick = () => cancel(ctx);
   head.appendChild(closeBtn);
   panelHost.appendChild(head);
@@ -201,6 +270,7 @@ function paint(req, questions, ctx) {
     btn.appendChild(tx);
     btn.onclick = () => {
       answers[q.id] = { v: o.v, note: answers[q.id]?.note || '' };
+      saveDraft(req.id, { immediate: true });
       paint(req, questions, ctx);
     };
     body.appendChild(btn);
@@ -217,6 +287,7 @@ function paint(req, questions, ctx) {
   uBtn.onclick = () => {
     const wasOpen = !!noteOpen[q.id];
     answers[q.id] = { v: UNSURE_VALUE, note: answers[q.id]?.note || '' };
+    saveDraft(req.id, { immediate: true });
     noteOpen[q.id] = true; // 选不确定时自动展开：唯一能从「不知道」里榨出信息的时刻
     focusNote = !wasOpen; // 已经展开着就别再抢焦点
     paint(req, questions, ctx);
@@ -265,8 +336,11 @@ function paint(req, questions, ctx) {
       ? '能说两句你的顾虑吗？哪怕不完整也有帮助 —— 比如「得问下设计」「跟旧版逻辑有关，我不确定当时为什么那么做」。'
       : '这题还有什么前提或例外？比如「选这个，但列表页不要跟着改」。';
     // 实时写回，不等失焦：翻页与重绘都会带走输入
+    // 注意：本题还没选选项时，这条草稿会被后端的答案清洗丢掉（没选项的题不算作答）——
+    // 等用户选了选项，那一次 immediate 保存会把 note 一并带上，所以不会真丢。
     nta.addEventListener('input', () => {
       answers[q.id] = { v: answers[q.id]?.v || '', note: nta.value };
+      saveDraft(req.id);
     });
     nbox.appendChild(nta);
     nbox.appendChild(
@@ -331,6 +405,8 @@ function paint(req, questions, ctx) {
 async function submit(req, questions, ctx, btn) {
   btn.disabled = true;
   btn.textContent = '提交中…';
+  // 定稿的 payload 已含全部答案，待发的草稿没有意义了；留着会在 PUT 之后补打一个 409
+  cancelDraft();
   // 只提交问卷里真实存在的题，且必须带 v —— 与路由层的必答校验对齐，
   // 少传一题会被回 400，不如在这里就保证形状正确
   const payload = {};

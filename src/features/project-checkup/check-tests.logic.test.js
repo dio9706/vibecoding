@@ -1,14 +1,55 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  LARGE_FILE_LINES, testPathsFor, findLargeFilesWithoutTest, evaluateTests,
+  LARGE_FILE_LINES, testPathsFor, findLargeFilesWithoutTest, evaluateTests, isTestFile,
 } from './check-tests.logic.js';
 
-test('配对规则：x.js 的测试是 x.test.js 或 x.logic.test.js', () => {
-  assert.deepStrictEqual(
-    testPathsFor('src/store/runs.js'),
-    ['src/store/runs.test.js', 'src/store/runs.logic.test.js'],
-  );
+test('配对规则：本仓库约定的 x.test.js / x.logic.test.js 仍在候选里', () => {
+  const p = testPathsFor('src/store/runs.js');
+  assert.ok(p.includes('src/store/runs.test.js'));
+  assert.ok(p.includes('src/store/runs.logic.test.js'));
+});
+
+test('配对规则：保留原扩展名，TS 项目查 .test.ts 而不是 .test.js', () => {
+  // 原实现写死 .js，于是 TS 项目里每个大文件都查不到配对测试、S2 全员误报
+  const p = testPathsFor('src/api/request.ts');
+  assert.ok(p.includes('src/api/request.test.ts'));
+  assert.ok(p.includes('src/api/__tests__/request.test.ts'), '__tests__ 是本项目实测使用的组织方式');
+  assert.ok(!p.some((x) => x.endsWith('.js')), '不该再生成 .js 候选');
+});
+
+test('配对规则：无扩展名的路径不炸', () => {
+  assert.deepStrictEqual(testPathsFor('Makefile'), ['Makefile.test.js']);
+});
+
+test('配对规则：.vue 的测试查 .test.ts/.js，不查 .test.vue', () => {
+  // 不特判的话每个 500 行以上的 .vue 都会被误报成缺测试，
+  // 而它其实在 __tests__/x.test.ts 里测得好好的
+  const p = testPathsFor('src/components/u-card/index.vue');
+  assert.ok(p.includes('src/components/u-card/__tests__/index.test.ts'));
+  assert.ok(p.includes('src/components/u-card/index.test.js'));
+  assert.ok(!p.some((x) => x.endsWith('.vue')), '不该生成 .test.vue 这种不存在的约定');
+});
+
+test('findLargeFilesWithoutTest：大 .vue 有 __tests__/x.test.ts 就不算缺测试', () => {
+  const files = [{ rel: 'src/c/index.vue', lines: 900 }];
+  const all = new Set(['src/c/index.vue', 'src/c/__tests__/index.test.ts']);
+  assert.deepStrictEqual(findLargeFilesWithoutTest(files, all), []);
+});
+
+test('isTestFile：三种约定都认', () => {
+  assert.equal(isTestFile('src/a.test.ts'), true);
+  assert.equal(isTestFile('src/a.spec.js'), true);
+  assert.equal(isTestFile('src/api/__tests__/address.test.ts'), true, '本项目 106 个测试就是这种');
+  assert.equal(isTestFile('tests/e2e/flow.mjs'), true);
+  assert.equal(isTestFile('test/unit/x.py'), true);
+});
+
+test('isTestFile：普通源文件不误判', () => {
+  assert.equal(isTestFile('src/api/request.ts'), false);
+  assert.equal(isTestFile('src/latest.ts'), false, '文件名含 test 子串不算');
+  assert.equal(isTestFile('src/contest/index.ts'), false, '目录名含 test 子串不算');
+  assert.equal(isTestFile(''), false);
 });
 
 test('只报超过阈值且无配对测试的文件', () => {

@@ -77,6 +77,25 @@ export function saveLlmCache(dir, key, entry) {
   });
 }
 
+/**
+ * 丢弃单个维度的指纹缓存，强制它下次体检重跑。
+ *
+ * 唯一的用途是豁免清单变更：豁免会改变该维度的候选集合（召回阶段排除），
+ * 而缓存里的 `score` 是按**排除前**的候选算出来的。不作废就会出现
+ * 「同一份代码，缓存命中与否两个分数」的长期不一致。
+ *
+ * 为什么不把豁免清单的 hash 纳入指纹：那会让「加一条豁免」作废全部 17 个维度的缓存，
+ * 下次体检十几分钟起步、一整轮额度。按维度精确作废是同样效果下最小的代价。
+ */
+export function dropLlmCache(dir, key) {
+  return updateJson(FILE, EMPTY(), (data) => {
+    const rec = data.projects?.[dir];
+    if (!rec?.llmCache?.[key]) return undefined; // 本来就没有，别为空操作刷新文件
+    delete rec.llmCache[key];
+    return data;
+  });
+}
+
 // ==================== 串行闸 ====================
 //
 // 为什么要有：体检和优化都是「同一个项目、跑一次要好几分钟、还要烧额度」的操作。

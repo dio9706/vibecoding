@@ -138,3 +138,70 @@ test('评审期需求：不渲染折叠箭头（没有会话树可展开）', as
 
   assert.equal(arrow(), null, '非开发/测试期不应出现折叠箭头');
 });
+
+test('会话树点开服务端建的子会话：本地无记录时按既定 id 补建（含 session），二次点击不重复', async () => {
+  // 服务端（colleague-dev）起的子会话：本地 localStorage 尚无对应 conv 记录
+  const REQ_H = {
+    id: 'r_tree_hydrate',
+    title: '子会话补建需求',
+    phase: 'dev',
+    updatedAt: new Date().toISOString(),
+    busy: false,
+    sessions: [
+      { convId: 'c_main_h', sessionId: 's_main_h', title: '主会话', kind: 'main', createdAt: '' },
+      { convId: 'c_sub_h', sessionId: 'sess_h', title: '接入接口文档：a.md', kind: 'sub', createdAt: '' },
+    ],
+  };
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/api/req/list')) {
+      return { ok: true, status: 200, json: async () => ({ requirements: [REQ_H] }) };
+    }
+    if (u.includes('/api/req/get')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: REQ_H.id,
+          phase: 'dev',
+          busy: null,
+          devCwd: 'D:/x',
+          projects: { frontend: { dir: 'D:/x', dev: true }, backend: null },
+        }),
+      };
+    }
+    if (u.includes('/api/history')) {
+      return { ok: false, status: 404, json: async () => ({ ok: false }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+
+  await refreshReqList();
+
+  const subRow = [...sessionRows()].find((r) => r.textContent.includes('接入接口文档：a.md'));
+  assert.ok(subRow, '子会话行应渲染');
+
+  const { loadConvs } = await import('./conv-store.js');
+  assert.equal(
+    loadConvs().filter((c) => c.id === 'c_sub_h').length,
+    0,
+    '点击前本地不应已有该 conv',
+  );
+
+  await subRow.onclick(); // onclick 返回 openSessionConv 的 promise
+
+  const created = loadConvs().find((c) => c.id === 'c_sub_h');
+  assert.ok(created, '点击后应按既定 id 补建 conv');
+  assert.equal(created.meta.reqId, REQ_H.id, 'reqId 应写入 meta');
+  assert.equal(created.cwd, 'D:/x', 'cwd 取自 /api/req/get 的 devCwd');
+  assert.equal(created.session, 'sess_h', '须带上 session，否则回放后追问会开一个陌生的 Claude 会话');
+  assert.equal(created.meta.kind, 'sub');
+
+  await subRow.onclick(); // 二次点击
+
+  assert.equal(
+    loadConvs().filter((c) => c.id === 'c_sub_h').length,
+    1,
+    '二次点击不应重复补建（幂等）',
+  );
+});

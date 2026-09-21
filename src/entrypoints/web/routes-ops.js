@@ -265,7 +265,15 @@ export async function handleActionsPut(req, res, url) {
       const { botId: _ignored, ...data } = payload;
       const varErr = await checkVariables(data);
       if (varErr) return sendJson(res, 422, { error: varErr });
-      const { updateConfig } = await import('../../store/action-configs.js');
+      const { updateConfig, getConfig, reconcileAutoKeywords } = await import(
+        '../../store/action-configs.js'
+      );
+      // 人工编辑过关键词 → 对账自动词元数据：用户删掉的自动词进 rejectedKeywords。
+      // 不做的话，下次同样的话一来，自学习会把用户刚删的词原样加回去 —— 撤销形同虚设。
+      if (data.keywords !== undefined) {
+        const prev = getConfig(id);
+        if (prev) Object.assign(data, reconcileAutoKeywords(prev, data.keywords));
+      }
       const updated = updateConfig(id, data);
       if (!updated) {
         return sendJson(res, 404, { error: '配置不存在' });
@@ -313,7 +321,7 @@ export function handleScripts(res) {
 
 /** 首次启动初始化：bots 迁移 → 默认动作配置 → bindings→user-vars 迁移（均幂等） */
 export async function initializeDefaults() {
-  const { readJson, writeJson } = await import('../../store/index.js');
+  const { readJson, updateJson } = await import('../../store/index.js');
   const { getConfigs, addConfig } = await import('../../store/action-configs.js');
 
   // 0. 旧「单凭证 + 全局 persona/文案」→ 机器人实体 + 动作收养（必须先于默认动作创建）
@@ -386,14 +394,23 @@ export async function initializeDefaults() {
   // 2. 迁移 bindings → user-vars
   try {
     const bindings = readJson('bindings.json', null);
-    const userVars = readJson('user-vars.json', null);
-    if (bindings && !userVars) {
-      const migrated = {};
-      for (const [userId, phone] of Object.entries(bindings)) {
-        migrated[userId] = { phone };
-      }
-      writeJson('user-vars.json', migrated);
-      console.log('✓ 用户变量已从 bindings.json 迁移');
+    if (bindings) {
+      // 「是否已迁移」的判断必须与写盘在**同一把锁内**：原先是裸 readJson→writeJson，
+      // 中间的窗口里若 feishu 进程写了用户变量，这里会把它整份覆盖掉
+      // （store/CLAUDE.md：任何「读出来改一改再写回」都得走 updateJson）。
+      // fallback 传 null —— updateJson 只在文件确实不存在时才给到 null，
+      // 正好等价于旧的「user-vars.json 还没有 ⇒ 未迁移」判据。
+      let migratedCount = 0;
+      updateJson('user-vars.json', null, (cur) => {
+        if (cur) return undefined; // 已有用户变量：不是首次启动，放弃迁移且不写盘
+        const migrated = {};
+        for (const [userId, phone] of Object.entries(bindings)) {
+          migrated[userId] = { phone };
+        }
+        migratedCount = Object.keys(migrated).length;
+        return migrated;
+      });
+      if (migratedCount) console.log('✓ 用户变量已从 bindings.json 迁移');
     }
   } catch (e) {
     logger.warn('initialization', '迁移用户数据失败', { err: e?.message });

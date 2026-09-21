@@ -132,6 +132,29 @@ export function claims(strategy, issue) {
 }
 
 /**
+ * 单条 issue 归哪个策略 —— 认领顺序的**唯一**实现。
+ *
+ * 语义：在给定的策略序列里，取第一个认领它的非 advisory 策略；都不认领就归 advisory。
+ * 这与 `partitionIssues` 的分组循环完全等价（那里是「每个策略挑走尚未被认领的」，
+ * 对单条 issue 而言就是「第一个认领它的策略拿走」）。
+ *
+ * 抽出来是因为修复计划要**逐条**展示动作与风险，而 partitionIssues 返回的是按策略分组。
+ * 两处各写一遍认领规则必然漂移，所以让 partitionIssues 也复用它，
+ * 并在测试里做交叉校验钉死一致性。
+ *
+ * @param {string[]} strategies 已按维度声明顺序排列、且已过滤掉不可用的策略
+ * @param {object} issue
+ * @returns {string} 策略名，或 'advisory'
+ */
+export function strategyForIssue(strategies, issue) {
+  for (const s of strategies || []) {
+    if (s === 'advisory') continue;
+    if (claims(s, issue)) return s;
+  }
+  return 'advisory';
+}
+
+/**
  * 把一个维度的 issue 分派到各策略。
  *
  * @param {object} args
@@ -161,12 +184,25 @@ export function partitionIssues({
   const byStrategy = [];
   const claimed = new Set();
 
+  // 逐条定策略再按策略聚合。原实现是「每个策略扫一遍 issues 挑走自己的」，
+  // 语义相同但把认领规则写在了这里；现在统一交给 strategyForIssue，
+  // 让计划构建器（fix-plan.logic.js）与执行分派共用同一份规则，杜绝漂移。
+  //
+  // 顺带修掉一个隐患：原实现用 `mine.includes(it)` 判定已认领，是**按对象引用**比对。
+  // 同一个维度里出现两条内容完全相同的 issue 对象（同一引用被放进数组两次）时，
+  // 它会把两个下标都标记掉，等价于静默丢一条。改成逐下标定策略后不存在这个问题。
+  const groups = new Map();
+  issues.forEach((it, i) => {
+    const s = strategyForIssue(active, it);
+    if (s === 'advisory') return; // advisory 由下面的兜底统一收
+    claimed.add(i);
+    if (!groups.has(s)) groups.set(s, []);
+    groups.get(s).push(it);
+  });
+  // 按 active 的顺序输出：执行顺序依赖它（如 deterministic 先于 llm-*）
   for (const strategy of active) {
-    if (strategy === 'advisory') continue; // advisory 是兜底，最后统一处理
-    const mine = issues.filter((it, i) => !claimed.has(i) && claims(strategy, it));
-    // 记下已认领的下标：同一条 issue 不该被两个策略各改一遍
-    issues.forEach((it, i) => { if (mine.includes(it)) claimed.add(i); });
-    if (mine.length) byStrategy.push({ strategy, issues: mine });
+    const mine = groups.get(strategy);
+    if (mine?.length) byStrategy.push({ strategy, issues: mine });
   }
 
   const advisory = issues.filter((it, i) => !claimed.has(i));

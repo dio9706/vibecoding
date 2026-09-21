@@ -1,11 +1,14 @@
 /**
- * UI 规范面板 —— 项目级（按工程目录归属）的字体/圆角/组件约定/禁止项。
+ * UI 规范抽屉 —— 项目级（按工程目录归属）的字体/圆角/组件约定/禁止项。
  *
  * 还原设计稿时这份文本会作为**硬约束**注入 prompt（见 req-uispec.logic.js buildRestorePrompt），
  * 所以这里编辑的是「以后每次还原都要守的规矩」，不是某个页面的一次性说明。
+ *
+ * 容器是右侧抽屉（req-drawer.js）：写规范要比对 AI 刚生成的代码，聊天区必须还能看。
  */
 import { sendMessageProgrammatically } from './chat.js';
 import { iconHtml, DESIGN_ICON_SVG } from './icons.js';
+import { openReqDrawer } from './req-drawer.js';
 
 const PLACEHOLDER = `## 字体
 - 正文：14px / 22px，400
@@ -32,39 +35,26 @@ const PLACEHOLDER = `## 字体
  * @param {boolean} opts.hasConv - 会话就绪时才允许「从代码抽草稿」（要靠会话跑 AI）
  */
 export function openUiSpecDialog({ dir, hasConv }) {
-  const mask = document.createElement('div');
-  mask.className = 'mask';
-  mask.innerHTML =
-    '<div class="modal rq-spec-modal">' +
-    '<div class="head"><h3>' + iconHtml(DESIGN_ICON_SVG) + ' UI 规范</h3></div>' +
-    '<div class="body">' +
-    '<div class="rq-spec-meta"></div>' +
-    '<textarea class="rq-spec-text" rows="18" spellcheck="false"></textarea>' +
-    '</div>' +
-    '<div class="confirm-foot rq-spec-foot">' +
-    '<button class="btn rq-spec-draft">从代码抽草稿</button>' +
-    '<span class="rq-spec-gap"></span>' +
-    '<button class="btn cancel">取消</button>' +
-    '<button class="btn primary ok">保存</button>' +
-    '</div>' +
-    '</div>';
-  document.body.appendChild(mask);
+  const { root: drawer, close } = openReqDrawer({
+    title: 'UI 规范',
+    icon: iconHtml(DESIGN_ICON_SVG),
+    cls: 'rq-spec-drawer',
+    bodyHtml:
+      '<div class="rq-spec-meta"></div>' +
+      '<textarea class="rq-spec-text" spellcheck="false"></textarea>',
+    footHtml:
+      '<button class="btn rq-spec-draft">从代码抽草稿</button>' +
+      '<span class="rq-spec-gap"></span>' +
+      '<button class="btn cancel">取消</button>' +
+      '<button class="btn primary ok">保存</button>',
+  });
 
-  const ta = mask.querySelector('.rq-spec-text');
-  const draftBtn = mask.querySelector('.rq-spec-draft');
-  mask.querySelector('.rq-spec-meta').textContent = dir + ' · 本工程的所有需求共用这一份';
+  const ta = drawer.querySelector('.rq-spec-text');
+  const draftBtn = drawer.querySelector('.rq-spec-draft');
+  drawer.querySelector('.rq-spec-meta').textContent = dir + ' · 本工程的所有需求共用这一份';
   ta.placeholder = PLACEHOLDER;
 
-  const close = () => {
-    document.removeEventListener('keydown', onKey);
-    mask.remove();
-  };
-  const onKey = (e) => {
-    if (e.key === 'Escape') close();
-  };
-  document.addEventListener('keydown', onKey);
-  mask.addEventListener('mousedown', (e) => e.target === mask && close());
-  mask.querySelector('.cancel').addEventListener('click', close);
+  drawer.querySelector('.cancel').addEventListener('click', close);
 
   if (!hasConv) {
     draftBtn.disabled = true;
@@ -102,7 +92,7 @@ export function openUiSpecDialog({ dir, hasConv }) {
     }
   });
 
-  mask.querySelector('.ok').addEventListener('click', async (e) => {
+  drawer.querySelector('.ok').addEventListener('click', async (e) => {
     const btn = e.currentTarget;
     btn.disabled = true;
     try {

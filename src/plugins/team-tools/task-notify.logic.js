@@ -8,7 +8,7 @@
  * 与 feedback/logic.js 的评审卡片同一套路数：按钮 value 自带 kind + taskId 做全局路由，
  * 不依赖任何内存注册 —— 机器人重启后躺在聊天记录里的旧卡片按钮照样有效。
  */
-import { isAwaitingMerge } from './task-actions.js';
+import { isAwaitingMerge, isDiscardable } from './task-actions.js';
 
 export const TASK_CARD_KIND = 'task-done';
 
@@ -41,18 +41,23 @@ export function buildTaskDoneCard(task, ok) {
   const head = ok ? '✅ **已处理完成**' : '❌ **处理失败**';
   // 两者都有才显示：缺一个就拼出「分支：auto/x → null」这种误导性文案，不如不显示
   const branchLine = task.branch && task.baseBranch ? `\n分支：${task.branch} → ${task.baseBranch}` : '';
+  // 已合并的改动已经在基线分支上了，必须说清——否则收卡片的人以为还等着自己点合并
+  const mergedLine = task.merged
+    ? `\n${task.autoMerged ? '已自动合并到' : '已合并到'} ${task.baseBranch || '基线分支'}`
+    : '';
   const awaiting = isAwaitingMerge(task);
   const actions = [];
   if (awaiting) actions.push(btn('✅ 合并到主分支', 'primary', task.id, 'merge'));
   actions.push(btn('📝 补充', 'default', task.id, 'supplement'));
-  if (awaiting) actions.push(btn('🗑 放弃改动', 'danger', task.id, 'discard'));
+  // 放弃按钮跟着 isDiscardable 走（合并前删分支、合并后 revert），不再与合并按钮同生共死
+  if (isDiscardable(task)) actions.push(btn('🗑 放弃改动', 'danger', task.id, 'discard'));
   return {
     elements: [
       {
         tag: 'div',
         text: {
           tag: 'lark_md',
-          content: `${head}\n${tag}「${task.title}」${branchLine}\n\n${summarize(task.devLog)}`,
+          content: `${head}\n${tag}「${task.title}」${branchLine}${mergedLine}\n\n${summarize(task.devLog)}`,
         },
       },
       { tag: 'action', actions },

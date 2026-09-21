@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { mergeBranch, mergeMessage, isClean, currentBranch, ensureBranch, commitAll, autoWorktreeDir, worktreeAddArgs, checkoutNewFromBaseArgs, ensureAutoWorktree, commitResidue, deleteBranchArgs } from './git.js';
+import { mergeBranch, mergeMessage, isClean, currentBranch, ensureBranch, commitAll, autoWorktreeDir, worktreeAddArgs, checkoutNewFromBaseArgs, ensureAutoWorktree, commitResidue, deleteBranchArgs, withBranchWorktree } from './git.js';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-dev-git-test-'));
 
@@ -116,6 +116,7 @@ test('mergeBranch：主工作区在其他分支且有脏文件 → 临时 worktr
   // 执行合并：source=auto/t_feature → target=v5.5.2，主工作区在 feat/other
   const r = await mergeBranch(repo, 'auto/t_feature', 'v5.5.2');
   assert.equal(r.ok, true, `合并应成功，实际错误：${r.error || ''}`);
+  assert.match(r.mergeCommit, /^[0-9a-f]{40}$/, '路径 B 同样要回填锚点');
 
   // 主工作区仍在 feat/other，脏文件仍在
   assert.equal(await currentBranch(repo), 'feat/other');
@@ -342,4 +343,79 @@ test('deleteBranchArgs：-C repo branch -D <branch>（强删，任务分支未�
   assert.deepEqual(deleteBranchArgs('C:\\proj', 'task/t_abc-bug'), [
     '-C', 'C:\\proj', 'branch', '-D', 'task/t_abc-bug',
   ]);
+});
+
+// ---- withBranchWorktree：merge / revert 共用的「在目标分支所在工作区执行」抽象 ----
+
+test('withBranchWorktree：主工作区已在目标分支 → 原地执行，fn 收到 repo 本身', async () => {
+  const repo = makeRepo('wbw-inplace');
+  let got = null;
+  const r = await withBranchWorktree(repo, 'main', '.probe-tmp', async (dir) => {
+    got = dir;
+    return { ok: true, marker: 'A' };
+  });
+  assert.equal(got, repo, '路径 A 必须在主工作区原地执行');
+  assert.equal(r.marker, 'A', 'fn 的返回值必须原样透传');
+  assert.equal(fs.existsSync(repo + '.probe-tmp'), false, '路径 A 不该建临时目录');
+});
+
+test('withBranchWorktree：主工作区在其他分支 → 临时 worktree 执行，完事即删且主工作区不受影响', async () => {
+  const repo = makeRepo('wbw-worktree');
+  sh(['checkout', '-b', 'feat/other'], repo);
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'wip changes\n'); // 主工作区脏
+
+  let got = null;
+  const r = await withBranchWorktree(repo, 'main', '.probe-tmp', async (dir) => {
+    got = dir;
+    // 在临时工作区里确认检出的确实是 main
+    assert.equal(await currentBranch(dir), 'main');
+    return { ok: true, marker: 'B' };
+  });
+  assert.equal(got, repo + '.probe-tmp', '路径 B 必须在临时 worktree 执行');
+  assert.equal(r.marker, 'B');
+  assert.equal(fs.existsSync(got), false, '临时 worktree 必须被清理');
+  assert.equal(await currentBranch(repo), 'feat/other', '主工作区分支不得被切');
+  assert.equal(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8').replace(/\r\n/g, '\n'), 'wip changes\n');
+});
+
+test('withBranchWorktree：fn 抛错时临时 worktree 仍被清理', async () => {
+  const repo = makeRepo('wbw-throw');
+  sh(['checkout', '-b', 'feat/other'], repo);
+  const tmp = repo + '.probe-tmp';
+  await assert.rejects(
+    () => withBranchWorktree(repo, 'main', '.probe-tmp', async () => {
+      throw new Error('boom');
+    }),
+    /boom/,
+  );
+  assert.equal(fs.existsSync(tmp), false, 'finally 必须清理，否则下次 worktree add 会撞目录');
+});
+
+test('mergeBranch：成功时回填 mergeCommit（放弃改动要靠它精确 revert）', async () => {
+  const repo = makeRepo('merge-sha');
+  await ensureBranch(repo, 'auto/t_sha');
+  fs.writeFileSync(path.join(repo, 's.txt'), 'x\n');
+  await commitAll(repo, 'feat: s');
+  await ensureBranch(repo, 'main');
+
+  const r = await mergeBranch(repo, 'auto/t_sha', 'main');
+  assert.equal(r.ok, true, `应合并成功，实际：${r.error || ''}`);
+  assert.match(r.mergeCommit, /^[0-9a-f]{40}$/, 'mergeCommit 必须是完整 sha');
+  // 该 sha 就是 main 的 HEAD，且确实是一个 merge commit（有两个父提交）
+  assert.equal(sh(['rev-parse', 'main'], repo).trim(), r.mergeCommit);
+  assert.equal(sh(['rev-list', '--parents', '-n', '1', r.mergeCommit], repo).trim().split(/\s+/).length, 3);
+});
+
+test('mergeBranch：钩子绕过路径同样回填 mergeCommit', async () => {
+  const repo = makeRepo('merge-sha-hook');
+  await ensureBranch(repo, 'auto/t_sha2');
+  fs.writeFileSync(path.join(repo, 's2.txt'), 'x\n');
+  await commitAll(repo, 'feat: s2');
+  await ensureBranch(repo, 'main');
+  installRejectAllHook(repo);
+
+  const r = await mergeBranch(repo, 'auto/t_sha2', 'main');
+  assert.equal(r.ok, true);
+  assert.equal(r.hookBypassed, true);
+  assert.match(r.mergeCommit, /^[0-9a-f]{40}$/, '绕过钩子完成的合并也必须有锚点');
 });

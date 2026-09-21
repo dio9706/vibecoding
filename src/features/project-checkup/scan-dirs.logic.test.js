@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SKIP_DIR, shouldSkipDir } from './scan-dirs.logic.js';
+import { SKIP_DIR, shouldSkipDir, isUnderSkippedDir } from './scan-dirs.logic.js';
 
 test('构建产物与依赖目录一律跳过', () => {
   for (const d of ['node_modules', 'dist', 'build', 'coverage', '.git', '.expo']) {
@@ -48,4 +48,29 @@ test('容错：空值不抛错', () => {
   assert.equal(shouldSkipDir(''), false);
   assert.equal(shouldSkipDir(null), false);
   assert.equal(shouldSkipDir(undefined), false);
+});
+
+// ---------- 工具自产物的排除（自我污染防线） ----------
+
+test('本功能自己的备份目录一律跳过', () => {
+  // 不排除它就是自我污染：备份是整个源码树的快照，被扫到会让副本当真源码重复分析。
+  // 实测一份备份贡献了 140 项假问题（317 项里的 44%）
+  assert.equal(shouldSkipDir('optimize-backup'), true);
+  assert.equal(isUnderSkippedDir('.claude/optimize-backup/2026-09-18T06-39-43/files/src/a.ts'), true);
+  assert.equal(isUnderSkippedDir('.claude/optimize-backup/x/manifest.json'), true);
+});
+
+test('isUnderSkippedDir：逐段比目录，不误伤同名文件', () => {
+  assert.equal(isUnderSkippedDir('src/app.ts'), false);
+  assert.equal(isUnderSkippedDir('node_modules/pkg/index.js'), true);
+  assert.equal(isUnderSkippedDir('tests/fixtures/demo/CLAUDE.md'), true);
+  // 只比目录段：文件名本身叫 fixtures.ts / optimize-backup.md 的不该被当成目录
+  assert.equal(isUnderSkippedDir('src/fixtures.ts'), false);
+  assert.equal(isUnderSkippedDir('docs/optimize-backup.md'), false);
+});
+
+test('isUnderSkippedDir：容错', () => {
+  assert.equal(isUnderSkippedDir(''), false);
+  assert.equal(isUnderSkippedDir(null), false);
+  assert.equal(isUnderSkippedDir('a.js'), false, '单段路径没有目录段');
 });

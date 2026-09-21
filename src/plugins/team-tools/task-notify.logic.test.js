@@ -88,6 +88,27 @@ test('parseTaskCardAction：kind/action 校验与 messageId 兜底', () => {
   assert.equal(parseTaskCardAction(null), null);
 });
 
+test('buildTaskDoneCard：已自动合并 → 不给合并按钮，正文写明已合并，仍保留放弃', () => {
+  const card = buildTaskDoneCard(
+    { id: 't1', type: 'bug', title: 'x', branch: 'task/x', baseBranch: 'main', status: 'done', auto: true, merged: true, autoMerged: true },
+    true,
+  );
+  const json = JSON.stringify(card);
+  assert.doesNotMatch(json, /合并到主分支/, '已合并再给合并按钮，点了只会被挡回');
+  assert.match(json, /已自动合并到 main/, '正文必须说清改动已经进主干');
+  assert.match(json, /放弃改动/, '放弃按钮必须保留（改为 revert 撤销）');
+});
+
+test('buildTaskDoneCard：合并失败降级态 → 照旧给合并按钮', () => {
+  const card = buildTaskDoneCard(
+    { id: 't2', type: 'bug', title: 'x', branch: 'task/x', baseBranch: 'main', status: 'done', auto: true, merged: false, mergeError: '合并冲突：xxx' },
+    true,
+  );
+  const json = JSON.stringify(card);
+  assert.match(json, /合并到主分支/);
+  assert.match(json, /放弃改动/);
+});
+
 test('taskResultCard：只剩一句结果，无按钮', () => {
   const c = taskResultCard('✅ 已合并');
   assert.equal(c.elements.length, 1);

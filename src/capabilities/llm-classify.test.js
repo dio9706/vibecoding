@@ -218,3 +218,29 @@ test('pickJsonObject 跳过解析失败的块（模型贴的代码片段常常�
 test('pickJsonObject 全是坏块时返回 null', () => {
   assert.equal(pickJsonObject('function f() { if (a) { b(); } }', ['topActions']), null);
 });
+
+test('外部中止归因为 aborted，且优先于「先尝试解析」', () => {
+  // 手上即使已有可解析的 JSON 也不返回：用户已经明确不要这个结果了，
+  // 上层 land 的守卫也会把它丢弃，返回它只会让调用方误以为这批成功了
+  const out = classifyOutcome({ externalAbort: true, text: '{"verdicts":[]}' });
+  assert.equal(out.data, null);
+  assert.equal(out.reason, 'aborted');
+});
+
+test('额度耗尽仍优先于外部中止', () => {
+  // exhausted 是 fail-fast 的结论，比「用户中止」更靠前：
+  // 两者同时成立时，调用方要知道的是「池子空了」而不是「被停了」
+  const out = classifyOutcome({ exhausted: true, externalAbort: true });
+  assert.equal(out.reason, 'exhausted');
+});
+
+test('aborted 与 timeout 必须分开：超时值得重试，用户中止绝不该重试', () => {
+  assert.equal(classifyOutcome({ aborted: true, text: '' }).reason, 'timeout');
+  assert.equal(classifyOutcome({ externalAbort: true, text: '' }).reason, 'aborted');
+});
+
+test('没有外部中止时，既有归因行为一字不变', () => {
+  assert.equal(classifyOutcome({ text: '{"a":1}' }).reason, null);
+  assert.deepEqual(classifyOutcome({ text: '{"a":1}' }).data, { a: 1 });
+  assert.equal(classifyOutcome({ text: 'no json here' }).reason, 'unparsable');
+});

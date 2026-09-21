@@ -12,8 +12,10 @@ import { openMapOverlay } from './req-map-overlay.js';
 import {
   iconEl, setIconText, FRONTEND_ICON_SVG, BACKEND_ICON_SVG, DOC_ICON_SVG,
   MAP_ICON_SVG, DESIGN_ICON_SVG, CHANGE_ICON_SVG,
-  REFRESH_ICON_SVG, WAITING_ICON_SVG, SETTINGS_ICON_SVG,
+  REFRESH_ICON_SVG, WAITING_ICON_SVG, SETTINGS_ICON_SVG, TEAM_ICON_SVG,
 } from './icons.js';
+import { openAssigneeDialog } from './req-assignee-dialog.js';
+import { openColleagueList } from './colleague-chat.js';
 import { isNetworkError } from './net-error.js';
 
 /**
@@ -161,7 +163,10 @@ export async function mountReqChrome(reqId) {
   // 有进行中的 run（busy.runId）：补种气泡并接管实时流（逐字进度/工具活动/Todo 全可见，且可随时插话）。
   // 无进行中的 run 但已有开发会话：过程可能从没落 localStorage（跑时没人看），从 Claude session 转录回放，
   // 让点开「已完成」需求也能看到开发过程/结果。两者互斥（loadReqTranscript 自带「有实时流/已有内容」护栏）。
-  if (data.busy?.runId) ensureConvRunAttached(data.convId, data.busy.runId);
+  // busy.convId：系统任务落在非主会话时（colleague-dev 起子会话）才有。ensureConvRunAttached 内部只为
+  // currentConvId 接流 —— 传真实 convId 后，用户在主会话时子会话的 run 被自然忽略（不错接），
+  // 点开子会话时正常接流。bug-fix 的 busy 无 convId，回落主会话，行为不变。
+  if (data.busy?.runId) ensureConvRunAttached(data.busy.convId || data.convId, data.busy.runId);
   else if (data.devSession) loadReqTranscript(data.convId, data.devSession, data.devCwd);
   // busy（或测试期有未终态 bug）期间轮询；自杀条件与 req-view 同款
   if (busyTimer) {
@@ -187,7 +192,7 @@ export async function mountReqChrome(reqId) {
         if (d.phase === 'test') renderRail(d);
         renderBusyChip(d.busy);
         // 泵派发晚于进入开发期：busy.runId 可能在 mount 之后才出现，轮询里补接一次（幂等，已接则跳过）
-        if (d.busy?.runId) ensureConvRunAttached(d.convId, d.busy.runId);
+        if (d.busy?.runId) ensureConvRunAttached(d.busy.convId || d.convId, d.busy.runId);
         if (!shouldPoll(d)) {
           clearInterval(h);
           if (busyTimer === h) busyTimer = null;
@@ -302,11 +307,13 @@ function renderBanner(data) {
   }
 }
 
-// map 系四条链路原先全缺，芯片上直接漏出英文 kind（mapgen/mapfix/…），一并补齐
+// map 系四条链路原先全缺，芯片上直接漏出英文 kind（mapgen/mapfix/…），一并补齐。
+// 新增 kind 必须同步加这里：芯片是用户在主会话里感知「子会话正在跑」的唯一信号（见 mountReqChrome 接流注释）
 const BUSY_KIND_LABELS = {
   develop: '自动开发', 'api-fix': 'API 对照修正', 'bug-fix': 'BUG 修复',
   docgen: '文档生成', bitable: '表格巡检',
   mapgen: '地图生成', mapfix: '地图修订', mapchange: '地图更新', mapregen: '地图重新生成',
+  'colleague-dev': '后端沟通接入', // 四期：后端同事消息触发的自动接入（src/entrypoints/web/colleague-dev.js）
 };
 
 function renderBusyChip(busy) {
@@ -644,6 +651,34 @@ function renderReqMgmtSection(data) {
       onDone: () => refreshRail(data.id),
     }),
   { highlight: true });
+
+  // 开发人员：副标题直接显示当前指派人，右上角气泡显示未读总数——
+  // 不点开也能一眼看到「这需求归谁」和「有没有人找我」
+  const assignees = data.assigneeList || [];
+  const unreadTotal = assignees.reduce((n, a) => n + (a.unreadCount || 0), 0);
+  const assigneeSub = assignees.length
+    ? assignees.map((a) => (a.roleLabel ? `${a.name}·${a.roleLabel}` : a.name)).join('、')
+    : '未指派，点击选择';
+  const openAssign = () =>
+    openAssigneeDialog({
+      reqId: data.id,
+      current: (data.assignees || []).slice(),
+      onDone: () => refreshRail(data.id),
+    });
+  const assigneeBtn = mk(TEAM_ICON_SVG, '开发人员', assigneeSub, () => {
+    // 已指派 → 先开对话列表（看消息是高频动作）；未指派 → 直接开指派弹窗
+    if (assignees.length) {
+      openColleagueList({ reqId: data.id, assigneeList: assignees, onChangeAssignees: openAssign });
+    } else {
+      openAssign();
+    }
+  });
+  if (unreadTotal > 0) {
+    const dot = document.createElement('span');
+    dot.className = 'rq-railbadge';
+    dot.textContent = unreadTotal > 99 ? '99+' : String(unreadTotal);
+    assigneeBtn.appendChild(dot);
+  }
 
   mk(
     MAP_ICON_SVG,

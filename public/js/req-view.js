@@ -1,17 +1,20 @@
 /** 需求视图 —— 侧栏需求列表 + 评审设计期文档模式（P1 范围；dev/test 聊天模式与横幅右栏见 Task 10）。
  *  导出 initReqView（绑定入口 + 启动列表轮询）/ openRequirement（打开单个需求）/ refreshReqList（刷新侧栏列表）。 */
-import { $, fmtTime, renderMarkdown, dirTail, lsSet } from './util.js';
+import { $, fmtTime, renderMarkdown, dirTail } from './util.js';
 import { confirmDialog, promptDialog, textareaDialog } from './ui.js';
 import { loadConvs } from './conv-store.js';
-import { openConv, createReqConv, isConvRunning, getCurrentConvId, sendMessageProgrammatically } from './chat.js';
+import { openConv, createReqConv, isConvRunning, getCurrentConvId, sendMessageProgrammatically, loadReqTranscript } from './chat.js';
 import { convSetTitle, convDelete } from './conv-store.js';
 import { startGenerateFlow, resetQuizState, renderQuizPanel, runDocgenDirect } from './req-quiz.js';
 import { mountMap } from './req-map.js';
 import {
-  iconEl, setIconText, PIN_ICON_SVG, FRONTEND_ICON_SVG, BACKEND_ICON_SVG, DOC_ICON_SVG,
+  iconEl, setIconText, FRONTEND_ICON_SVG, BACKEND_ICON_SVG, DOC_ICON_SVG,
   ATTACH_ICON_SVG, REFRESH_ICON_SVG, WAITING_ICON_SVG, SETTINGS_ICON_SVG, EDIT_ICON_SVG,
+  TEAM_ICON_SVG,
 } from './icons.js';
 import { isNetworkError } from './net-error.js';
+import { openAssigneeDialog } from './req-assignee-dialog.js';
+import { openBranchDialog } from './req-branch-dialog.js';
 
 let _showView = () => {};
 
@@ -84,37 +87,6 @@ const PHASE_META = {
   discarded: { label: '已废弃', cls: 'discarded' },
 };
 
-// ---- 需求钉住状态（localStorage 持久化） ----
-let reqPinnedIds = new Set();
-const REQ_PINNED_LS_KEY = 'claude_req_pinned';
-
-function loadReqPinned() {
-  try {
-    const stored = localStorage.getItem(REQ_PINNED_LS_KEY) || '';
-    reqPinnedIds = new Set(stored.split(',').filter((id) => id.trim()));
-  } catch {
-    reqPinnedIds = new Set();
-  }
-}
-
-function saveReqPinned() {
-  // 走 util.js 的 lsSet 而不是裸 setItem + 空 catch：写失败（配额满 / 隐私模式）
-  // 至少留一行 console.warn，否则「置顶怎么点了没保存」完全无迹可寻。
-  lsSet(REQ_PINNED_LS_KEY, Array.from(reqPinnedIds).join(','));
-}
-
-function isReqPinned(reqId) {
-  return reqPinnedIds.has(reqId);
-}
-
-function _toggleReqPin(reqId, shouldPin) {
-  if (shouldPin) reqPinnedIds.add(reqId);
-  else reqPinnedIds.delete(reqId);
-  saveReqPinned();
-  renderReqList();
-  window.toast.success(shouldPin ? '已钉住' : '已取消钉住');
-}
-
 /** req 面板当前是否为激活视图：直接查 DOM（showView 把非激活 panel-page 置 hidden），
  *  避免额外向 app.js 要一个 isActive 回调。 */
 function isReqViewActive() {
@@ -128,26 +100,35 @@ function isReqViewActive() {
 // ============================================================
 
 // ---- 需求右键菜单 ----
+// 单例 DOM，菜单项按需求阶段增删：活跃需求给「废弃」，已废弃需求给「移除」（物理删除），
+// 已归档需求一项都不给——归档是终态存档，既不该再废弃，也不该被误删。
 const _reqCtxMenu = (() => {
   const el = document.createElement('div');
   el.className = 'req-ctx-menu';
   el.hidden = true;
   el.innerHTML =
-    '<button class="ctx-item" id="reqCtxPin"></button>' +
-    '<button class="ctx-item ctx-danger" id="reqCtxDiscard">废弃</button>';
+    '<button class="ctx-item ctx-danger" id="reqCtxDiscard">废弃</button>' +
+    '<button class="ctx-item ctx-danger" id="reqCtxRemove">移除</button>';
   document.body.appendChild(el);
   return el;
 })();
 let _ctxReqId = null;
+
+/** 该阶段是否有右键菜单可开：已归档没有任何可用项，直接不弹（返回 false 让 contextmenu 早退） */
+function _hasReqCtxMenu(phase) {
+  return phase !== 'archived';
+}
 
 function _hideReqCtxMenu() {
   _reqCtxMenu.hidden = true;
   _ctxReqId = null;
 }
 
-function _showReqCtxMenu(x, y, reqId, isPinned) {
+function _showReqCtxMenu(x, y, reqId, phase) {
   _ctxReqId = reqId;
-  _reqCtxMenu.querySelector('#reqCtxPin').textContent = isPinned ? '取消钉住' : '钉住';
+  const isDiscarded = phase === 'discarded';
+  _reqCtxMenu.querySelector('#reqCtxDiscard').hidden = isDiscarded;
+  _reqCtxMenu.querySelector('#reqCtxRemove').hidden = !isDiscarded;
   _reqCtxMenu.hidden = false;
   const mw = _reqCtxMenu.offsetWidth;
   const mh = _reqCtxMenu.offsetHeight;
@@ -157,17 +138,18 @@ function _showReqCtxMenu(x, y, reqId, isPinned) {
   _reqCtxMenu.style.top = (y + mh > vh ? vh - mh - 6 : y) + 'px';
 }
 
-_reqCtxMenu.querySelector('#reqCtxPin').addEventListener('click', () => {
-  if (!_ctxReqId) return;
-  _toggleReqPin(_ctxReqId, !isReqPinned(_ctxReqId));
-  _hideReqCtxMenu();
-});
-
 _reqCtxMenu.querySelector('#reqCtxDiscard').addEventListener('click', () => {
   if (!_ctxReqId) return;
   const id = _ctxReqId;
   _hideReqCtxMenu();
   _reqDiscard(id);
+});
+
+_reqCtxMenu.querySelector('#reqCtxRemove').addEventListener('click', () => {
+  if (!_ctxReqId) return;
+  const id = _ctxReqId;
+  _hideReqCtxMenu();
+  _reqRemove(id);
 });
 
 document.addEventListener('click', (e) => {
@@ -201,13 +183,50 @@ async function _reqDiscard(reqId) {
   }
 }
 
+/** 物理移除一条已废弃的需求：后端删记录+磁盘产物+同事对话，前端顺带清掉它名下的本地会话。
+ *  convIds 由后端返回而非从 lastList 现取——侧栏缓存 30s 才刷一次，拿旧快照会漏删会话。 */
+async function _reqRemove(reqId) {
+  const ok = await confirmDialog({
+    title: '移除需求',
+    message: '确认移除这个需求吗？需求记录、生成的文档与地图、同事对话和相关会话都会被永久删除，无法恢复。',
+    confirmText: '移除',
+    danger: true,
+  });
+  if (!ok) return;
+  let d;
+  try {
+    const r = await fetch('/api/req/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: reqId }),
+    });
+    d = await r.json();
+    if (!r.ok) return window.toast.error(d.error || '移除失败');
+  } catch {
+    return window.toast.error('网络错误');
+  }
+  for (const convId of d.convIds || []) convDelete(convId);
+  // 正开着这条需求：它已经不存在了，再让 3s 轮询去 GET 只会拿到 404。
+  // 就地收掉轮询与缓存态，页面换成提示，避免用户对着一份幽灵详情继续操作。
+  if (currentReqId === reqId) {
+    if (busyTimer) {
+      clearInterval(busyTimer);
+      busyTimer = null;
+    }
+    currentReqId = null;
+    currentReq = null;
+    renderReqError('需求已移除');
+  }
+  window.toast.success('已移除');
+  await refreshReqList();
+}
+
 /** 供 app.js 视图切换时调用，立即重渲需求列表（不走网络） */
 export function renderReqListLocal() {
   renderReqList();
 }
 
 export function initReqView({ showView }) {
-  loadReqPinned();
   _showView = showView;
   $('#sidebarNewReq')?.addEventListener('click', createNewRequirement);
   if (listTimer) clearInterval(listTimer); // 防重复调用叠加多个定时器
@@ -282,28 +301,22 @@ function renderReqList() {
     }
   };
 
-  // 第 0 层：钉住需求（始终顶部）
-  const pinned = lastList.filter((r) => isReqPinned(r.id));
-  for (const r of pinned) appendReqRow(r);
-
   // 第 1 层：活跃需求（评审/开发/测试/归档中）
-  const active = lastList.filter(
-    (r) => !isReqPinned(r.id) && ['review', 'dev', 'test', 'archiving'].includes(r.phase),
-  );
+  const active = lastList.filter((r) => ['review', 'dev', 'test', 'archiving'].includes(r.phase));
   if (active.length) {
     frag.appendChild(makeReqSectionLabel('本次需求'));
     for (const r of active) appendReqRow(r);
   }
 
   // 第 2 层：已废弃（折叠组）
-  const discarded = lastList.filter((r) => !isReqPinned(r.id) && r.phase === 'discarded');
+  const discarded = lastList.filter((r) => r.phase === 'discarded');
   if (discarded.length) {
     frag.appendChild(makeDiscardedToggle(discarded.length));
     if (discardedExpanded) for (const r of discarded) appendReqRow(r);
   }
 
   // 第 3 层：已归档（折叠组）
-  const archived = lastList.filter((r) => !isReqPinned(r.id) && r.phase === 'archived');
+  const archived = lastList.filter((r) => r.phase === 'archived');
   if (archived.length) {
     frag.appendChild(makeArchivedToggle(archived.length));
     if (archivedExpanded) for (const r of archived) appendReqRow(r);
@@ -380,13 +393,6 @@ function makeReqRow(r) {
     row.appendChild(space);
   }
 
-  if (isReqPinned(r.id)) {
-    const pinIc = document.createElement('span');
-    pinIc.className = 'req-pin-ic';
-    pinIc.title = '已钉住';
-    pinIc.innerHTML = PIN_ICON_SVG;
-    row.appendChild(pinIc);
-  }
   const title = document.createElement('span');
   title.className = 'req-title';
   title.textContent = r.title || '(未命名需求)';
@@ -403,8 +409,11 @@ function makeReqRow(r) {
   badge.textContent = meta.label;
   row.appendChild(badge);
   row.addEventListener('contextmenu', (e) => {
+    // 先 preventDefault 再按阶段判断：已归档行要的是「什么都不弹」，
+    // 直接 return 会漏出浏览器原生菜单——侧栏会话列表也是无条件拦截的，两处保持一致。
     e.preventDefault();
-    _showReqCtxMenu(e.pageX, e.pageY, r.id, isReqPinned(r.id));
+    if (!_hasReqCtxMenu(r.phase)) return;
+    _showReqCtxMenu(e.pageX, e.pageY, r.id, r.phase);
   });
   row.onclick = () => openRequirement(r.id);
   result.push(row);
@@ -493,9 +502,52 @@ function makeSessionRow(session, reqId) {
   });
 
   // 点击打开会话
-  row.onclick = () => openConv(session.convId);
+  row.onclick = () => openSessionConv(session, reqId);
 
   return row;
+}
+
+/**
+ * 打开会话树里的一行。
+ *
+ * 服务端起的子会话（colleague-dev，见 src/entrypoints/web/colleague-dev.js）本地 localStorage
+ * 没有 conv 记录，而 openConv 对不存在的 id 直接 return —— 用户点了没反应。必须先按既定 id 补建，
+ * 且要带上 session：否则回放出来之后用户追问一句，会新开一个对刚才内容一无所知的 Claude 会话。
+ *
+ * 回放只在会话**不在跑**时做：mountReqChrome 的接流不被 await，这里紧接着发的 /api/history 若先回，
+ * 半截转录会灌进去再叠上实时流（跨标签页点开正在跑的子会话就是这个场景）。
+ * 判「在跑」两条：本页 runningJobs（isConvRunning），或需求 busy 正落在这个子会话上（另一标签页在接流）。
+ * 与 openRetroConv 同款：loadReqTranscript 自带「有实时流 / 已有内容就不动」护栏。
+ */
+async function openSessionConv(session, reqId) {
+  const missing = !loadConvs().some((c) => c.id === session.convId);
+  let d = null;
+  if (missing || session.sessionId) {
+    try {
+      const r = await fetch('/api/req/get?id=' + encodeURIComponent(reqId));
+      if (!r.ok) {
+        // 需求在轮询与点击之间被删了：别 hydrate 出一个指向已删需求的孤儿 conv
+        if (missing) return window.toast.error('需求已不存在');
+      } else {
+        d = await r.json();
+      }
+    } catch {
+      /* 网络失败：cwd 留空，仍继续打开 */
+    }
+  }
+  const cwd = d?.devCwd || ''; // devCwd 就是 pickCwdAndDirs 的第一个工程目录，无需再回退 projects
+  if (missing) {
+    createReqConv({ id: session.convId, reqId, cwd, title: session.title, kind: session.kind, session: session.sessionId || null });
+  }
+  await openConv(session.convId);
+  const liveHere = isConvRunning(session.convId) || (d?.busy?.runId && (d.busy.convId || d.convId) === session.convId);
+  if (session.sessionId && session.kind !== 'main' && !liveHere) {
+    try {
+      await loadReqTranscript(session.convId, session.sessionId, cwd);
+    } catch (e) {
+      console.warn('[openSessionConv] 转录回放失败', e);
+    }
+  }
 }
 
 /** 「＋新会话」按钮 */
@@ -1124,7 +1176,8 @@ function renderConfigCard(req) {
   const dirs = [req.projects?.frontend?.dir, req.projects?.backend?.dir].filter(Boolean).length;
   const hd = e('div', 'rqw-cfg-hd');
   hd.appendChild(e('h4', null, '工程配置'));
-  hd.appendChild(e('span', 'cnt', `${dirs + (req.reqDoc ? 1 : 0)} / 3 已配置`));
+  const configured = dirs + (req.reqDoc ? 1 : 0) + ((req.assignees || []).length ? 1 : 0);
+  hd.appendChild(e('span', 'cnt', `${configured} / 4 已配置`));
   card.appendChild(hd);
 
   const note = e('div', 'rqw-cfg-note');
@@ -1139,6 +1192,7 @@ function renderConfigCard(req) {
   slots.appendChild(makeProjSlot(req, 'frontend', '前端工程', FRONTEND_ICON_SVG));
   slots.appendChild(makeProjSlot(req, 'backend', '后端工程', BACKEND_ICON_SVG));
   slots.appendChild(makeDocSlot(req));
+  slots.appendChild(makeAssigneeSlot(req));
   // 功能模块标签由 docgen 自动识别，没文档时还没有值，展示它只会是个空槽
   if (req.featureTag) slots.appendChild(makeTagSlot(req));
   card.appendChild(slots);
@@ -1468,6 +1522,47 @@ function pickDocFile(req) {
   input.click();
 }
 
+/** 开发人员槽位：展示已指派的人，点击开选人弹窗。与工程 / 文档槽并列。 */
+function makeAssigneeSlot(req) {
+  const list = req.assigneeList || [];
+  const slot = e('div', 'rqw-slot' + (list.length ? '' : ' blank'));
+
+  const top = e('div', 'rqw-slot-top');
+  top.appendChild(iconEl(TEAM_ICON_SVG, 'rqw-slot-ic'));
+  top.appendChild(e('span', 'rqw-slot-k', '开发人员'));
+  // 可留空是刻意的：还没定人就不该拿一个红叉挡住生成开发文档
+  if (!list.length) top.appendChild(e('span', 'rqw-slot-opt', '可留空'));
+  top.appendChild(e('span', 'gap'));
+  slot.appendChild(top);
+
+  const row = e('div', 'rqw-slot-row');
+  if (list.length) {
+    const chips = e('div', 'rqw-assignees');
+    for (const a of list) {
+      const chip = e('span', 'chip' + (a.missing ? ' missing' : ''), a.roleLabel ? `${a.name}·${a.roleLabel}` : a.name);
+      if (a.missing) chip.title = '该同事已从名册中移除，点「修改」可重新指派';
+      else if (!a.feishuOpenId) chip.title = '未填飞书 open_id，智能体无法主动询问他';
+      chips.appendChild(chip);
+    }
+    row.appendChild(chips);
+  }
+  const btn = e('button', 'rqw-btn sm', list.length ? '修改' : '选择开发人员');
+  btn.type = 'button';
+  btn.onclick = () =>
+    openAssigneeDialog({
+      reqId: req.id,
+      current: (req.assignees || []).slice(),
+      onDone: () => loadAndRenderReq(req.id),
+    });
+  row.appendChild(btn);
+  slot.appendChild(row);
+
+  const ft = e('div', 'rqw-slot-ft');
+  ft.appendChild(e('span', null, '指派后可由智能体主动向他们提问；开发期仍可修改'));
+  slot.appendChild(ft);
+  return slot;
+}
+
 function makeTagSlot(req) {
   const slot = e('div', 'rqw-slot');
   const top = e('div', 'rqw-slot-top');
@@ -1717,7 +1812,7 @@ function renderActionCard(req, hasDoc) {
 
   if (hasDoc) {
     card.appendChild(e('div', 'rqw-act-t', '下一步'));
-    card.appendChild(e('div', 'rqw-act-d', '定稿后配置与文档冻结，将建需求分支并自动开始开发。'));
+    card.appendChild(e('div', 'rqw-act-d', '定稿后配置与文档冻结。下一步会问你沿用当前分支还是新建分支，然后自动开始开发。'));
     const b = e('button', 'rqw-btn primary full', '✓ 定稿，进入开发期');
     b.type = 'button';
     b.onclick = () => startFinalizeFlow(req.id);
@@ -3123,23 +3218,37 @@ async function selectDocVersion(req, v, latestV) {
 
 // ---- 评审期：定稿 ----
 
+/**
+ * 定稿入口：分支弹框取代了原来那句「确认继续？」。
+ *
+ * 弹框本身就是确认——它列出会被改动的工程与各自当前分支，两个按钮都是明确动作，
+ * 关掉即放弃。再前置一道纯文字确认只是多一次点击，信息量为零。
+ */
 async function startFinalizeFlow(id) {
-  const ok = await confirmDialog({
-    title: '定稿',
-    message: '定稿后配置与文档冻结，将建需求分支并自动开始开发。确认继续？',
-    confirmText: '定稿',
-  });
-  if (!ok) return;
-  await finalizeAttempt(id, false);
+  const choice = await openBranchDialog({ reqId: id });
+  if (!choice) return;
+  await finalizeAttempt(id, false, choice);
 }
 
-async function finalizeAttempt(id, force) {
+/**
+ * @param {string} id
+ * @param {boolean} force 跳过脏工作区确认
+ * @param {{mode:'current'}|{mode:'new',branch:string}} choice 分支选择。
+ *   **脏区重试必须原样带上**：漏传会退回后端的自动命名兜底，用户明明选了「沿用当前分支」
+ *   却被开了一个新分支，而那一步已经没有任何界面会再问他一次。
+ */
+async function finalizeAttempt(id, force, choice) {
   let status, d;
   try {
     const r = await fetch('/api/req/finalize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, force }),
+      body: JSON.stringify({
+        id,
+        force,
+        branchMode: choice?.mode || '',
+        branch: choice?.mode === 'new' ? choice.branch : '',
+      }),
     });
     status = r.status;
     d = await r.json();
@@ -3149,17 +3258,31 @@ async function finalizeAttempt(id, force) {
   }
   if (status === 200 && d.ok) {
     window.toast.success(`已定稿（分支 ${d.branch}）`);
+    // 通知结果单独弹一条：谁没收到必须可见，否则用户会以为同事都收到了、等着对方回复。
+    // 与定稿成功分开弹而不是拼成一条，是因为定稿本身成功与否更重要，不该被通知详情淹没。
+    const n = d.notified;
+    if (n) {
+      if (n.sent) window.toast.success(`已通知开发人员 ${n.sent} 人`);
+      const problems = [];
+      if (n.botMissing) problems.push('未启用飞书机器人，消息未发出');
+      if (n.failed?.length) problems.push(`发送失败：${n.failed.join('、')}`);
+      if (n.skippedNoId?.length) problems.push(`未填飞书 ID：${n.skippedNoId.join('、')}`);
+      if (n.skippedMissing?.length) problems.push(`已从名册移除：${n.skippedMissing.join('、')}`);
+      if (problems.length) window.toast.error(problems.join('；'));
+    }
     await loadAndRenderReq(id); // 重开该需求：phase 已变为 dev，自动转入聊天模式（确保 conv 存在并回填 convId）
     return;
   }
   if (d.warn === 'dirty') {
     const proceed = await confirmDialog({
       title: '工程存在未提交改动',
-      message: `以下工程有未提交改动，强制定稿将在当前状态上建分支：\n${(d.dirs || []).join('\n')}`,
+      message: choice?.mode === 'current'
+        ? `以下工程有未提交改动，强制定稿将带着这些改动继续在当前分支上开发：\n${(d.dirs || []).join('\n')}`
+        : `以下工程有未提交改动，强制定稿将在当前状态上建分支：\n${(d.dirs || []).join('\n')}`,
       confirmText: '强制定稿',
       danger: true,
     });
-    if (proceed) await finalizeAttempt(id, true);
+    if (proceed) await finalizeAttempt(id, true, choice); // choice 必须带上，理由见函数头注释
     return;
   }
   window.toast.error(d.error || '定稿失败');

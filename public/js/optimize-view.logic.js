@@ -81,6 +81,31 @@ export function checkupAge(at, now = Date.now()) {
   return { days, stale: days >= STALE_CHECKUP_DAYS };
 }
 
+/**
+ * 落盘报告里残留的 `analyzing` 该不该被改写成「没跑完」。
+ *
+ * ## 为什么需要这个判据（而不是无条件改写）
+ *
+ * `analyzing` 有两种来源，外观完全一样、处置完全相反：
+ *   1. **任务真在跑** —— 用户点完体检就切去别的页面（这是被明确支持的用法：
+ *      17 个维度要跑十几分钟）。此时后端 `busy.alive` 为 true。
+ *   2. **任务已死** —— 服务在分析中途被杀，`analyzing` 被留在了 optimize.json 里。
+ *      那次任务的 SSE 已随进程消失，不改写的话卡片会永远转圈。
+ *
+ * 只认第 2 种来改写。曾经的实现无条件改写，于是第 1 种情况下用户回到面板会看到
+ * 「上次分析未完成（服务可能已重启），请重新体检」——而分析其实正跑着，
+ * 且那些维度不会再发 SSE 事件（replay 只补已完成的），文案就永远挂在那里。
+ * 用户读到的是「失败了」，实际是「正在进行」，这是最坏的一类误导。
+ *
+ * 判 `kind === 'checkup'` 而不只判 `alive`：占用闸被**优化**任务持有时，
+ * 报告里的 analyzing 只可能是上一次体检的残留，那时该照常改写。
+ *
+ * @param {{kind?:string, alive?:boolean}|null} busy `/api/optimize/report` 回的占用状态
+ */
+export function shouldNormalizeStale(busy) {
+  return !(busy?.alive && busy.kind === 'checkup');
+}
+
 const SEVERITY_ORDER = { error: 0, warn: 1, info: 2 };
 
 export function severityRank(s) {
@@ -106,23 +131,36 @@ export function sortIssues(issues) {
  * 所以照样不可勾选，只把分数亮出来并标注原因。
  *
  * busy 专给 analyzing：异步维度是回填的，卡片要先转圈占位，等 SSE 送来结果再变成分数。
+ *
+ * ## 为什么 planId 必须在排序**之前**打
+ *
+ * 修复计划项的 id 是 `<dim>#<报告 issues 数组里的下标>`，后端 `resolveSelection`
+ * 按这个下标去报告里取真实的 issue（那是安全边界：前端传的下标只用于定位，
+ * file / line 一律以后端报告为准）。而卡片是按严重度排序展示的——
+ * 用渲染序号拼 id 会让下标整体错位，后果是**修复动作打到不相干的文件上**。
+ * 所以下标必须在 `sortIssues` 之前就固定下来，随 issue 一起被排序带走。
  */
 export function dimListFrom(report) {
   return DIM_META.map((meta) => {
     const d = report?.dims?.[meta.key];
     const status = d?.status || 'idle';
     const hasScore = typeof d?.score === 'number';
+    const rawIssues = Array.isArray(d?.issues) ? d.issues : [];
+    const tagged = rawIssues.map((it, index) => ({ ...it, planId: `${meta.key}#${index}` }));
     return {
       ...meta,
       status,
       score: hasScore ? d.score : null,
       scoreText: hasScore ? String(d.score) : '--',
-      issueCount: d?.issues?.length || 0,
-      issues: sortIssues(d?.issues),
+      issueCount: rawIssues.length,
+      issues: sortIssues(tagged),
       reason: d?.reason || '',
       // 只有 holistic 有：行动计划，卡片里要单独渲染成一块
       plan: d?.plan || null,
       busy: status === 'analyzing',
+      // 中止与失败必须分开：前者是用户自己停的、随时可续，后者要看原因。
+      // 混为一谈会把「你停的」显示成「失败了」——上一轮刚修掉的就是这类误导
+      cancelled: status === 'cancelled',
       note: status === 'partial' ? '未深度分析，分数仅供参考且不计入总分' : '',
       selectable: status === 'done',
     };

@@ -211,7 +211,7 @@
           <button class="tool-item" id="toolOptimize" data-tool="optimize">
             <span class="tool-item-icon">🩺</span>
             <span class="tool-item-body">
-              <span class="tool-item-title">项目优化</span>
+              <span class="tool-item-title">项目优化<span class="tool-item-tag" id="optToolTag" hidden></span></span>
               <span class="tool-item-desc">体检并修复拖慢 AI 的配置问题</span>
             </span>
           </button>
@@ -327,6 +327,7 @@
             <button data-tab="basic" class="active">基础设置</button>
             <button data-tab="providers">模型</button>
             <button data-tab="mcp">MCP 服务器</button>
+            <button data-tab="colleagues">同事设置</button>
             <button data-tab="actions">托管配置</button>
             <button data-tab="cleanup">会话清理</button>
             <button data-tab="desktop" id="desktopTab" hidden>桌面</button>
@@ -452,21 +453,47 @@
               </div>
             </div>
 
-            <!-- 订阅 Key 组 -->
-            <div class="set-sec">
-              <div class="set-sec-head">
-                <span class="sec-label">订阅 Key</span>
-                <span class="active-token" id="activeToken">—</span>
+            <!-- 订阅 Key 组：左侧账号池 + 右侧取 key 教程。
+                 教程放同屏右侧而不是折叠/跳外链——首次配置时「去哪儿拿这串 key」
+                 正是唯一的卡点，藏起来等于没写 -->
+            <div class="token-layout">
+              <div class="token-main">
+                <div class="set-sec">
+                  <div class="set-sec-head">
+                    <span class="sec-label">订阅 Key</span>
+                    <span class="active-token" id="activeToken">—</span>
+                  </div>
+                  <div class="token-list" id="tokenList"></div>
+                  <div class="token-add">
+                    <input id="tokenLabel" placeholder="名称，如 主账号" autocomplete="off" />
+                    <select id="tokenSubscription" class="set-select">
+                      <option value="claude">Claude</option>
+                    </select>
+                    <input id="tokenValue" placeholder="sk-ant-oat01-…" autocomplete="off" />
+                    <button class="btn" id="tokenAddBtn">＋ 添加</button>
+                  </div>
+                </div>
               </div>
-              <div class="token-list" id="tokenList"></div>
-              <div class="token-add">
-                <input id="tokenLabel" placeholder="名称，如 主账号" autocomplete="off" />
-                <select id="tokenSubscription" class="set-select">
-                  <option value="claude">Claude</option>
-                </select>
-                <input id="tokenValue" placeholder="sk-ant-oat01-…" autocomplete="off" />
-                <button class="btn" id="tokenAddBtn">＋ 添加</button>
-              </div>
+              <aside class="token-side">
+                <div class="set-sec howto-card">
+                  <div class="set-sec-head">
+                    <span class="sec-label"><span class="inline-ic" data-icon="doc"></span> 怎么拿 Claude 订阅 Key</span>
+                  </div>
+                  <ol class="howto-steps">
+                    <li>本机先装好并登录 Claude Code CLI（终端里 <code>claude</code> 命令可用）。</li>
+                    <li>在终端执行下面这条命令：</li>
+                  </ol>
+                  <div class="howto-cmd">
+                    <code id="setupTokenCmd">claude setup-token</code>
+                    <button class="btn" id="setupTokenCopyBtn" title="复制命令">复制</button>
+                  </div>
+                  <ol class="howto-steps" start="3">
+                    <li>按提示在浏览器完成授权，终端会打印一串以 <code>sk-ant-oat01-</code> 开头的 key。</li>
+                    <li>整串复制，粘到左侧输入框，点「＋ 添加」。</li>
+                  </ol>
+                  <div class="howto-note">多个账号都加进来即可自动轮换：某个号额度耗尽时会切到下一个，不必手工换。</div>
+                </div>
+              </aside>
             </div>
           </div>
           <div class="set-tab" data-tab="mcp" hidden>
@@ -500,6 +527,50 @@
                 <button class="btn" id="mcpCancelBtn" hidden>取消编辑</button>
                 <button class="btn primary" id="mcpAddBtn">＋ 添加</button>
               </div>
+            </div>
+          </div>
+          <!-- 同事设置是全设置页唯一的双栏 tab：名册本身就有十几行、纵向占满一屏，
+               表单再追加到底部时用户点「＋ 新增」看不到任何变化（表单在视口外）。
+               右侧那片空白正好承接它，见 .colleague-layout -->
+          <div class="set-tab" data-tab="colleagues" hidden>
+            <div class="colleague-layout">
+              <div class="colleague-main">
+                <div class="set-sec">
+                  <div class="set-sec-head">
+                    <span class="sec-label">同事</span>
+                    <span class="msg-hint">按职位维护成员，填了飞书 open_id 才能被智能体主动询问</span>
+                  </div>
+                  <div class="set-actions" style="justify-content:flex-start;">
+                    <!-- 图标由 hydrateIcons 按 data-icon 注水，素材只在 js/icons.js 一处 -->
+                    <button class="btn" id="colleagueImportBtn"><span class="inline-ic" data-icon="feishu"></span>从飞书群导入</button>
+                  </div>
+                </div>
+                <div id="colleagueGroups"></div>
+              </div>
+              <!-- 编辑表单：新增与编辑共用，默认收起。sticky 使它在名册长到要滚动时仍留在视野里 -->
+              <aside class="colleague-side">
+                <div class="set-sec colleague-form" id="colleagueFormSec" hidden>
+                  <div class="set-sec-head">
+                    <span class="sec-label" id="colleagueFormTitle">新增同事</span>
+                  </div>
+                  <label class="set-field">姓名
+                    <input id="colleagueName" placeholder="如 张三" autocomplete="off" />
+                  </label>
+                  <label class="set-field">职位
+                    <select id="colleagueRole" class="set-select"></select>
+                  </label>
+                  <label class="set-field">备注
+                    <input id="colleagueNote" placeholder="如 负责活动页" autocomplete="off" />
+                  </label>
+                  <label class="set-field">飞书 open_id
+                    <input id="colleagueOpenId" placeholder="ou_xxxxxxxx（可留空，之后再补）" autocomplete="off" />
+                  </label>
+                  <div class="set-actions" style="justify-content:flex-start;">
+                    <button class="btn primary" id="colleagueSaveBtn">保存</button>
+                    <button class="btn" id="colleagueCancelBtn">取消</button>
+                  </div>
+                </div>
+              </aside>
             </div>
           </div>
           <div class="set-tab" data-tab="desktop" hidden></div>
@@ -602,7 +673,7 @@
                 <label><input type="radio" name="cleanupRange" value="30" /> 一月前（30 天前）</label>
                 <label><input type="radio" name="cleanupRange" value="90" /> 三月前（90 天前）</label>
               </div>
-              <button type="button" class="btn" id="cleanupCustomToggle">⌄ 自定义日期范围</button>
+              <button type="button" class="btn cleanup-custom-toggle" id="cleanupCustomToggle">⌄ 自定义日期范围</button>
               <div class="cleanup-custom" id="cleanupCustom" hidden>
                 <label>从 <input type="date" id="cleanupFrom" /></label>
                 <label>至 <input type="date" id="cleanupTo" /></label>
@@ -708,12 +779,12 @@
           </div>
 
           <div class="opt-body">
+            <!-- 只读展示当前项目：体检/优化恒作用于顶栏选定的工作目录，面板不再自带目录选择 -->
             <div class="opt-picker">
-              <button class="dir-selector" id="optDirBtn" title="选择要体检的项目目录">
+              <div class="dir-current" id="optDirCurrent">
                 <span class="folder">📁</span>
-                <span class="dir-label" id="optDirLabel">选择项目目录</span>
-                <span class="caret">▾</span>
-              </button>
+                <span class="dir-label" id="optDirLabel">当前项目</span>
+              </div>
             </div>
 
             <div class="opt-score">
@@ -724,22 +795,27 @@
                 <div class="opt-grade" id="optGrade">未体检</div>
                 <div class="opt-issue-count" id="optIssueCount"></div>
                 <div class="opt-last-at" id="optLastAt"></div>
+                <button class="opt-ignored-entry" id="optIgnoredEntry" hidden></button>
               </div>
-              <button id="optRunCheckup" class="btn primary">体检</button>
+              <!-- 操作区统一收在顶部：体检 / 中止 / 一键修复 / 停止修复 互斥显示，
+                   由 optimize-view.js 的 topButtonsState 状态机控制 -->
+              <div class="opt-score-actions" id="optScoreActions">
+                <button id="optRunCheckup" class="btn primary">开始体检</button>
+                <button id="optCancelCheckup" class="btn stop" hidden>中止体检</button>
+                <button id="optFix" class="btn primary" hidden>一键修复</button>
+                <button id="optFixCancel" class="btn stop" hidden>停止修复</button>
+                <span class="opt-done-note" id="optDoneNote" hidden></span>
+              </div>
             </div>
+
+            <!-- 测试闸关闭告知：紧贴在维度清单之上，因为下面每一条标着「只出清单」的
+                 源码问题都由它解释。文本由 optimize-view.js 填（禁 innerHTML） -->
+            <div class="opt-gate-banner" id="optGateBanner" hidden></div>
 
             <div class="opt-dims" id="optDims"></div>
 
-            <div class="opt-actions">
-              <button id="optFix" class="btn primary" disabled>一键优化（低风险）</button>
-              <button id="optFixElevated" class="btn" disabled>中高风险优化</button>
-              <button id="optFixCancel" class="btn" hidden>停止</button>
-              <span class="opt-phase-note" id="optFixHint">低风险只新增测试与整改清单、改 .gitignore；改文档与改源码走右边那个按钮</span>
-            </div>
-
             <!-- 进度与结果由 optimize-view.js 用 createElement + textContent 填充（禁 innerHTML） -->
             <div class="opt-progress" id="optProgress" hidden></div>
-            <div class="opt-result" id="optResult" hidden></div>
           </div>
         </div>
 
@@ -834,6 +910,13 @@
       </div>
 
       <footer class="composer">
+        <button
+          class="composer-icon-btn"
+          id="figmaRestoreBtn"
+          type="button"
+          aria-pressed="false"
+          title="设计稿精确还原：贴 Figma 链接自动导出资源、语义命名、传 OSS"
+        ></button>
         <div
           id="prompt"
           class="composer-input"

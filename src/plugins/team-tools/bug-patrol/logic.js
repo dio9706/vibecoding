@@ -161,13 +161,48 @@ export function recordTitle(record, titleField) {
   return t || '（未命名记录）';
 }
 
-/** 记录 → 评审/任务用 detail 文本：全字段拼接（限长）+ 溯源信息 */
-export function buildRecordDetail(record, { tableName, url } = {}) {
+/**
+ * 提取记录里的**图片**附件（纯函数）。
+ *
+ * 只收图片：BUG 记录的附件几乎都是截图，而 Read 工具也只对图片有意义；
+ * 视频/压缩包下载了模型也读不了，白费带宽和磁盘。
+ *
+ * 附件元素的判据是 `file_token`——人员字段是 `{id,name}`、多选是字符串，都不会误命中。
+ *
+ * @returns {Array<{ field:string, fileToken:string, name:string, type:string }>}
+ */
+export function collectImageAttachments(record) {
+  const out = [];
+  for (const [field, value] of Object.entries(record?.fields || {})) {
+    if (!Array.isArray(value)) continue;
+    for (const item of value) {
+      if (!item || typeof item !== 'object' || !item.file_token) continue;
+      if (!String(item.type || '').startsWith('image/')) continue;
+      out.push({ field, fileToken: item.file_token, name: item.name || '', type: item.type });
+    }
+  }
+  return out;
+}
+
+/**
+ * 记录 → 评审/任务用 detail 文本：全字段拼接（限长）+ 截图本地路径 + 溯源信息。
+ *
+ * @param {Array<{field:string, path:string}>} [images] 已下载到本地的截图。
+ *   必须**显式**告诉模型「可以用 Read 看图」：评审门的 allowedTools 里有 Read，但模型
+ *   不会主动猜一串路径是能打开的文件。2026-09-18 实测三条真实记录，描述全是一句话
+ *   （「描述主题不清晰，需要优化」），关键信息都在截图里——不给路径等于让它盲判。
+ */
+export function buildRecordDetail(record, { tableName, url, images = [] } = {}) {
   const lines = ['【BUG 巡检】来自多维表格记录，评审确认后自动修复。'];
   const fields = record?.fields || {};
   for (const [name, value] of Object.entries(fields)) {
     const text = cellText(value).trim();
     if (text) lines.push(`${name}：${text.slice(0, 300)}`);
+  }
+  if (images.length) {
+    lines.push('');
+    lines.push('【截图】该 BUG 的附件截图已下载到本地，**请用 Read 工具逐张查看后再做判断**：');
+    images.forEach((im) => lines.push(`  - ${im.field}：${im.path}`));
   }
   if (tableName) lines.push(`所在数据表：${tableName}`);
   if (url) lines.push(`表格链接：${url}`);
@@ -199,4 +234,49 @@ export function buildPatrolSummary(s) {
     s.failed.forEach((r, i) => lines.push(`  ${i + 1}. ${r.title} — ${r.reason || '未知原因'}`));
   }
   return lines.join('\n') + skipped;
+}
+
+// —— 循环巡检（\10001 起循环 / \10004 停止）——
+
+/**
+ * 成本护栏：滤掉本次循环里已经判过的记录。
+ *
+ * 驳回（ask/reject）的记录不写表、状态仍是「待处理」，不过滤就会在每一轮被重新评审
+ * （reviewTask 是 30s+ 的 Claude 只读调用），12 小时下来是主要的额度消耗源。
+ * 已知代价：在表里补了描述让某条变得可修，本轮循环不会重评，需重新触发 \10001 全量扫。
+ */
+export function filterUnseen(records, seen) {
+  const s = seen && typeof seen === 'object' && !Array.isArray(seen) ? seen : {};
+  return (Array.isArray(records) ? records : []).filter((r) => !s[r?.record_id]);
+}
+
+/**
+ * 「选需求」等待态下解析用户回的序号。
+ * 只认纯数字：带尾字（「1个」「第1」）一律不认，避免把正常聊天误判成选择。
+ * @returns {number|null} 0-based 下标；非数字 / 越界 / 空 一律 null（调用方重新提示）
+ */
+export function parseReqChoice(text, total) {
+  const t = String(text ?? '').trim();
+  if (!/^\d+$/.test(t)) return null;
+  const n = Number(t);
+  if (!Number.isInteger(n) || n < 1 || n > total) return null;
+  return n - 1;
+}
+
+/**
+ * 启动应答文案。reqTitle 为空表示未关联测试期需求（本次不做前后端归属判定），
+ * 这个事实必须当场说清——否则用户会以为后端问题也会被转派出去。
+ */
+export function buildStartReply(reqTitle) {
+  const head = reqTitle
+    ? `关联需求：${reqTitle}\n🔍 已收到表格，开始巡检…（逐条评审需要几分钟，完成后在此汇报）`
+    : `🔍 已收到表格，开始巡检…（未找到测试期需求，本次不做前后端归属判定）`;
+  return `${head}\n每 20 分钟自动复查一次，累计 12 小时后自动停止；发「\\10004 停止巡检」可随时结束。`;
+}
+
+/** 多个测试期需求时的选择提示（1-based 编号，与 parseReqChoice 配对） */
+export function buildReqChoicePrompt(reqs) {
+  const list = Array.isArray(reqs) ? reqs : [];
+  const lines = list.map((r, i) => `${i + 1}. ${r?.title || '（未命名需求）'}`);
+  return `找到 ${list.length} 个处于测试阶段的需求，回复序号选择：\n${lines.join('\n')}\n（回复「取消」退出）`;
 }

@@ -2,6 +2,8 @@
  * 脚本执行和脱敏日志 —— 组装脚本参数、脱敏敏感字段、记录执行日志。
  * - buildScriptArgs：按配置顺序拼装参数数组（--varName value）
  * - maskVars：脱敏变量对象中的敏感字段（phone）
+ * - pickOutput：决定回给用户的脚本输出（失败时 stdout 不许丢）
+ * - describeTarget：执行目标的可读描述（哪个环境、哪个号）
  * - runAction：完整执行流程（组装参数 → 调用 runScript → 记录日志）
  */
 import path from 'node:path';
@@ -94,6 +96,48 @@ export function maskVars(vars) {
 }
 
 /**
+ * 决定回给用户的脚本输出。
+ *
+ * ⚠️ 失败时 **stdout 必须一起带上**（事故驱动，勿改回只取 stderr）：
+ * 本项目的脚本把失败原因 `print()` 到 stdout 再 `exit 1`
+ *（`reset_onboarding.py` / `refund_orders.py` 都是 `print(f"❌ {e}")`），
+ * 只取 stderr 会让用户收到「❌ 执行失败 (无输出)」而真实原因被静默丢弃 ——
+ * 实证 2026-09-11 两次 test 环境清理失败全是这个空壳提示（app-2026-09-11.log:777）。
+ * 成功路径保持只取 stdout：stderr 上的 DeprecationWarning 之类不该污染回执。
+ *
+ * @param {{ok:boolean, out?:string, err?:string, msg?:string}} result runScript 的返回
+ * @returns {string}
+ */
+export function pickOutput(result) {
+  if (result?.ok) return result.out || '';
+  return [result?.out, result?.err, result?.msg].filter(Boolean).join('\n').trim();
+}
+
+/**
+ * 执行目标的可读描述（给 ⏳ 与结果回执用，phone 经 maskVars 脱敏）。
+ *
+ * 为什么必须回显：`phone` 这类变量声明为 `persistent: true` 后，用户不报号时会
+ * **静默复用上次的值**。实测用户 2026-09-07 为帮别人退款报过一次手机号，它进了
+ * user-vars 成为永久默认目标，此后 11 天所有清理/退款都打在那个号上，而回执里
+ * 只有脚本那句「清理账号数据完成」—— 清错对象在用户侧零可观测，表现为「说清了但没清」。
+ * 回显不阻断执行（用户 2026-09-18 拍板「只回显不拦」），但让清错号当场可见。
+ *
+ * @param {Object} actionConfig 动作配置（按 variables 声明顺序取值）
+ * @param {Object} collectedVars 本次收集到的变量
+ * @returns {string} 如 `环境 dev ｜ 手机号 133****0092`；无可显示变量时返回空串
+ */
+export function describeTarget(actionConfig, collectedVars) {
+  const masked = maskVars(collectedVars || {}) || {};
+  const parts = [];
+  for (const varDef of actionConfig?.variables || []) {
+    const val = masked[varDef.name];
+    if (val === undefined || val === null || val === '') continue;
+    parts.push(`${varDef.label || varDef.name} ${val}`);
+  }
+  return parts.join(' ｜ ');
+}
+
+/**
  * 完整执行流程：组装参数 → 调用脚本 → 记录日志
  * - 组装脚本路径：path.join(config.scripts.dir, scriptName)
  * - 选择解释器：node 或 python（根据文件扩展名）
@@ -132,8 +176,8 @@ export async function runAction(actionConfig, userId, collectedVars) {
   // 5. 调用 runScript 执行脚本
   const result = await runScript(bin, [scriptPath, ...args], opts);
 
-  // 6. 提取输出
-  const output = result.ok ? result.out : (result.err || result.msg || '');
+  // 6. 提取输出（失败时 stdout 不许丢，见 pickOutput 文档）
+  const output = pickOutput(result);
 
   // 7. 记录执行日志（脱敏变量）
   try {

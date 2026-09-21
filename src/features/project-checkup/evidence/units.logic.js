@@ -54,12 +54,58 @@ export function extOf(rel) {
   return m ? m[1].toLowerCase() : '';
 }
 
+/**
+ * 单文件组件（SFC）的扩展名。它们的 `<script>` 段是花括号族代码，其余段不是。
+ *
+ * 分开列而不是直接塞进 BRACE_EXT：整份 .vue 交给花括号切分器会把 `<style>` 里的
+ * CSS 规则块当成函数体、把 `<template>` 的属性值当成声明，捞出一堆没有意义的「单元」。
+ * 正确做法是先用 `scriptOnly` 把非脚本段抹掉，再按花括号族处理。
+ */
+const SFC_EXT = new Set(['vue', 'svelte']);
+
 /** 这个文件的语法家族。unknown = 不认识，不猜函数边界 */
 export function familyOf(rel) {
   const ext = extOf(rel);
-  if (BRACE_EXT.has(ext)) return 'brace';
+  if (BRACE_EXT.has(ext) || SFC_EXT.has(ext)) return 'brace';
   if (INDENT_EXT.has(ext)) return 'indent';
   return 'unknown';
+}
+
+/**
+ * 单文件组件只留 `<script>` 段，其余行**替换成空行而不是删除**。
+ *
+ * ## 为什么必须保行号
+ *
+ * 召回器产出的 issue 带 `file:line`，用户点开就要能跳到那一行；重复检测的指纹、
+ * 重锚定、以及 `deterministic` 策略按行号删条目，全部依赖行号与真实文件一一对应。
+ * 删行会让 `<script>` 之后的所有行号整体前移——报出来的位置全是错的，
+ * 而这种错不会报错、只会静默指向隔壁的代码。
+ *
+ * 非 SFC 文件原样返回（零拷贝路径，别让它成为全仓每个文件都要走一遍的额外开销）。
+ *
+ * @param {string} text 文件全文
+ * @param {string} rel 相对路径（判扩展名用）
+ */
+export function scriptOnly(text, rel) {
+  if (!SFC_EXT.has(extOf(rel))) return String(text ?? '');
+
+  const lines = String(text ?? '').split(/\r?\n/);
+  const out = new Array(lines.length).fill('');
+  let inScript = false;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!inScript) {
+      // 开标签所在行本身不算脚本内容（`<script setup lang="ts">` 不是代码）；
+      // 同行就闭合的空 script 直接跳过
+      if (/<script[\s>]/i.test(line)) inScript = !/<\/script\s*>/i.test(line);
+      continue;
+    }
+    if (/<\/script\s*>/i.test(line)) { inScript = false; continue; }
+    out[i] = line;
+  }
+
+  return out.join('\n');
 }
 
 /**

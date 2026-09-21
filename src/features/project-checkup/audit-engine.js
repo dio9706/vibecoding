@@ -23,7 +23,7 @@ import { logger } from '../../shared/logger.js';
 import { isCacheValid } from './fingerprint.logic.js';
 import {
   normalizeRecall, buildSystemPrompt, buildPrompt, validateVerdicts,
-  reanchor, evaluateAudit, chunk,
+  reanchor, evaluateAudit, chunk, excludeIgnoredCandidates,
 } from './audit-engine.logic.js';
 
 /**
@@ -122,6 +122,9 @@ async function judgeBatch({ dim, batch, sharedContext, index, total, signal }) {
       model: JUDGE_MODEL,
       logTag: `audit/${dim.id}#${index}`,
       timeoutMs: BATCH_TIMEOUT_MS,
+      // 批**内**也要能停。原先只在批之间检查 signal，而单批预算是 300s——
+      // 用户点中止后最坏要等 5 分钟才真的停下，那 5 分钟的额度全是白烧的
+      signal,
     });
     const list = raw ? validateVerdicts(raw, batch.length, names) : null;
 
@@ -157,11 +160,15 @@ async function judgeBatch({ dim, batch, sharedContext, index, total, signal }) {
  * @param {AbortSignal} [opts.signal]
  * @param {(p:{dim:string,done:number,total:number,ok:boolean})=>void} [opts.onProgress]
  *   每跑完一批回调一次。维度要全部批次跑完才落地，没有它界面就只能干转圈
+ * @param {Array} [opts.ignores] 该项目的豁免记录。命中「全部有权重 code 都被豁免」的文件，
+ *   其候选在这里就被剔除，连 LLM 都不送
  * @returns {Promise<{score:number|null, status:string, issues:Array, verdictLog:Array,
  *   reason:string, cached:boolean, cacheEntry:object|null, fingerprint:string,
  *   candidateCount:number, batchCount:number}>}
  */
-export async function runAudit(dim, evidence, { cache = null, force = false, signal, onProgress } = {}) {
+export async function runAudit(dim, evidence, {
+  cache = null, force = false, signal, onProgress, ignores = [],
+} = {}) {
   const fingerprint = evidence.fingerprints?.[dim.fingerprintScope] || '';
 
   if (!force && isCacheValid(cache, fingerprint)) {
@@ -191,7 +198,15 @@ export async function runAudit(dim, evidence, { cache = null, force = false, sig
     );
   }
 
-  const { candidates, sharedContext, na } = recalled;
+  const { candidates: recalledCandidates, sharedContext, na } = recalled;
+  // 豁免排除放在召回之后、判分之前：候选数变少 → 分数跟着变，issue 与分数口径天然一致。
+  // 放到判定之后再滤就只能滤掉 issue，分数仍按未排除的候选算，两者会打架
+  const candidates = excludeIgnoredCandidates(recalledCandidates, dim, ignores);
+  if (candidates.length !== recalledCandidates.length) {
+    logger.info('audit-engine', '按豁免清单剔除候选', {
+      dim: dim.id, before: recalledCandidates.length, after: candidates.length,
+    });
+  }
 
   if (na || !candidates.length) {
     logger.info('audit-engine', na ? '维度无法判断（na）' : '维度零候选，直接满分', {

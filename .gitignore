@@ -17,12 +17,14 @@ node_modules/
 # settings.json  : 飞书 appId/appSecret + Anthropic OAuth token
 # bindings.json  : open_id ↔ 手机号 绑定
 # cleanup-log.json / user-vars.json : 手机号 / 邮箱等 PII
+# colleagues.json : 同事姓名 + 飞书 open_id，属个人数据（虽是组织内可分享的名册，但不该进仓库）
 settings.json
 bindings.json
 cleanup-log.json
 user-vars.json
 feishu-status.json
 saved-dirs.json
+colleagues.json
 
 # ---- 运行时数据（本机会话 / 事件 / 任务状态）----
 tasks.json

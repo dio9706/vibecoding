@@ -28,6 +28,11 @@ export const PLUGIN_MANIFEST = [
     description: '埋点统计：「帮我统计埋点: <自然语言>」→ 两阶段推理 → 查生产埋点库 → HTML 报告附件',
     load: () => import('./tracking-stats/index.js'),
   },
+  {
+    id: 'colleague-relay',
+    description: '同事消息中继：开发期需求的指派同事发来的消息归入该需求对话流，供 web 端查看与回复',
+    load: () => import('./colleague-relay/index.js'),
+  },
 ];
 
 /** 纯函数：core + 插件 feature 条目按 order 合并排序（sort 稳定：同 order 保持传入先后） */

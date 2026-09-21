@@ -6,9 +6,26 @@
 import { runClassifierOnce } from '../../capabilities/llm-classify.js';
 import { config } from '../../shared/config.js';
 import { logger } from '../../shared/logger.js';
+import { classifyCwd } from './sandbox.js';
 
 /** 合法的 finding 类型。调用方可用来验证产出。 */
 export const FINDING_TYPES = ['bug', 'solution', 'pattern', 'preference'];
+
+/**
+ * 单次会话分析的超时预算。
+ *
+ * 定值依据（2026-09-18 实测）：`llm-classify` 的 30s 默认是为「一句话意图分类」校准的，
+ * 而这里要送 8000 字符转录并生成结构化 findings —— 实测单跑 47~70s，带项目上下文时高达 156s。
+ * 30s 预算的后果是 Phase 1 成功率只有 10~25%，失败即 `patchSession(status:'pending')`
+ * 且 `analyzedAt` 留 0，下轮扫描必然再次选中它：超时 → pending → 重扫 → 再超时的死循环，
+ * 用户看到的就是「分析完还是待分析、一轮轮重复分析」。
+ *
+ * 为什么是 180s 而不是「实测值 + 一点余量」：**批跑的尾部延迟远高于单跑**。同一条会话单独跑
+ * 47.3s，放在连续 7 条的批次里却超过 120s —— 额度窗口利用率随本轮调用爬升（实测 0.07→0.42），
+ * 且前一条 abort 后 SDK 流还要 7s 才真正收尾，连续跑必然重叠。按单跑校准就会让批次尾部
+ * 系统性地失败。代价可控：Phase 1 每轮只剩个位数会话，全跑满也就二十分钟，窗口有 5 小时。
+ */
+export const ANALYZE_TIMEOUT_MS = 180_000;
 
 const MAX_SUMMARY = 200;
 const MAX_DETAIL = 500;
@@ -139,6 +156,8 @@ export async function analyzeSession(transcript, opts = {}) {
     prompt: buildAnalysisPrompt(transcript),
     model: model || config.intent.classifyModel,
     logTag: 'memory-bank/analyze',
+    timeoutMs: ANALYZE_TIMEOUT_MS,
+    cwd: classifyCwd(), // 空目录：本调用不读任何文件，项目上下文只会拖慢并带偏输出
   });
 
   if (!json) {

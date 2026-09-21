@@ -251,3 +251,48 @@ test('dispatch：Welcome 卡片集成测试 - 验证卡片完整结构与按钮�
   assert.equal(btn2.value.actionName, '查询日志', '第二个按钮应该有正确的 actionName');
   assert.equal(btn2.value.botId, 'bot_123', '第二个按钮应该有正确的 botId');
 });
+
+test('intents 段：feature 返回 PASS 后继续匹配后续 feature（不被第一个命中者吞掉）', async () => {
+  const { ctx, replies } = ctxOf();
+  const calls = [];
+  const passer = {
+    name: 'passer',
+    permission: 'any',
+    intents: ['bug'],
+    handle: async () => {
+      calls.push('passer');
+      return PASS;
+    },
+  };
+  const taker = {
+    name: 'taker',
+    permission: 'any',
+    intents: ['bug'],
+    handle: async () => {
+      calls.push('taker');
+      return 'done';
+    },
+  };
+  const r = await dispatch(ctx, {
+    featureList: [passer, taker],
+    classifyFn: async () => ({ intent: 'bug' }),
+  });
+  assert.deepEqual(calls, ['passer', 'taker'], 'passer 让出后 taker 必须接到');
+  assert.equal(r, 'done');
+  assert.deepEqual(replies, [], '有人接管就不该再弹帮助卡');
+});
+
+test('intents 段：所有候选都 PASS → 回落帮助卡（不静默吞掉消息）', async () => {
+  const { ctx, replies } = ctxOf();
+  const passer = {
+    name: 'passer',
+    permission: 'any',
+    intents: ['bug'],
+    handle: async () => PASS,
+  };
+  await dispatch(ctx, {
+    featureList: [passer],
+    classifyFn: async () => ({ intent: 'bug' }),
+  });
+  assert.equal(replies.length, 1, '全员让出后必须走帮助卡，否则用户发了消息毫无反应');
+});

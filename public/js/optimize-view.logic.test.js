@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DIM_META, CATEGORY_META, dimListFrom, severityRank, sortIssues, groupDims, groupSummary,
-  checkupAge, STALE_CHECKUP_DAYS,
+  checkupAge, STALE_CHECKUP_DAYS, shouldNormalizeStale,
 } from './optimize-view.logic.js';
 import { displayDimensions, CATEGORIES } from '../../src/features/project-checkup/dimensions/registry.js';
 
@@ -227,4 +227,78 @@ test('checkupAge 按天数判超期，阈值取 30 天', () => {
 test('checkupAge 拿不到时间就不指责用户没体检', () => {
   assert.deepEqual(checkupAge(undefined), { days: null, stale: false });
   assert.deepEqual(checkupAge('不是时间'), { days: null, stale: false });
+});
+
+// ---------- analyzing 残留的改写判据（把「正在跑」误报成「分析失败」是最坏的一类误导） ----------
+
+test('体检真在跑时不得改写 analyzing —— 用户离开页面再回来必须看到进行中', () => {
+  assert.equal(shouldNormalizeStale({ kind: 'checkup', alive: true, jobId: 'ckup_1' }), false);
+});
+
+test('占用记录还在但任务已死（服务重启过）才改写', () => {
+  assert.equal(shouldNormalizeStale({ kind: 'checkup', alive: false, jobId: 'ckup_1' }), true);
+});
+
+test('闸被优化任务持有时，报告里的 analyzing 只可能是上次体检的残留，照常改写', () => {
+  assert.equal(shouldNormalizeStale({ kind: 'fix', alive: true, jobId: 'fix_1' }), true);
+});
+
+test('没有占用记录就是没人在跑，照常改写', () => {
+  assert.equal(shouldNormalizeStale(null), true);
+  assert.equal(shouldNormalizeStale(undefined), true);
+});
+
+// ---------- cancelled：中止不是失败 ----------
+
+test('dimListFrom：cancelled 是中止而非失败，不转圈、不可勾选', () => {
+  const report = { dims: { complexity: { status: 'cancelled', reason: '已取消，重新体检可续' } } };
+  const d = dimListFrom(report).find((x) => x.key === 'complexity');
+  assert.equal(d.status, 'cancelled');
+  assert.equal(d.busy, false, '已经停了就不该继续转圈');
+  assert.equal(d.selectable, false, '没有完整结论，不能拿去驱动修改');
+  assert.equal(d.cancelled, true);
+  assert.equal(d.reason, '已取消，重新体检可续');
+});
+
+test('dimListFrom：done 的维度 cancelled 为 false', () => {
+  const report = { dims: { complexity: { status: 'done', score: 80, issues: [] } } };
+  const d = dimListFrom(report).find((x) => x.key === 'complexity');
+  assert.equal(d.cancelled, false);
+  assert.equal(d.selectable, true);
+});
+
+test('planId 指向报告里的原始下标，不受展示排序影响（核心回归）', () => {
+  // 计划项 id 是 `<dim>#<报告 issues 数组下标>`，后端 resolveSelection 按它取真实 issue。
+  // 而卡片按严重度排序展示 —— 用渲染序号拼 id 就会把修复动作打到不相干的文件上。
+  const report = {
+    dims: {
+      map: {
+        status: 'done',
+        score: 60,
+        issues: [
+          { severity: 'info', file: 'z.md', line: 1, message: '轻', code: 'M3_STALE_MAP' },
+          { severity: 'error', file: 'a.md', line: 2, message: '重', code: 'M4_DEAD_LINK' },
+        ],
+      },
+    },
+  };
+
+  const mapDim = dimListFrom(report).find((d) => d.key === 'map');
+  // 排序把 error 提到了最前，它在报告里的原始下标是 1
+  assert.equal(mapDim.issues[0].severity, 'error');
+  assert.equal(mapDim.issues[0].planId, 'map#1');
+  assert.equal(mapDim.issues[1].planId, 'map#0');
+});
+
+test('planId 的维度前缀用维度 key', () => {
+  const report = {
+    dims: { complexity: { status: 'done', issues: [{ severity: 'warn', file: 'a.js', line: 1, message: 'x' }] } },
+  };
+  const dim = dimListFrom(report).find((d) => d.key === 'complexity');
+  assert.equal(dim.issues[0].planId, 'complexity#0');
+});
+
+test('没有 issues 的维度不会崩', () => {
+  const dim = dimListFrom({ dims: { map: { status: 'na' } } }).find((d) => d.key === 'map');
+  assert.deepEqual(dim.issues, []);
 });

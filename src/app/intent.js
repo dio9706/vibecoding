@@ -53,6 +53,7 @@ export function isChitchat(text) {
  * 统一返回形状（env/keyword 保留字段，dispatch 日志与旧调用方仍读）。
  * strong：本条意图是否来自 L1 强前缀命中。feedback / project-qa 据此判断「是否只发了前缀没带正文」，
  * 不必再各自调一次 matchStrongIntent（重复计算，且 project-qa 无从判断）。默认 false。
+ * via：仅 L3 语义分类命中 action 时为 'llm'，其余层一律不带该字段（action-runner 据此决定是否学关键词）。
  */
 function result(intent, extra = {}) {
   return { intent, body: '', strong: false, env: null, keyword: null, ...extra };
@@ -150,7 +151,12 @@ export async function classify(text, opts = {}) {
   const r = await quickClassify(text, { hasMaterials, actions: poolAll.slice(0, ACTION_POOL_MAX) });
   if (r && r.type !== 'other') {
     logger.info('intent', 'L3 语义分类命中', { type: r.type, actionId: r.actionId ?? null });
-    return result(r.type, r.actionId ? { actionId: r.actionId, actionName: r.actionName } : {});
+    // via:'llm' 只打在 L3 这一层：它是「这次动作是花了一次模型调用才认出来的」的唯一凭据，
+    // 下游 action-runner 据此决定执行成功后要不要学关键词（L2 命中的不带，本来就零成本）。
+    return result(
+      r.type,
+      r.actionId ? { actionId: r.actionId, actionName: r.actionName, via: 'llm' } : {},
+    );
   }
 
   // L4 兜底：不猜，交给 dispatch 回引导文案

@@ -36,10 +36,15 @@ import { openGate } from '../../features/project-optimize/test-gate.js';
 import { planDemote, demoteOne } from '../../features/project-optimize/fix-rules.js';
 import { createBackup, recordPostState, listBackups, restoreBackup } from '../../features/project-optimize/backup.js';
 import { checkWorkspace } from '../../features/project-optimize/git-guard.js';
-import { selectFixableRules, buildFixNotes } from '../../features/project-optimize/fix-plan.logic.js';
+import {
+  selectFixableRules, buildFixNotes, buildFixPlan, resolveSelection, previewGate,
+} from '../../features/project-optimize/fix-plan.logic.js';
 import { checkMap } from '../../features/project-checkup/check-map.js';
+import { getIgnores } from '../../features/project-checkup/ignore.js';
+import { filterIgnoredIssues, appendIgnoreNote } from '../../features/project-checkup/ignore.logic.js';
 import { fixDeadLinks, writeGeneratedMap, writeStaleAudit } from '../../features/project-optimize/fix-map.js';
 import { selectFixableMap, planMapFix } from '../../features/project-optimize/fix-map.logic.js';
+import { collectRetest } from '../../features/project-optimize/retest.js';
 import { generateRootMap, generateModuleMap } from '../../features/project-optimize/gen-map.js';
 import {
   getLlmCache, saveLlmCache, saveCheckup,
@@ -84,6 +89,33 @@ function toDim(result) {
 /** 单个维度炸了只影响它自己：status 非 done → aggregateScore 自动排除，另一维和总分都不受牵连 */
 function failedDim(message) {
   return { score: null, status: 'error', issues: [], verdictLog: [], reason: `分析失败：${message}` };
+}
+
+/**
+ * 走 audit 引擎的维度 id 集合。
+ *
+ * 用途只有一个：判断豁免之后**分数是否也跟着变了**。audit 维度在召回阶段就把候选剔除了，
+ * 分数与 issue 口径一致；其余维度（四个专属检测器 + map / rules）只在这里滤 issue，
+ * 分数仍是按未过滤的结论算的。两者必须对用户如实区分，否则就是「0 个问题却 72 分」的无解观感。
+ */
+const AUDIT_DIM_IDS = new Set(auditDimensions().map((d) => d.id));
+
+/**
+ * 把豁免清单套到一个维度结果上：滤掉被豁免的 issue，并在 reason 里留痕。
+ *
+ * 这是覆盖**全部 17 个维度**的那一道（audit 侧还有更前面的召回排除）。放在这里的理由：
+ *   1. 四个专属检测器与两个静态维度不走召回器，只有这一处能拦；
+ *   2. 它在指纹缓存的**出口**之后——缓存命中返回的是旧 result，一样会被过滤。
+ */
+function applyIgnores(key, dim, ignores) {
+  if (!dim?.issues?.length || !ignores.length) return dim;
+  const { kept, ignoredCount } = filterIgnoredIssues(key, dim.issues, ignores);
+  if (!ignoredCount) return dim;
+  return {
+    ...dim,
+    issues: kept,
+    reason: appendIgnoreNote(dim.reason, ignoredCount, AUDIT_DIM_IDS.has(key)),
+  };
 }
 
 function emit(job, event, data) {
@@ -202,6 +234,21 @@ export function getBusyState(dir) {
 }
 
 /**
+ * 当前项目的修复计划：报告里每条 issue 摊平成一个可勾选项，带动作与风险标签。
+ *
+ * 纯计算、零 LLM、零写盘——所以每次前端要就现算，不做缓存：缓存的唯一收益是省几毫秒，
+ * 代价却是要处理「报告更新了但计划还是旧的」这类失效问题，而计划项的 id 是报告下标，
+ * 一旦失效就是「修到不相干的文件上」。
+ */
+export function getFixPlan(dir) {
+  const report = getProjectRecord(dir)?.lastCheckup;
+  if (!report) return { at: '', items: [], gate: { known: false, allowed: true, reason: '' } };
+  // gate 一并回给前端：它要在**用户点修复之前**就说清「这 N 项不会改代码」。
+  // 不给的话前端只能从 items 里数 degraded，拿不到原因文案
+  return { ...buildFixPlan(report, fixOrderedDimensions()), gate: previewGate(report) };
+}
+
+/**
  * 释放一条已死的占用记录。
  *
  * **只在确认任务不在本进程注册表里时才释放**——不加这道校验就是给了外部一个
@@ -262,6 +309,13 @@ async function runCheckup(dir, { force = false, ownsBusy = false, jobId = null }
   // 先跑静态维度：目录非法会在这里抛，早于任何 LLM 调用 —— 不会为一个打错的路径白烧额度
   const report = runStaticCheckup(dir);
 
+  // 同步维度（map / rules）不经过 land，豁免必须在这里单独套一次。
+  // 漏了这一步的表现是：用户豁免了一条地图死链，下次体检它照样出现
+  const ignores = getIgnores(dir);
+  for (const key of Object.keys(report.dims)) {
+    report.dims[key] = applyIgnores(key, report.dims[key], ignores);
+  }
+
   // 全部异步维度先标 analyzing，让前端立刻有 15 张转圈的卡片。
   //
   // 原实现会先「抢一拍」把缓存命中的维度直接并进同步返回，省一次 SSE 往返。
@@ -274,6 +328,7 @@ async function runCheckup(dir, { force = false, ownsBusy = false, jobId = null }
   saveCheckup(dir, report);
 
   gc();
+  const ac = new AbortController();
   const job = {
     // 用调用方给的 id：它已经被写进占用记录，前端靠它重连。
     // 兜底自造只为覆盖 startCheckup 之外的调用路径（优化结束后的重跑）
@@ -286,6 +341,10 @@ async function runCheckup(dir, { force = false, ownsBusy = false, jobId = null }
     landed: {}, // 已回填的维度：{key: dimResult}，供新订阅者 replay
     done: null, // 终局汇总：{score, grade, issueCount}
     subs: new Set(),
+    // 中断句柄：17 个维度跑十几分钟，没有取消点等于把人锁在进度条前面。
+    // 与 fix job 同构，cancelCheckupJob 靠它发信号
+    abort: () => ac.abort(),
+    signal: ac.signal,
     updatedAt: Date.now(),
   };
   jobs.set(job.id, job);
@@ -313,6 +372,14 @@ function settleDim(dir, key, out) {
 
 /** 把一个维度的结果写进报告、落盘并推给前端。每落一个就做一次，中途刷新页面能看到已出的那一半 */
 function land(job, key, dim) {
+  // 已收尾的 job 不再接收结果。
+  //
+  // 中止时我们**立即** finishJob 让界面马上响应，而正在跑的检测器要过一小会儿才收到信号
+  // （llm-classify 现已支持外部 signal，会在当前 SDK 调用上 abort，但收尾仍有几百毫秒量级的延迟）。
+  // 那些任务停下后仍会调到这里——没有这道守卫，它们会把已经标成 cancelled 的维度又改回 done，
+  // 用户看到的就是「我明明停了，它却还在出结果」。
+  if (job.status !== 'running') return;
+
   job.report.dims[key] = dim;
   job.landed[key] = dim;
   recomputeReport(job.report);
@@ -333,6 +400,9 @@ function land(job, key, dim) {
 async function runAsyncDims(job, { force }) {
   const { dir } = job;
   const cache = getLlmCache(dir);
+  // 整轮体检读一次就够：豁免是人工低频操作，一轮体检跑十几分钟，
+  // 中途变更不必立刻生效（下一轮自然生效），但逐维度读盘 17 次是纯粹的浪费
+  const ignores = getIgnores(dir);
 
   let evidence = null;
   const tEvidence = Date.now();
@@ -360,7 +430,9 @@ async function runAsyncDims(job, { force }) {
 
   const tasks = [];
   for (const [key, run] of Object.entries(LEGACY_RUNNERS)) {
-    tasks.push({ key, settled: wrap(() => run(dir, { cache: cache[key] || null, force })) });
+    // signal 一并给：prompts / comments 走 llm-classify（已支持外部 signal），
+    // tests / hygiene 起子进程、不收这个参数，多传一个键对它们无害
+    tasks.push({ key, settled: wrap(() => run(dir, { cache: cache[key] || null, force, signal: job.signal })) });
   }
   for (const dim of auditDimensions()) {
     tasks.push({
@@ -370,6 +442,10 @@ async function runAsyncDims(job, { force }) {
         ? wrap(() => runAudit(dim, evidence, {
           cache: cache[dim.id] || null,
           force,
+          // 用户中止时立刻停掉，别再烧额度（audit 引擎逐批检查它）
+          signal: job.signal,
+          // 召回阶段就剔除已被完全豁免的文件——这是豁免省额度的那一半
+          ignores,
           // 批级进度：维度要全部批次跑完才落地，19 批的维度会让卡片转圈二十多分钟。
           // 不推这个事件，用户就只能靠等来猜「是在跑还是死了」——实测已经误判过一次
           onProgress: (p) => emit(job, 'progress', p),
@@ -386,7 +462,7 @@ async function runAsyncDims(job, { force }) {
   });
   await Promise.all(plain.map(async (t) => {
     const t0 = Date.now();
-    const dim = settleDim(dir, t.key, await t.settled);
+    const dim = applyIgnores(t.key, settleDim(dir, t.key, await t.settled), ignores);
     land(job, t.key, dim);
     logger.info('optimize', '体检：维度落地', {
       dir, dim: t.key, status: dim.status, score: dim.score,
@@ -405,7 +481,7 @@ async function runAsyncDims(job, { force }) {
     }
     const aug = out.ok ? toDim(out.r) : null;
     if (out.ok) saveLlmCache(dir, t.key, out.r.cacheEntry);
-    land(job, t.augments, mergeAugmentDim(job.report.dims[t.augments], aug));
+    land(job, t.augments, applyIgnores(t.augments, mergeAugmentDim(job.report.dims[t.augments], aug), ignores));
   }
 
   // 第三轮：整体评估。必须最后跑，它读的就是上面两轮的结论
@@ -413,14 +489,17 @@ async function runAsyncDims(job, { force }) {
     finishJob(job);
     return;
   }
+  // 已中止就别再花这一次调用 —— 整体评估是全流程最贵的一段（实测 6.3 分钟）
+  if (job.signal?.aborted) { finishJob(job); return; }
+
   const tHolistic = Date.now();
   logger.info('optimize', '体检：开始整体评估', { dir, job: job.id });
   try {
-    const h = await checkHolistic(dir, job.report, evidence || { files: [] });
+    const h = await checkHolistic(dir, job.report, evidence || { files: [] }, { signal: job.signal });
     logger.info('optimize', '体检：整体评估结束', {
       dir, status: h.status, score: h.score, actions: h.plan?.topActions?.length || 0, ms: Date.now() - tHolistic,
     });
-    land(job, 'holistic', h);
+    land(job, 'holistic', applyIgnores('holistic', h, ignores));
   } catch (e) {
     logger.warn('optimize', '整体评估异常', { dir, err: e?.message || String(e) });
     land(job, 'holistic', failedDim(e?.message || String(e)));
@@ -431,17 +510,60 @@ async function runAsyncDims(job, { force }) {
 
 function finishJob(job) {
   if (job.status !== 'running') return;
+
+  // 被中止时，仍停在 analyzing 的维度标 cancelled 而不是留着转圈。
+  //
+  // 必须是新状态而不是复用 error：「你自己停的」和「出问题了」处置完全不同，
+  // 复用 error 会把主动中止显示成分析失败。cancelled 也不写指纹缓存
+  // （saveLlmCache 只在 done 时写），所以重新体检时已完成的走缓存、被取消的重跑，
+  // 「续跑」是这套缓存机制的自然结果，不需要额外的断点机制。
+  const cancelled = !!job.signal?.aborted;
+  if (cancelled) {
+    for (const [key, d] of Object.entries(job.report.dims || {})) {
+      if (d?.status === 'analyzing') {
+        job.report.dims[key] = { ...d, status: 'cancelled', reason: '已取消，重新体检可续' };
+      }
+    }
+  }
+
   logger.info('optimize', '体检：收尾', {
-    dir: job.dir, job: job.id, landed: Object.keys(job.landed).length,
+    dir: job.dir, job: job.id, landed: Object.keys(job.landed).length, cancelled,
   });
   recomputeReport(job.report);
   saveCheckup(job.dir, job.report);
   job.status = 'done';
-  job.done = { score: job.report.score, grade: job.report.grade, issueCount: job.report.issueCount };
+  job.done = {
+    score: job.report.score,
+    grade: job.report.grade,
+    issueCount: job.report.issueCount,
+    cancelled,
+  };
   job.updatedAt = Date.now();
   emit(job, 'done', job.done);
   closeSubs(job);
   if (job.ownsBusy) releaseBusy(job.dir);
+}
+
+/**
+ * 中止一次体检。
+ *
+ * **立即收尾**而不是等任务自然结束：用户点「中止」要的是界面马上回到可操作状态。
+ * 已落地的维度保留（它们早已 saveCheckup 落盘，丢掉等于白烧那部分额度），
+ * 未跑完的由 finishJob 标 cancelled。
+ *
+ * 额度侧已全面止血：`runAudit`（10 个 audit 维度）、`checkHolistic`（最贵的一段，
+ * 实测 6.3 分钟）、以及走 `llm-classify` 的 `checkPrompts` / `checkComments`
+ * 都吃 job.signal，会在当前 SDK 调用上 abort 并跳过后续批次。
+ * 仅 `checkTests` / `checkHygiene` 不吃 signal——它们起子进程跑测试命令与 git ls-files，
+ * 不消耗 LLM 额度，让它们自然跑完比中途杀子进程更安全。
+ */
+export function cancelCheckupJob(id) {
+  const job = id ? jobs.get(id) : null;
+  if (!job || job.kind !== 'checkup' || job.status !== 'running') return false;
+  job.abort();
+  logger.info('optimize', '体检：收到中止信号，立即收尾', { dir: job.dir, job: job.id });
+  finishJob(job);
+  return true;
 }
 
 function closeSubs(job) {
@@ -546,34 +668,72 @@ function pushEvent(job, event, data) {
  *   | {nothing:true, blocked:Array}
  *   | {busy:object}>}
  */
-export async function startFix(dir, { dimensions = [], risk = 'low', force = false } = {}) {
+export async function startFix(dir, {
+  dimensions = [], items = null, risk = 'low', force = false, reportAt = '',
+} = {}) {
   const report = getProjectRecord(dir)?.lastCheckup;
   if (!report) throw new Error('请先跑一次体检，再执行优化');
 
+  // 计划快照校验：计划项的 id 是「报告里的 issue 下标」，报告一变下标就会错位，
+  // 修到不相干的文件上。宁可让前端重拉一次计划，也不能拿旧下标去改文件
+  if (reportAt && report.at && reportAt !== report.at) {
+    logger.warn('optimize', '修复计划已过期，拒绝执行', { dir, planAt: reportAt, reportAt: report.at });
+    return { stalePlan: true, reportAt: report.at };
+  }
+
   const allowedRisks = risksFor(risk);
+
+  // 细粒度选材：items 非空时按下标还原 issue 子集；为 null 时退回「整维度」老行为
+  // （飞书/脚本等非前端调用方仍可只传 dimensions）
+  const sel = items ? resolveSelection(report, items) : null;
+  if (sel?.rejected.length) {
+    // 不静默吞：无效 id 意味着前端计划与后端报告不同步，或有人在伪造请求，两种都该留痕
+    logger.warn('optimize', '修复计划里有无效项，已丢弃', {
+      dir, count: sel.rejected.length, sample: sel.rejected.slice(0, 5),
+    });
+  }
+
+  // 有 items 时维度集合由它推导；否则沿用调用方传的 dimensions
+  const pickedDims = sel ? Object.keys(sel.byDim) : dimensions;
+
+  // ⚠️ items 模式下解析结果为空 = 用户没勾到任何**有效**项 → 什么都不做。
+  //
+  // 绝不能落到下面 `!pickedDims.length → 全都要` 那条老路上。那条规则是给
+  // 「没传 dimensions 的老前端」用的，语义是「调用方没表达意见」；而这里调用方
+  // 明确表达了意见，只是所有 id 都失效了（计划与报告不同步、或请求被伪造）。
+  // 两者混同的后果是：一次无效的勾选触发**全量修复**，包括 rules 那个
+  // 删文件 + 改写全仓引用的破坏性操作。
+  if (sel && !pickedDims.length) {
+    logger.warn('optimize', 'items 全部无效，本次不做任何修改', { dir, got: items.length });
+    return { nothing: true, blocked: [] };
+  }
 
   // 维度勾选是**筛子**而不是摆设：用户只勾了 map 却把 rules 也改了，
   // 等于在没得到同意的情况下删文件。空数组视为「全都要」——那是老前端的行为，
   // 改成静默不做会让旧页面点了优化后毫无反应
-  const want = (d) => !dimensions.length || dimensions.includes(d);
+  const want = (d) => !pickedDims.length || pickedDims.includes(d);
   // 专用流程维度的风险写在注册表上（策略表管不了它们，见 registry 的 risk 字段说明）：
   // rules 是本功能唯一的破坏性操作（删文件 + 改写全仓引用）→ 高风险；
   // map 会新建与改写各级 CLAUDE.md → 中风险
   const allowBespoke = (id) => allowedRisks.includes(dimensionById(id)?.risk || 'high');
 
   const rules = want('rules') && allowBespoke('rules')
-    ? selectFixableRules(report) : { files: [], blocked: [] };
+    ? selectFixableRules(report, sel?.indicesByDim.rules || null) : { files: [], blocked: [] };
   const map = want('map') && allowBespoke('map')
-    ? selectFixableMap(report)
+    ? selectFixableMap(report, sel?.indicesByDim.map || null)
     : { rootMap: false, modules: [], stale: [], deadLinks: [], blocked: [] };
 
-  // 通用引擎负责的维度（map / rules 除外，它们有各自校准过的专用流程）
+  // 通用引擎负责的维度（map / rules 除外，它们有各自校准过的专用流程）。
+  // 有 items 时把「该维度全部 issue」换成还原出的子集——执行层 runFixForDim 收的就是
+  // issues 数组，所以细粒度勾选到了这一步就已经落地，不需要改执行层
   const engineDims = selectFixableDims({
     dimensions: fixOrderedDimensions(),
     report,
-    requested: dimensions,
+    requested: pickedDims,
     allowedRisks,
-  });
+  })
+    .map((entry) => (sel ? { ...entry, issues: sel.byDim[entry.dim.id] || [] } : entry))
+    .filter((entry) => entry.issues.length);
 
   const mapTaskCount = (map.rootMap ? 1 : 0) + map.modules.length + map.stale.length + map.deadLinks.length;
   const blocked = [...rules.blocked, ...map.blocked];
@@ -623,7 +783,10 @@ export async function startFix(dir, { dimensions = [], risk = 'low', force = fal
       engineDims,
       allowedRisks,
       blocked,
-      dimensions,
+      dimensions: pickedDims,
+      // 原样带回前端做「本轮已处理」标记。不从 results 反推：results 的粒度是「文件」，
+      // 一条 issue 可能没有对应的文件产出（被策略跳过），反推会漏标
+      submittedItems: items || [],
       report,
       rulesBefore: report.dims?.rules?.score ?? null,
       mapBefore: report.dims?.map?.score ?? null,
@@ -647,7 +810,7 @@ export async function startFix(dir, { dimensions = [], risk = 'low', force = fal
  * 还原时靠它区分「用户事后又手工改过」和「优化本身造成的差异」）。
  */
 async function runFix(job, {
-  rules, map, engineDims, allowedRisks, blocked, dimensions,
+  rules, map, engineDims, allowedRisks, blocked, dimensions, submittedItems = [],
   report: beforeReport, rulesBefore, mapBefore,
 }) {
   const dir = job.dir;
@@ -843,14 +1006,32 @@ async function runFix(job, {
     }
 
     const report = refreshStaticReport(dir);
-    const notes = buildFixNotes({ requested: dimensions, results, rootClaudeMd: readRootClaudeMd(dir) });
+    // 把本次真实的闸裁决带下去：降级原因要说「测试有失败用例」还是「没有测试命令」，
+    // 只有 gate 知道。缺了它就只能退回一句写死的「缺少测试安全网」，对有测试的项目是错的
+    const notes = buildFixNotes({
+      requested: dimensions, results, rootClaudeMd: readRootClaudeMd(dir), gate,
+    });
+
+    // 复测清单：从本次**真正落盘**的改动反推受影响模块。
+    // 规则化、零 LLM，所以不拖慢收尾，也不会编造出一份看着像模像样的假清单。
+    // 失败吞掉：它是报告的锦上添花，不该让整份修复结果出不来
+    let retest = [];
+    try {
+      retest = collectRetest(dir, results.filter((r) => r?.status === 'done' && r.file).map((r) => r.file));
+    } catch (e) {
+      logger.warn('optimize', '复测清单生成失败，报告将不含该段', { dir, err: e?.message || String(e) });
+    }
 
     const summary = {
       results,
       blocked,
       notes,
+      retest,
       backupDir,
       cancelled: !!job.signal?.aborted,
+      // 本次提交的计划项原样带回：前端据此标「本轮已处理」，防止用户重复勾同一条。
+      // 这**不是**分数重算——分数必须重新体检才更新
+      handledIds: submittedItems,
       rules: { before: rulesBefore, after: report.dims?.rules?.score ?? null },
       map: { before: mapBefore, after: report.dims?.map?.score ?? null },
       report,
@@ -885,6 +1066,11 @@ async function runFix(job, {
  */
 function refreshStaticReport(dir) {
   const report = runStaticCheckup(dir);
+  // 与 runCheckup 同一个理由：静态维度不经过 land，豁免必须在这里单独套
+  const ignores = getIgnores(dir);
+  for (const key of Object.keys(report.dims)) {
+    report.dims[key] = applyIgnores(key, report.dims[key], ignores);
+  }
   for (const key of LLM_DIM_KEYS) {
     if (report.dims[key]) report.dims[key].reason = '代码已变动，请重新体检以刷新 AI 分析';
   }

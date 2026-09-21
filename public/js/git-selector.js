@@ -16,29 +16,44 @@ let _branches = { local: [], remote: [], current: '' };
 let _isOpen = false;
 let _isLoading = false;
 let _listenerController = null;
+// 世代号：每次重扫自增。切项目时上一轮 /api/git/status 可能还在飞，
+// 它姗姗来迟的响应会把旧项目的分支写到新项目的标签上（同 req-view.js 的 reqEpoch 思路）。
+let _epoch = 0;
+let _retryTimer = null;
+// 探测失败的退避重试节奏。桌面版页面秒开、Node 后端要冷启动数秒，首探十有八九落空。
+const RETRY_DELAYS_MS = [1000, 3000, 6000];
 
 /**
- * 注入工作目录读取器，初始化分支选择器。
+ * 注入工作目录读取器。**只注入，不探测**。
  *
- * checkAndInit 延到微任务：本函数在 chat.js 模块顶部调用，而 `cwd` 在同文件
- * 更后面才 `let` 声明——同步读会撞 TDZ，且因 checkAndInit 是 async，
- * ReferenceError 会变成静默的 unhandled rejection（标签不更新、监听器不挂）。
+ * 本函数在 chat.js 模块顶部执行，那时后端往往还没起来（桌面版冷启动数秒）。
+ * 在这里探测就会踩空，而踩空的老实现是「隐藏按钮且永不重试」——这正是
+ * 「分支选择器有时候整个不见了」的主因。首探改由 chat.js 的 initChat() 发起，
+ * 那里在 whenBackendReady() 闸门之后，与其它依赖后端的初始化同批。
  */
 export function bindGitSelector({ getCwd }) {
   _getCwd = getCwd || (() => '');
-  queueMicrotask(checkAndInit);
 }
 
-/** 切换工作目录后重新检测 git 状态 */
+/** 首次探测 / 切换工作目录后重新检测 git 状态 */
 export function reinitializeGitSelector() {
+  _epoch++;
+  if (_retryTimer) {
+    clearTimeout(_retryTimer);
+    _retryTimer = null;
+  }
   _currentBranch = '';
   _branches = { local: [], remote: [], current: '' };
   closeDropdown();
-  checkAndInit();
+  // 先藏起来再探：换项目时若留着上一个项目的分支名，用户会拿它当当前分支使
+  //（「分支不对、看着像 main」就是这么来的）。探到了下面再显示。
+  const btn = $('#gitBtn');
+  if (btn) btn.hidden = true;
+  checkAndInit(_epoch);
 }
 
 /** 检查当前目录是否 git 仓库，决定显示/隐藏按钮 */
-async function checkAndInit() {
+async function checkAndInit(epoch = _epoch, attempt = 0) {
   const cwd = _getCwd();
   const btn = $('#gitBtn');
   if (!btn) return;
@@ -48,18 +63,34 @@ async function checkAndInit() {
     return;
   }
 
-  try {
-    const { data } = await getJson('/api/git/status?cwd=' + encodeURIComponent(cwd));
-    if (data?.isGit) {
-      _currentBranch = data.currentBranch || '';
-      updateButtonLabel();
-      btn.hidden = false;
-      attachListeners();
+  // 请求失败 ≠ 不是 git 仓库。后端冷启动、git 命令偶发超时都会走到这里，
+  // 一律隐藏就成了「消失且永不回来」——退避重试几轮再认输。
+  const retryOrGiveUp = () => {
+    if (attempt < RETRY_DELAYS_MS.length) {
+      _retryTimer = setTimeout(() => checkAndInit(epoch, attempt + 1), RETRY_DELAYS_MS[attempt]);
     } else {
       btn.hidden = true;
     }
+  };
+
+  let ok = false;
+  let data = null;
+  try {
+    ({ ok, data } = await getJson('/api/git/status?cwd=' + encodeURIComponent(cwd)));
   } catch {
-    btn.hidden = true;
+    if (epoch === _epoch) retryOrGiveUp();
+    return;
+  }
+  if (epoch !== _epoch) return; // 过期响应：等待期间已换项目，丢弃
+  if (!ok) return retryOrGiveUp(); // 5xx 同样是暂时性故障，不是「非 git 目录」的结论
+
+  if (data?.isGit) {
+    _currentBranch = data.currentBranch || '';
+    updateButtonLabel();
+    btn.hidden = false;
+    attachListeners();
+  } else {
+    btn.hidden = true; // 后端明确答复「不是 git 仓库」：确定结论，不重试
   }
 }
 
@@ -83,6 +114,8 @@ function attachListeners() {
 
   document.addEventListener('mousedown', handleClickOutside, { signal });
   document.addEventListener('keydown', handleKeydown, { signal });
+  // 浮层已脱离按钮所在的布局流（fixed + 挂在 body 下），窗口尺寸一变就不再对齐按钮
+  window.addEventListener('resize', positionDropdown, { signal });
 }
 
 /** 点击按钮：切换下拉 */
@@ -95,16 +128,51 @@ function handleToggle(e) {
   }
 }
 
+/**
+ * 把浮层从 .topbar 里挪到 <body> 下（只做一次，幂等）。
+ *
+ * .topbar 有 `backdrop-filter: blur(8px)`，这一条同时干了两件事：创建层叠上下文，
+ * 且成为 fixed 后代的包含块。后果是浮层留在 topbar 里时，它的 z-index 只在 topbar
+ * 内部排序——topbar 外任何 z-index>0 的定位元素（如 .fab-row 的 20）都会盖住它，
+ * 而且改成 position:fixed 也照样被困在里面。唯一出路就是把节点挪出这个上下文。
+ */
+function detachDropdown() {
+  const dropdown = $('#gitDropdown');
+  if (dropdown && dropdown.parentElement !== document.body) {
+    document.body.appendChild(dropdown);
+  }
+  return dropdown;
+}
+
+/** 浮层跟随按钮定位（fixed 相对视口），并夹进视口内不越界 */
+function positionDropdown() {
+  const dropdown = $('#gitDropdown');
+  const btn = $('#gitBtn');
+  if (!dropdown || !btn || dropdown.hidden) return;
+
+  const r = btn.getBoundingClientRect();
+  const w = dropdown.offsetWidth;
+  const h = dropdown.offsetHeight;
+  const left = Math.max(6, Math.min(r.left, window.innerWidth - w - 6));
+  // 下方放不下就翻到按钮上方（分支多时列表能到 400px 高）
+  const below = r.bottom + 6;
+  const top = below + h > window.innerHeight ? Math.max(6, r.top - 6 - h) : below;
+  dropdown.style.left = left + 'px';
+  dropdown.style.top = top + 'px';
+}
+
 /** 打开下拉菜单，每次重新加载分支列表 */
 async function openDropdown() {
-  const dropdown = $('#gitDropdown');
+  const dropdown = detachDropdown();
   if (!dropdown) return;
 
   _isOpen = true;
   dropdown.hidden = false;
+  positionDropdown();
   _branches = { local: [], remote: [], current: '' };
 
   await loadBranches();
+  positionDropdown(); // 列表渲染后高度变了，重新夹一次，避免长列表溢出视口底部
 }
 
 /** 关闭下拉菜单 */
@@ -226,6 +294,7 @@ async function handleBranchClick(name, type) {
   const branch = type === 'remote' ? name.replace(/^[^/]+\//, '') : name;
 
   const cwd = _getCwd();
+  let switched = false;
   try {
     const { data } = await postJson(
       '/api/git/checkout?cwd=' + encodeURIComponent(cwd),
@@ -234,16 +303,20 @@ async function handleBranchClick(name, type) {
     if (!data || data.error) {
       toast('切换分支失败：' + (data?.error || '响应异常'));
     } else if (data.ok) {
-      _currentBranch = branch;
+      _currentBranch = branch; // 乐观更新，回读往返期间标签不空着
       _branches = { local: [], remote: [], current: '' };
       updateButtonLabel();
       toast('已切换到 ' + branch);
       closeDropdown();
+      switched = true;
     }
   } catch {
     toast('切换分支失败');
   } finally {
     _isLoading = false;
+    // 回读一次 HEAD 复核：远程短名走 git 的 DWIM，真正落地的分支名未必等于请求值，
+    // 把请求值直接当结果写死，标签就会和仓库实际状态长期不一致。
+    if (switched) checkAndInit();
   }
 }
 

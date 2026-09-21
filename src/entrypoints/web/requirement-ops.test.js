@@ -11,6 +11,7 @@ const {
   canDispatch,
   isBusyStale,
   healStaleBusy,
+  recoverBusyOnBoot,
   reqDir,
   setBugStatus,
   buildSystemTaskOnSettle,
@@ -19,6 +20,7 @@ const {
   raceWithTimeoutFlag,
   finalizeGuard,
   resolveBaseBranch,
+  resolveTargetBranch,
   hasQueuedTasks,
   queuedTasks,
   enqueueSystemTask,
@@ -27,6 +29,7 @@ const {
   archiveRequirement,
   runDocgen,
   collectChangedFiles,
+  registerApiDoc,
 } = await import('./requirement-ops.js');
 const { createRequirement, updateRequirement, getRequirement } = await import('../../store/requirements.js');
 const { parseFeatureTag } = await import('./req-logic.js');
@@ -98,6 +101,13 @@ test('isBusyStale：busy 无 runId（docgen）→ 不参与判定，恒为 false
   );
 });
 
+test('isBusyStale：busy.convId 与需求主会话不同（colleague-dev 子会话）时，按 busy.convId 查待续跑', () => {
+  // 额度续跑的 pending 登记在 run 自己的 conv（子会话）上；拿主会话 convId 查会误判泄漏、清 busy 击穿串行闸
+  const dep = { getRunStatus: () => 'done', hasPendingResume: (id) => id === 'c_sub' };
+  assert.equal(isBusyStale({ busy: { kind: 'colleague-dev', runId: 'r1', convId: 'c_sub' }, convId: 'c_main' }, dep), false);
+  assert.equal(isBusyStale({ busy: { kind: 'bug-fix', runId: 'r1' }, convId: 'c_main' }, dep), true, '无 busy.convId 时仍按主会话查，bug-fix 行为不变');
+});
+
 test('healStaleBusy：清理 bug-fix 泄漏时，该需求 status===fixing 的 bug 全部退回 failed', () => {
   const r = createRequirement({ title: 'bug-fix 泄漏测试' });
   updateRequirement(r.id, {
@@ -112,6 +122,19 @@ test('healStaleBusy：清理 bug-fix 泄漏时，该需求 status===fixing 的 b
   assert.equal(after.busy, null);
   assert.equal(after.bugs.find((b) => b.id === 'b1').status, 'failed'); // fixing → failed
   assert.equal(after.bugs.find((b) => b.id === 'b2').status, 'pending'); // 非 fixing 的不受影响
+});
+
+test('recoverBusyOnBoot：busy.convId 上有待续跑登记时保留 busy（否则续跑中的子会话 run 与新任务并发改同一目录）', async () => {
+  const { addPending } = await import('../../store/pending-resume.js');
+  const r1 = createRequirement({ title: 'boot 保留' });
+  const r2 = createRequirement({ title: 'boot 清理' });
+  updateRequirement(r1.id, { phase: 'dev', convId: 'c_main1', busy: { kind: 'colleague-dev', runId: 'run_a', startedAt: 1, convId: 'c_sub1' } });
+  updateRequirement(r2.id, { phase: 'dev', convId: 'c_main2', busy: { kind: 'bug-fix', runId: 'run_b', startedAt: 1 } });
+  addPending({ convId: 'c_sub1', session_id: 's', prompt: 'p', cwd: '/x', reason: 'orphan_recovery' });
+  recoverBusyOnBoot();
+  assert.equal(getRequirement(r1.id).busy?.runId, 'run_a', '子会话上有登记 → 保留');
+  assert.equal(getRequirement(r2.id).busy, null, '无登记 → 照旧清');
+  assert.match(getRequirement(r2.id).history.at(-1).event, /进程重启中断/);
 });
 
 test('raceWithTimeoutFlag：timeoutPromise 先落定 → true（判超时）', async () => {
@@ -287,6 +310,42 @@ test('resolveBaseBranch：有历史记录直接复用（不看当前分支）；
   assert.deepEqual(resolveBaseBranch({ prevRecord: null, currentBranch: 'HEAD', reqBranch: 'req/x-y' }), {
     error: 'not-git',
   });
+});
+
+test('resolveTargetBranch：沿用当前分支 / 新建分支 / 缺省退回自动命名', () => {
+  // mode=current：分支名就是工作区当前分支。多工程各自沿用各自的，所以这里逐工程调用、不比对同名
+  assert.deepEqual(
+    resolveTargetBranch({ mode: 'current', currentBranch: 'feat-a', reqBranch: 'req/x-y' }),
+    { branch: 'feat-a' },
+  );
+  // 非 git / detached HEAD 下「沿用当前分支」无处可落，必须拦下而不是悄悄退回自动命名
+  assert.deepEqual(resolveTargetBranch({ mode: 'current', currentBranch: '', reqBranch: 'req/x-y' }), {
+    error: 'not-git',
+  });
+  assert.deepEqual(resolveTargetBranch({ mode: 'current', currentBranch: 'HEAD', reqBranch: 'req/x-y' }), {
+    error: 'not-git',
+  });
+
+  // mode=new：用用户填的名字，两端空白裁掉
+  assert.deepEqual(
+    resolveTargetBranch({ mode: 'new', inputBranch: '  feat/login  ', currentBranch: 'main', reqBranch: 'req/x-y' }),
+    { branch: 'feat/login' },
+  );
+  // 空名字与注入类输入一律 bad-name —— 前端那道禁用只是即时反馈，绕开它就直达 git 命令行
+  for (const bad of ['', '   ', 'a b', 'feat;rm -rf /', '../etc', 'a..b']) {
+    assert.deepEqual(
+      resolveTargetBranch({ mode: 'new', inputBranch: bad, currentBranch: 'main', reqBranch: 'req/x-y' }),
+      { error: 'bad-name' },
+      `应拒绝：${JSON.stringify(bad)}`,
+    );
+  }
+
+  // 缺省 / 未知 mode：退回自动命名，保住不传参的老调用方（飞书侧定稿）
+  assert.deepEqual(resolveTargetBranch({ currentBranch: 'main', reqBranch: 'req/x-y' }), { branch: 'req/x-y' });
+  assert.deepEqual(
+    resolveTargetBranch({ mode: '', inputBranch: 'ignored', currentBranch: 'main', reqBranch: 'req/x-y' }),
+    { branch: 'req/x-y' },
+  );
 });
 
 test('hasQueuedTasks：队列里有该 reqId 的待派发任务时为 true，否则为 false', () => {
@@ -654,4 +713,88 @@ test('archiveRequirement：无 featureTag 时跳过收割', async () => {
 
   assert.equal(result.ok, true, '归档应成功');
   assert.equal(runGitDiffCalled, false, 'runGitDiff 不应被调用（无标签时跳过收割）');
+});
+
+// ---- registerApiDoc（路由与四期自动处理共用）----
+
+test('registerApiDoc：dev 期同名更新、异名新增，history 留痕', () => {
+  const r = createRequirement({ title: 'apidoc 登记' });
+  updateRequirement(r.id, { phase: 'dev' });
+  const f = path.join(process.env.APP_DATA_DIR, 'order-api.md');
+  fs.writeFileSync(f, '# API', 'utf8');
+
+  const a = registerApiDoc(getRequirement(r.id), { name: 'order-api.md', path: f });
+  assert.equal(a.ok, true);
+  assert.equal(a.action, '新增');
+  assert.match(a.doc.id, /^ad_/);
+
+  const b = registerApiDoc(getRequirement(r.id), { name: 'order-api.md', path: f });
+  assert.equal(b.action, '更新');
+  assert.equal(b.doc.id, a.doc.id, '同名更新保留原 id');
+
+  const after = getRequirement(r.id);
+  assert.equal(after.apiDocs.length, 1);
+  assert.equal(after.history.at(-1).event, 'API 文档更新：order-api.md');
+
+  // 异名新增
+  const f2 = path.join(process.env.APP_DATA_DIR, 'pay-api.md');
+  fs.writeFileSync(f2, '# PAY', 'utf8');
+  const c = registerApiDoc(getRequirement(r.id), { name: 'pay-api.md', path: f2 });
+  assert.equal(c.action, '新增');
+  assert.equal(getRequirement(r.id).apiDocs.length, 2);
+});
+
+test('registerApiDoc：同一 req 快照连登两份异名文档，两份都在（写盘前现读，不被快照覆盖）', () => {
+  const r = createRequirement({ title: 'apidoc 快照' });
+  updateRequirement(r.id, { phase: 'dev' });
+  const f1 = path.join(process.env.APP_DATA_DIR, 'snap-a.md');
+  const f2 = path.join(process.env.APP_DATA_DIR, 'snap-b.md');
+  fs.writeFileSync(f1, 'a', 'utf8');
+  fs.writeFileSync(f2, 'b', 'utf8');
+  const snapshot = getRequirement(r.id); // 模拟自动处理循环里复用的同一个 req
+  registerApiDoc(snapshot, { name: 'snap-a.md', path: f1 });
+  registerApiDoc(snapshot, { name: ' snap-b.md ', path: f2 }); // 顺带验证 name 会 trim
+  const names = getRequirement(r.id).apiDocs.map((d) => d.name).sort();
+  assert.deepEqual(names, ['snap-a.md', 'snap-b.md']);
+});
+
+test('registerApiDoc：非 dev 期 409、缺参 400、文件不存在 400、需求空 404', () => {
+  const r = createRequirement({ title: 'apidoc 守卫' });
+  const f = path.join(process.env.APP_DATA_DIR, 'x.md');
+  fs.writeFileSync(f, 'x', 'utf8');
+  assert.deepEqual(registerApiDoc(getRequirement(r.id), { name: 'x.md', path: f }), { ok: false, status: 409, error: '仅开发期可维护 API 文档' });
+  updateRequirement(r.id, { phase: 'dev' });
+  assert.equal(registerApiDoc(getRequirement(r.id), { name: '', path: f }).status, 400);
+  assert.equal(registerApiDoc(getRequirement(r.id), { name: 'x.md', path: f + '.nope' }).status, 400);
+  assert.equal(registerApiDoc(null, { name: 'x.md', path: f }).status, 404);
+});
+
+// ---- colleague-dev（四期系统任务）----
+
+const { addColleague } = await import('../../store/colleagues.js');
+const { appendMessage, getThread } = await import('../../store/colleague-messages.js');
+
+test('dispatch(colleague-dev)：非 dev 期作废留痕，不写 busy、不建子会话，且消息标 handledBy:ai', async () => {
+  const r = createRequirement({ title: 'colleague-dev 守卫' });
+  updateRequirement(r.id, { phase: 'test' });
+  const c = addColleague({ name: 'b', role: 'backend' });
+  const msg = appendMessage(r.id, c.id, { dir: 'in', text: 'x', role: 'backend' });
+  dispatch({ reqId: r.id, kind: 'colleague-dev', payload: { msgId: msg.id, colleagueId: c.id, prompt: 'p', title: 'T' } });
+  await new Promise((res) => setImmediate(res));
+  const after = getRequirement(r.id);
+  assert.equal(after.busy, null);
+  assert.deepEqual(after.sessions, []);
+  assert.equal(after.history.at(-1).event, '系统任务 colleague-dev 作废：需求已离开开发期');
+  assert.equal(getThread(r.id, c.id).messages[0].handledBy, 'ai');
+});
+
+test('dispatch(colleague-dev)：dev 期但无工程目录时作废留痕', () => {
+  const r = createRequirement({ title: 'colleague-dev 无目录' });
+  updateRequirement(r.id, { phase: 'dev', projects: { frontend: null, backend: null } });
+  dispatch({ reqId: r.id, kind: 'colleague-dev', payload: { msgId: 'm', colleagueId: 'c', prompt: 'p', title: 'T' } });
+  assert.equal(getRequirement(r.id).history.at(-1).event, '系统任务 colleague-dev 作废：无可用工程目录');
+});
+
+test('canDispatch：busy.kind===colleague-dev 也挡（串行闸不认 kind）', () => {
+  assert.equal(canDispatch({ busy: { kind: 'colleague-dev', runId: 'x' }, convId: 'c1' }, () => false), false);
 });

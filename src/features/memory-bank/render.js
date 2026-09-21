@@ -32,21 +32,29 @@ const HEADER = '<!-- 由记忆库自动生成，勿手工编辑；改动请在�
 const DAY_MS = 86400000;
 
 /**
- * 把 v2 memory 对象归一化为 selectForInjection 能处理的 v1 格式。
- * v2 memories（来自 synthesize.js）缺少 status / inject / scope / evidenceCount / lastSeenAt / projectDir，
- * 归一化后才能正常通过过滤逻辑，无需改动核心排序/截断流程。
+ * 把 memory 对象归一化为 selectForInjection 能处理的形状。
+ *
+ * 铁律：**只补缺失字段，绝不覆盖已有值**。
+ * 早期版本无条件写死 `inject:true / scope:'global' / evidenceCount:1 / source:'inferred'`，
+ * 后果是 weight() 对每条算出同一个值、explicit 优先级从未生效 ——
+ * 「哪 40 条进 CLAUDE.md」实际由数组下标决定（2026-09-18 实测：56 条里随机 40 条生效）。
+ *
+ * `source` 的推导要分两代形状看：v2 条目带布尔 `explicit`，v1 条目（promote.js 产出）
+ * 只带 `source` 字符串。若无条件用 `explicit===true ? 'explicit' : 'inferred'`，
+ * v1 里用户明说的规矩会被静默降级成推断 —— 所以 explicit 为真才升级，否则保留原值。
  */
 function normalizeMem(mem) {
   return {
-    status: 'active',
-    inject: true,
-    scope: 'global',
+    ...mem,
+    status: mem.status || 'active',
+    inject: mem.inject !== false,
+    scope: mem.scope === 'project' ? 'project' : 'global',
+    projectDir: mem.projectDir || '',
     category: mem.category,
     statement: mem.statement,
-    evidenceCount: 1,
-    lastSeenAt: mem.createdAt || 0,
-    source: 'inferred',
-    projectDir: '',
+    evidenceCount: Number(mem.evidenceCount) > 0 ? Number(mem.evidenceCount) : 1,
+    lastSeenAt: mem.lastSeenAt || mem.createdAt || 0,
+    source: mem.explicit === true ? 'explicit' : (mem.source || 'inferred'),
   };
 }
 
@@ -62,10 +70,10 @@ export function weight(item, now) {
 
 /** 按 scope 过滤 + 排序 + 预算截断，返回入选条目 */
 export function selectForInjection(items, { scope, projectDir = '', now, maxItems = 40, maxChars = 3000 }) {
-  // 入口处归一化：v2 memories 缺少 v1 字段（status/inject/scope），归一后才能正常过滤
-  const normalizedItems = (items || []).map(it =>
-    it.status === undefined ? normalizeMem(it) : it
-  );
+  // 无条件归一：normalizeMem 已改为「只补缺失、不覆盖已有」，重复调用是幂等的。
+  // 旧的 `status === undefined` 条件会让自带 status 的新条目整个跳过归一，
+  // 于是 explicit → source 的映射永远不发生，排序依据全部失效。
+  const normalizedItems = (items || []).map(normalizeMem);
   // 未知 category 的条目在渲染阶段无处落地（renderMarkdown 按 SECTION_ORDER 分节），
   // 必须在这里就诚实地计入 truncated，否则会被无声丢弃：面板报 0 条未注入，规则却哪儿都不在。
   // 只统计「本该有资格注入、但因 category 未知被挡掉」的条目，dormant/inject=false 等本就不合格的不算。
@@ -110,10 +118,8 @@ export function selectForInjection(items, { scope, projectDir = '', now, maxItem
  *   跳过会让磁盘上的旧内容继续被 CLAUDE.md 引用，用户否掉的规则将永久生效。
  */
 export function renderMarkdown(items, opts) {
-  // 入口处归一化：v2 memories 缺少 v1 字段（status/inject/scope），归一后传给 selectForInjection
-  const normalized = (items || []).map(it =>
-    it.status === undefined ? normalizeMem(it) : it
-  );
+  // 同 selectForInjection：无条件归一，理由见 normalizeMem 的注释
+  const normalized = (items || []).map(normalizeMem);
   const { included, truncated } = selectForInjection(normalized, opts);
   if (included.length === 0) return { text: '', included: [], truncated };
 

@@ -29,6 +29,17 @@ export async function branchExists(repo, branch) {
   return r.ok;
 }
 
+/**
+ * 本地分支名清单（不含远程）。读不到一律回 []——调用方拿它做「这个名字已存在吗」的提示，
+ * 读失败时宁可少提示也不能报错拦路：真正的把关在 ensureBranch，它对已存在的分支本就幂等。
+ * 用 for-each-ref 而非 `branch --list`：后者会带 `* ` 前缀和缩进，还可能被 i18n 影响。
+ */
+export async function localBranches(repo) {
+  const r = await git(['-C', repo, 'for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+  if (!r.ok) return [];
+  return (r.out || '').split('\n').map((s) => s.trim()).filter(Boolean);
+}
+
 /** 确保在目标分支上：已在=不动；已存在=checkout；否则=checkout -b */
 export async function ensureBranch(repo, branch) {
   const cur = await currentBranch(repo);
@@ -82,13 +93,23 @@ async function mergeInProgress(dir) {
 }
 
 /**
+ * 取 dir 当前 HEAD 的完整 sha（拿不到返回空串——操作本身可能已成功，只是丢了锚点，
+ * 不该反过来判操作失败）。merge/revert 都要用来回填事后审计锚点，故导出供 revert.js 复用。
+ */
+export async function headSha(dir) {
+  const r = await git(['-C', dir, 'rev-parse', 'HEAD']);
+  return r.ok ? (r.out || '').trim() : '';
+}
+
+/**
  * 在 dir 就地执行 merge，含提交钩子兜底与错误分类。路径 A/B 共用。
- * @returns {{ ok: boolean, conflict?: boolean, hookBypassed?: boolean, error?: string }}
+ * @returns {{ ok: boolean, conflict?: boolean, hookBypassed?: boolean, mergeCommit?: string, error?: string }}
+ *   mergeCommit：合并成功时的 merge commit sha；**取不到时为空串而非缺失**，消费方要用 `if (!mergeCommit)` 而不是判字段存在。
  */
 async function runMergeIn(dir, source, target) {
   const msg = mergeMessage(source, target);
   const merge = await git(['-C', dir, 'merge', '--no-ff', source, '-m', msg]);
-  if (merge.ok) return { ok: true };
+  if (merge.ok) return { ok: true, mergeCommit: await headSha(dir) };
 
   // 诊断信息合并 out+err：钩子（commitlint 等）的输出走 stdout，只取 err 会把真实原因丢干净
   const diag = [merge.err, merge.out]
@@ -109,7 +130,7 @@ async function runMergeIn(dir, source, target) {
         target,
         hook: diag.slice(0, 300),
       });
-      return { ok: true, hookBypassed: true, hookOutput: diag.slice(0, 300) };
+      return { ok: true, hookBypassed: true, hookOutput: diag.slice(0, 300), mergeCommit: await headSha(dir) };
     }
   }
 
@@ -125,47 +146,61 @@ async function runMergeIn(dir, source, target) {
 }
 
 /**
- * 合并 source → target（--no-ff）。冲突/失败则 merge --abort，绝不留半合并状态。
+ * 在「目标分支所在的工作区」里执行 fn，两条路径对调用方透明：
+ * - 主工作区已在 target：原地执行（fn 收到 repo 本身）
+ * - 主工作区在其他分支：建临时 worktree 检出 target 执行，完事即删
+ *   （主工作区连同其未提交改动完全不受影响）
  *
- * 两种路径：
- * - 主工作区已在 target 分支：原地 merge（需工作区干净），成功后停在 target。
- * - 主工作区在其他分支：建临时 worktree 在 target 上执行 merge，完全不动主工作区
- *   （含其未提交改动），成功后删除临时 worktree。
+ * 抽取自 mergeBranch —— merge 与 revert 对「在哪执行」的需求完全同构，各写一套
+ * 必然在临时 worktree 的残留清理上分叉（那是最容易漏、又最难排查的一段）。
  *
- * @returns {{ ok: boolean, conflict?: boolean, hookBypassed?: boolean, error?: string }}
+ * @param {string} repo 主工作区路径
+ * @param {string} target 目标分支（须已存在，调用方自行校验）
+ * @param {string} suffix 临时目录后缀。同一时刻可能并存的不同操作**不得复用同一后缀**
+ *   （merge 用 '.merge-tmp'，revert 用 '.revert-tmp'），否则互相 remove --force 对方的工作区
+ * @param {(dir:string)=>Promise<any>} fn 在 dir 里干活，返回值原样透传
  */
-export async function mergeBranch(repo, source, target) {
-  if (!(await branchExists(repo, source))) return { ok: false, error: `分支不存在：${source}` };
-  if (!(await branchExists(repo, target))) return { ok: false, error: `目标分支不存在：${target}` };
+export async function withBranchWorktree(repo, target, suffix, fn) {
+  const current = await currentBranch(repo);
 
-  const original = await currentBranch(repo);
-
-  // ── 路径 A：主工作区已在目标分支，原地 merge ──
-  // 注意：不做 isClean 预检，直接让 git 决定——git 只在脏文件与合并内容真正冲突时才拒绝，
-  // 未追踪文件和不涉及合并的已修改文件不会阻止 merge，过早的 isClean 检查会误伤正常开发状态。
+  // ── 路径 A：主工作区已在目标分支，原地执行 ──
+  // 注意：不做 isClean 预检，直接让 git 决定——git 只在脏文件与本次操作内容真正冲突时才拒绝，
+  // 未追踪文件和不涉及的已修改文件不会造成阻碍，过早的 isClean 检查会误伤正常开发状态。
   // 提交钩子（husky）只在这条路径生效：core.hooksPath=.husky/_ 是相对路径，新建 worktree 里
   // 没有 .husky/_（gitignored、由 husky install 生成），所以路径 B 天然不跑钩子。
-  if (original === target) {
-    return runMergeIn(repo, source, target);
-  }
+  if (current === target) return fn(repo);
 
-  // ── 路径 B：主工作区在其他分支，用临时 worktree 执行 merge，不动主工作区 ──
-  const tmpDir = String(repo).replace(/[\\/]+$/, '') + '.merge-tmp';
+  // ── 路径 B：主工作区在其他分支，用临时 worktree 执行，不动主工作区 ──
+  const tmpDir = String(repo).replace(/[\\/]+$/, '') + suffix;
   // 清理可能的残留注册（上次异常退出留下的）
   await git(['-C', repo, 'worktree', 'prune']);
   await git(['-C', repo, 'worktree', 'remove', '--force', tmpDir]); // 幂等：目录不存在时 git 返回非 0 但无副作用
 
   const add = await git(['-C', repo, 'worktree', 'add', tmpDir, target]);
   if (!add.ok) {
-    return { ok: false, error: `创建临时合并工作区失败：${(add.err || add.msg || '').slice(0, 200)}` };
+    return { ok: false, error: `创建临时工作区失败：${(add.err || add.msg || '').slice(0, 200)}` };
   }
 
   try {
-    return await runMergeIn(tmpDir, source, target);
+    return await fn(tmpDir);
   } finally {
-    // 无论成功失败都清理临时 worktree，不留垃圾目录
+    // 无论成功、失败还是抛错都清理，不留垃圾目录
+    //（开头的 prune + remove --force 虽能自愈，但别指望下一次调用来擦屁股）
     await git(['-C', repo, 'worktree', 'remove', '--force', tmpDir]);
   }
+}
+
+/**
+ * 合并 source → target（--no-ff）。冲突/失败则 merge --abort，绝不留半合并状态。
+ * 执行目录（原地 / 临时 worktree）由 withBranchWorktree 决定。
+ *
+ * @returns {{ ok: boolean, conflict?: boolean, hookBypassed?: boolean, mergeCommit?: string, error?: string }}
+ *   mergeCommit：合并成功时的 merge commit sha；**取不到时为空串而非缺失**，消费方要用 `if (!mergeCommit)` 而不是判字段存在。
+ */
+export async function mergeBranch(repo, source, target) {
+  if (!(await branchExists(repo, source))) return { ok: false, error: `分支不存在：${source}` };
+  if (!(await branchExists(repo, target))) return { ok: false, error: `目标分支不存在：${target}` };
+  return withBranchWorktree(repo, target, '.merge-tmp', (dir) => runMergeIn(dir, source, target));
 }
 
 /**

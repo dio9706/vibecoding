@@ -16,7 +16,10 @@ import { appDataPath } from '../../shared/app-paths.js';
 import { logger } from '../../shared/logger.js';
 import { sendTextToUser } from '../../integrations/lark.js';
 import { getMyFeishuOpenId, getBots } from '../../store/settings.js';
-import { currentBranch, ensureBranch, isClean } from '../../plugins/team-tools/auto-dev/git.js';
+import { currentBranch, ensureBranch, isClean, localBranches } from '../../plugins/team-tools/auto-dev/git.js';
+// 分支名校验复用 routes-git 的那一份（同层纯函数，且已有单测钉住注入类用例）。
+// 在这里另写一条正则就是第二份真相：两处一旦松紧不一，宽的那处就是漏洞
+import { validateBranchName } from './routes-git.js';
 import {
   pickCwdAndDirs,
   buildDocgenPrompt,
@@ -26,11 +29,19 @@ import {
   buildDevelopPrompt,
   buildApiFixPrompt,
   buildBugFixPrompt,
+  buildSeedPrompt,
   reqBranchName,
   buildArchiveSummary,
+  buildAssigneeNotices,
+  buildAssigneeSnapshot,
+  pickPendingNotices,
+  normalizeNotifiedBook,
   parseFeatureTag,
+  buildFeatureSnapshot,
 } from './req-logic.js';
-import { listFeatureTags, harvestFiles } from '../../store/feature-index.js';
+import { ROLES, getColleague } from '../../store/colleagues.js';
+import { getUnreadCounts } from '../../store/colleague-messages.js';
+import { listFeatureTags, harvestFiles, getTopFiles } from '../../store/feature-index.js';
 import {
   parseJsonLoose,
   normalizeMap,
@@ -42,8 +53,10 @@ import {
   buildImpactPrompt,
   parseImpact,
   markFreshPoints,
+  upgradeFigmas,
 } from './req-map.logic.js';
 import { buildQuizPrompt, parseQuiz, answersToPromptPart } from './req-quiz.logic.js';
+import { dispatchColleagueDev, abandonColleagueDev, COLLEAGUE_DEV_KIND } from './colleague-dev.js';
 
 export const DOCGEN_TIMEOUT_MS = 15 * 60_000; // spec §5.3：docgen race 上限
 
@@ -88,11 +101,14 @@ export function canDispatch(req, hasActive = hasActiveRunForConv) {
  * 大概率是 run 经额度耗尽自动续跑链路（doResume 生成的新 run 未重新挂 onSettle）收尾时没能回调到，
  * busy 从此再也没人清。docgen 的 busy 没有 runId（其失败路径已在进程内自行清理，
  * 崩溃由 recoverBusyOnBoot 兜底），不参与本判定。
+ * busy.convId（系统任务落在非主会话时才有）优先于需求的 convId —— 它既是前端接流的依据，也是这里判泄漏的依据。
  */
 export function isBusyStale({ busy, convId }, { getRunStatus, hasPendingResume }) {
   if (!busy?.runId) return false;
   if (getRunStatus(busy.runId) === 'running') return false;
-  return !hasPendingResume(convId);
+  // 待续跑登记挂在 run 自己的 conv 上。系统任务落在子会话时（colleague-dev）busy.convId 才是那个 conv，
+  // 拿需求的主会话 convId 去查必然查不到，会把正在额度续跑的任务误判成泄漏、清掉 busy 击穿串行闸
+  return !hasPendingResume(busy.convId || convId);
 }
 
 function defaultGetRunStatus(runId) {
@@ -131,9 +147,10 @@ export function healStaleBusy() {
 // —— 系统任务队列（develop / api-fix / bug-fix / docgen）：内存队列，仅 web 进程单泵消费 ——
 const queue = []; // [{ reqId, kind, payload }]
 
-/** 去重判别键：区分同一 kind 下指向不同对象的任务（不同 API 文档 / 不同 BUG / 不同变动），避免误合并成一条丢工作项 */
+/** 去重判别键：区分同一 kind 下指向不同对象的任务（不同 API 文档 / 不同 BUG / 不同变动），避免误合并成一条丢工作项
+ *  msgId：colleague-dev（四期）按同事消息逐条成任务，同 msgId 重复入队才算重复，不同消息绝不能互相顶掉 */
 function taskDiscriminator(payload) {
-  return payload?.bug?.id || payload?.doc?.id || payload?.changeId || '';
+  return payload?.bug?.id || payload?.doc?.id || payload?.changeId || payload?.msgId || '';
 }
 
 /**
@@ -201,10 +218,22 @@ export function startRequirementPump() {
   timer.unref();
 }
 
-/** 崩溃恢复：busy 残留 = 上个进程死在任务中途 → 清标记记档，不自动重跑（用户可从面板重新触发） */
-function recoverBusyOnBoot() {
+/**
+ * 崩溃恢复：busy 残留 = 上个进程死在任务中途 → 清标记记档，不自动重跑（用户可从面板重新触发）。
+ *
+ * 例外：该 busy 对应的 conv 上**有待续跑登记**时不清 —— server.js 在本函数之前已跑 recoverPendingAndOrphans，
+ * 把孤儿 run 登记为待续跑，doResume 马上会在那个 conv 上接着改代码。此时清了 busy，canDispatch 只查主会话
+ * 有无活跃 run，落在子会话的 colleague-dev 兜不住，泵会把新任务派发出去与续跑中的 run 并发改同一工作区。
+ * 留着的 busy 由 healStaleBusy 在续跑链结束后按现有口径清掉（isBusyStale 也是按 busy.convId 查登记）。
+ */
+export function recoverBusyOnBoot() {
   for (const r of getRequirements()) {
-    if (r.busy) updateRequirement(r.id, { busy: null }, `任务 ${r.busy.kind} 因进程重启中断`);
+    if (!r.busy) continue;
+    if (defaultHasPendingResume(r.busy.convId || r.convId)) {
+      logger.info('req-ops', 'busy 对应 conv 有待续跑登记，保留等续跑', { reqId: r.id, kind: r.busy.kind, convId: r.busy.convId || r.convId });
+      continue;
+    }
+    updateRequirement(r.id, { busy: null }, `任务 ${r.busy.kind} 因进程重启中断`);
   }
 }
 
@@ -301,6 +330,20 @@ export function dispatch({ reqId, kind, payload }) {
     );
     return;
   }
+  // 四期：后端同事消息触发的自动接入。只在开发期有意义（/api/req/apidoc 本身也只在 dev 开放；
+  // 测试期的后端改动该走 BUG 巡检那条路）。执行体在 colleague-dev.js，理由见其文件头。
+  if (kind === COLLEAGUE_DEV_KIND) {
+    if (req.phase !== 'dev') {
+      try {
+        abandonColleagueDev(reqId, payload, '需求已离开开发期');
+      } catch (e) {
+        logger.error('req-ops', 'abandonColleagueDev 失败', { reqId, kind, err: e?.message || String(e) });
+      }
+      return;
+    }
+    dispatchColleagueDev(req, payload);
+    return;
+  }
   // develop/api-fix 已改为客户端会话驱动（sendMessageProgrammatically），
   // 不再经服务端系统任务队列。万一因旧版本残留数据入队，直接废弃不派发。
   if (kind === 'develop' || kind === 'api-fix') {
@@ -359,7 +402,14 @@ function dispatchSystemTask(req, kind, payload) {
     updateRequirement(req.id, {}, `系统任务 ${kind} 作废：无可用工程目录`);
     return;
   }
-  const prompt = buildBugFixPrompt(payload);
+  // devSession 为空 = 测试期刚换过主会话，没有可续的 Claude session：把需求背景塞进 prompt，
+  // 否则 BUG 会在零上下文的新 session 里修（见 spec §7）。有 session 可续时不传，省 token。
+  // ★ seed 必须与下面 startClaudeRun 的 session 派生自同一次 req 读取，不能塞进入队 payload——
+  //   完整的竞态论证见 req-logic.js 里 buildBugFixPrompt 的 ★ 段，不在此重复。
+  const seed = req.devSession
+    ? ''
+    : buildSeedPrompt(req, { featureSnapshot: buildFeatureSnapshot(req, getTopFiles) });
+  const prompt = buildBugFixPrompt({ ...payload, seed });
   const run = createRun();
   updateRequirement(req.id, { busy: { kind, runId: run.id, startedAt: Date.now() } }, `系统任务 ${kind} 启动`);
   if (kind === 'bug-fix') setBugStatus(req.id, payload.bug.id, 'fixing');
@@ -379,6 +429,43 @@ export function setBugStatus(reqId, bugId, status) {
   const req = getRequirement(reqId);
   if (!req) return;
   updateRequirement(reqId, { bugs: req.bugs.map((b) => (b.id === bugId ? { ...b, status } : b)) });
+}
+
+/**
+ * 登记 / 更新一份后端 API 文档（同名即更新，保留原 id）。
+ *
+ * 路由 handleApidocPost 与四期「同事发来接口文档」自动处理共用 —— 两处各写一份迟早漂移
+ *（比如一处校验文件存在、一处不校验，或 history 文案不一致）。
+ * @param {object|null} req 需求记录；null 映射为 404。phase 与 apiDocs 都现读盘上最新值
+ * @param {{name: string, path: string}} doc name 会 trim（飞书原始文件名不经 str()）
+ * @returns {{ok:true, action:'新增'|'更新', doc:object} | {ok:false, status:400|404|409, error:string}}
+ */
+export function registerApiDoc(req, { name: rawName, path: p }) {
+  if (!req) return { ok: false, status: 404, error: '需求不存在' };
+  // phase 与 apiDocs 都现读：调用方是分类完才到这里（秒级延迟），期间需求可能已流转
+  const fresh = getRequirement(req.id) || req;
+  const name = String(rawName ?? '').trim();
+  if (fresh.phase !== 'dev') return { ok: false, status: 409, error: '仅开发期可维护 API 文档' };
+  if (!name || !p) return { ok: false, status: 400, error: 'name/path 均必填' };
+  if (!fs.existsSync(p)) return { ok: false, status: 400, error: '文件不存在：' + p };
+
+  // apiDocs 以盘上最新为准而不用调用方快照：自动处理会在一个循环里对多条消息复用同一个 req，
+  // 拿快照整体覆盖会让同一批的第二份文档把第一份静默冲掉（updateRequirement 是浅合并）
+  const apiDocs = fresh.apiDocs || [];
+  const idx = apiDocs.findIndex((d) => d.name === name);
+  const now = new Date().toISOString();
+  let doc, action, next;
+  if (idx >= 0) {
+    doc = { ...apiDocs[idx], path: p, updatedAt: now };
+    next = apiDocs.map((d, i) => (i === idx ? doc : d));
+    action = '更新';
+  } else {
+    doc = { id: 'ad_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, path: p, updatedAt: now };
+    next = [...apiDocs, doc];
+    action = '新增';
+  }
+  updateRequirement(fresh.id, { apiDocs: next }, `API 文档${action}：${name}`);
+  return { ok: true, action, doc };
 }
 
 /**
@@ -644,6 +731,66 @@ export function resolveBaseBranch({ prevRecord, currentBranch, reqBranch }) {
 }
 
 /**
+ * 决定某开发工程本轮定稿要落到**哪个分支**（纯函数，与 resolveBaseBranch 配对）。
+ *
+ * 三种模式的由来：定稿原本无条件 `reqBranchName(req)` 自动开新分支，但「这次改动到底
+ * 该独立成支还是接着当前分支做」只有人知道——小修补另开分支等于凭空多一次合并。
+ * 所以改成定稿时由用户在弹框里拍板，本函数只做翻译，不碰 git：
+ *   - `'current'` 沿用当前分支：多工程各自沿用各自的（前端停在 feat-a、后端停在 main
+ *      就分别用这两个），不强求同名——强求同名只会把人挡在定稿之外去手工对齐分支。
+ *   - `'new'` 用用户填的名字。名字已存在时不在这里区分「建」还是「切」：
+ *      `ensureBranch` 对已存在的分支本就是幂等切换，二者在 git 侧是同一个动作。
+ *   - 其余（含缺省）退回自动命名，保住不传参的老调用方。
+ *
+ * @param {object} args
+ * @param {'current'|'new'|''} [args.mode]
+ * @param {string} [args.inputBranch] mode==='new' 时用户填的分支名
+ * @param {string|null} [args.currentBranch] 该工程工作区当前分支
+ * @param {string} args.reqBranch 自动命名兜底（reqBranchName 的产出）
+ * @returns {{ branch: string } | { error: 'not-git' | 'bad-name' }}
+ */
+export function resolveTargetBranch({ mode, inputBranch, currentBranch, reqBranch }) {
+  if (mode === 'current') {
+    // detached HEAD 下 rev-parse --abbrev-ref 回的就是字面量 'HEAD'，那不是个能提交上去的分支
+    if (!currentBranch || currentBranch === 'HEAD') return { error: 'not-git' };
+    return { branch: currentBranch };
+  }
+  if (mode === 'new') {
+    const name = String(inputBranch || '').trim();
+    // 必须服务端再校一次：前端那道只是即时反馈，绕开它就是把用户输入直接拼进 git 命令行
+    if (!validateBranchName(name)) return { error: 'bad-name' };
+    return { branch: name };
+  }
+  return { branch: reqBranch };
+}
+
+/**
+ * 定稿前置信息：每个开发工程的当前分支与本地分支清单 + 自动命名建议。
+ *
+ * 为什么由后端算而不是前端自己从 req.projects 推：「哪些算开发工程」的判据只有
+ * finalizeGuard 一处（`dir && dev`），前端再抄一份就会在判据变化时静默分叉——
+ * 弹框上列出的工程与真正会建分支的工程对不上，是最难发现的一类错。
+ */
+export async function finalizePrecheck(id) {
+  const req = getRequirement(id);
+  const guard = finalizeGuard(req);
+  if (!guard.ok) return { ok: false, status: 409, error: guard.error };
+
+  const projects = [];
+  for (const p of guard.devProjects) {
+    const role = p === req.projects?.backend ? 'backend' : 'frontend';
+    // 读不到不算失败：弹框照样能用（少显示一行当前分支而已），真正的把关在 finalize 里
+    projects.push({
+      dir: p.dir,
+      role,
+      current: (await currentBranch(p.dir)) || '',
+      branches: await localBranches(p.dir),
+    });
+  }
+  return { ok: true, suggested: reqBranchName(req), projects };
+}
+
+/**
  * 定稿：脏区检查（force 可越）→ 逐开发工程建/切需求分支 → phase=dev → 自动首轮开发入队。
  * 多工程共用同一 branch 字符串（前后端各自仓库里建同名分支）。
  *
@@ -660,7 +807,101 @@ export function resolveBaseBranch({ prevRecord, currentBranch, reqBranch }) {
  * 不做回滚（KISS，不做回滚魔法），错误信息里指明哪个目录失败，用户可用 force 重试
  * （ensureBranch 对已存在的目标分支是幂等切换，重试安全）。
  */
-export async function finalizeRequirement(id, { force = false } = {}) {
+/**
+ * 需求的 assignees（同事 id 数组）→ 带姓名/职位的完整条目。
+ *
+ * 收在这里由 routes 的 `/api/req/get` 与定稿通知、归档快照三处共用：join 规则写两份的话，
+ * 「已移除的同事」这类兜底文案迟早在某一处漏掉，表现成界面上有名字、归档里却空白。
+ * 查不到的 id 保留并标 missing，不静默丢——它代表「指派过但同事已被删」。
+ */
+export function resolveAssigneeList(assignees, { reqId = null } = {}) {
+  // 未读数与 assigneeList 一起回，复用开发期右栏既有轮询，不另开接口、不多一次请求
+  const unread = reqId ? getUnreadCounts(reqId) : {};
+  return (Array.isArray(assignees) ? assignees : []).map((cid) => {
+    const c = getColleague(cid);
+    if (!c) {
+      return {
+        id: cid, name: '已移除的同事', role: '', roleLabel: '', feishuOpenId: '',
+        missing: true, unreadCount: unread[cid] || 0,
+      };
+    }
+    return {
+      id: c.id,
+      name: c.name,
+      role: c.role,
+      roleLabel: ROLES.find((x) => x.id === c.role)?.label || '',
+      feishuOpenId: c.feishuOpenId,
+      missing: false,
+      unreadCount: unread[cid] || 0,
+    };
+  });
+}
+
+/**
+ * 定稿成功后给开发人员发私聊（fire-and-forget，不阻塞、不回滚定稿）。
+ *
+ * **必须用当前启用的机器人**，不能用 `req.notifyBotId`：名册里的 open_id 是拿启用机器人的
+ * 凭证从群成员接口取的，而 open_id 是**应用维度**的——换个应用发，同一个人的 id 根本对不上，
+ * 消息会静默丢。（notifyBotId 的语义是「给我自己发完成通知」，与这里给同事发消息不是一回事。）
+ *
+ * 不阻塞定稿：走到这一步分支已经建好、phase 已落 dev，为了几条消息回滚代价过大。
+ * 但结果要回报给调用方在界面上提示——定稿是重要操作，静默失败会让用户以为同事都收到了。
+ *
+ * 重试语义：`alreadyNotified` 是按 open_id 记的已送达账本，本轮只发还没送达的人。
+ * 「部分失败」因此不再是死局 —— 收到的人不会重收，没收到的人下次定稿重试能补上。
+ *
+ * @returns {Promise<{sent:number, sentOpenIds:Record<string,string>, failed:string[], skippedNoId:string[], skippedNoRole:string[], skippedMissing:string[], botMissing:boolean}>}
+ */
+export async function notifyAssigneesOnFinalize(req, devProjects, { alreadyNotified = null } = {}) {
+  const empty = { sent: 0, sentOpenIds: {}, failed: [], skippedNoId: [], skippedNoRole: [], skippedMissing: [], botMissing: false };
+  // 纯后端工程：开发工程里没有前端。机器人自己写后端，「等你的接口文档」这句就不成立
+  const backendOnly = devProjects.length > 0 && devProjects.every((p) => p === req.projects?.backend);
+  const { notices: allNotices, skippedNoId, skippedNoRole, skippedMissing } = buildAssigneeNotices({
+    title: req.title,
+    assigneeList: resolveAssigneeList(req.assignees),
+    backendOnly,
+  });
+  const notices = pickPendingNotices(allNotices, alreadyNotified);
+  const result = { ...empty, skippedNoId, skippedNoRole, skippedMissing };
+  if (!notices.length) return result;
+
+  const bot = getBots().find((b) => b.enabled && b.platform === 'feishu' && b.appId && b.appSecret);
+  if (!bot) {
+    logger.warn('req-ops', '定稿通知：无启用中的飞书机器人，全部跳过', { reqId: req.id, count: notices.length });
+    return { ...result, botMissing: true };
+  }
+  const creds = { appId: bot.appId, appSecret: bot.appSecret };
+  for (const n of notices) {
+    try {
+      const ok = await sendTextToUser(creds, n.openId, n.text);
+      if (ok) {
+        result.sent += 1;
+        result.sentOpenIds[n.openId] = new Date().toISOString();
+      } else result.failed.push(n.name);
+    } catch (e) {
+      result.failed.push(n.name);
+      logger.warn('req-ops', '定稿通知发送异常', { reqId: req.id, name: n.name, err: e?.message || String(e) });
+    }
+  }
+  logger.info('req-ops', '定稿通知已处理', {
+    reqId: req.id,
+    backendOnly,
+    sent: result.sent,
+    failed: result.failed.length,
+    skipped: skippedNoId.length + skippedNoRole.length + skippedMissing.length,
+  });
+  return result;
+}
+
+/**
+ * @param {string} id
+ * @param {object} [opts]
+ * @param {boolean} [opts.force] 跳过脏工作区检查
+ * @param {'current'|'new'|''} [opts.branchMode] 分支策略，见 resolveTargetBranch。
+ *   缺省（老调用方 / 飞书侧）仍走自动命名，行为不变。
+ * @param {string} [opts.branch] branchMode==='new' 时用户填的分支名
+ */
+export async function finalizeRequirement(id, { force = false, branchMode = '', branch: inputBranch = '' } = {}) {
   if (finalizing.has(id)) return { ok: false, status: 409, error: '定稿正在进行中' };
   finalizing.add(id);
   try {
@@ -677,11 +918,24 @@ export async function finalizeRequirement(id, { force = false } = {}) {
       if (dirtyDirs.length) return { ok: false, status: 409, warn: 'dirty', dirs: dirtyDirs };
     }
 
-    const branch = reqBranchName(req);
+    const autoBranch = reqBranchName(req);
     const branches = [];
     for (const p of guard.devProjects) {
       const prevRecord = (req.branches || []).find((b) => b.dir === p.dir);
-      const cur = prevRecord ? null : await currentBranch(p.dir); // 有历史记录时无需再读，见 resolveBaseBranch
+      // 有历史记录时本可跳过（见 resolveBaseBranch），但「沿用当前分支」的分支名**就是**
+      // 当前分支，跳过这次读取就没有名字可用了——所以该模式下无论如何都要现读
+      const cur = prevRecord && branchMode !== 'current' ? null : await currentBranch(p.dir);
+
+      const target = resolveTargetBranch({ mode: branchMode, inputBranch, currentBranch: cur, reqBranch: autoBranch });
+      if (target.error) {
+        const msg =
+          target.error === 'not-git'
+            ? `${p.dir} 不是 git 仓库或处于 detached HEAD，无法沿用当前分支`
+            : `分支名不合法：${inputBranch}（只允许字母数字与 / . - _，且不能含 ..）`;
+        return { ok: false, status: 400, error: msg };
+      }
+      const branch = target.branch;
+
       const resolved = resolveBaseBranch({ prevRecord, currentBranch: cur, reqBranch: branch });
       // 先统一拦截任意错误码再按码转译：未知码也会在此被拦下走兜底文案，不会静默滑进成功路径
       if (resolved.error) {
@@ -691,15 +945,37 @@ export async function finalizeRequirement(id, { force = false } = {}) {
             : `${p.dir} 无法确定基线分支（${resolved.error}）`;
         return { ok: false, status: 400, error: msg };
       }
+      // 沿用当前分支时这里是空操作（ensureBranch 见 cur===branch 直接返回），不会动工作区
       const r = await ensureBranch(p.dir, branch);
       if (!r.ok) return { ok: false, status: 500, error: `创建/切换分支失败（${p.dir}，分支 ${branch}）` };
       branches.push({ dir: p.dir, branch, baseBranch: resolved.baseBranch });
       updateRequirement(id, { branches: [...branches] }, `定稿进度：${p.dir} 分支就绪`); // 部分进度落盘，供重试自愈
     }
 
-    updateRequirement(id, { phase: 'dev', branches }, `定稿：建分支 ${branch}，进入开发期`);
-    logger.info('req-ops', '需求定稿，进入开发期（develop 由客户端会话驱动）', { reqId: id, branch, dirs: branches.map((b) => b.dir) });
-    return { ok: true, branch };
+    // 多工程「沿用当前分支」时各自的分支名可能不同（前端 feat-a、后端 main），
+    // 所以对外的 branch 是去重后的清单而不是单个名字。单工程/新建分支场景下它就是那一个名字
+    const branch = [...new Set(branches.map((b) => b.branch))].join('、');
+    const verb = branchMode === 'current' ? '沿用分支' : '建分支';
+    updateRequirement(id, { phase: 'dev', branches }, `定稿：${verb} ${branch}，进入开发期`);
+    logger.info('req-ops', '需求定稿，进入开发期（develop 由客户端会话驱动）', { reqId: id, branchMode: branchMode || 'auto', branch, dirs: branches.map((b) => b.dir) });
+
+    // 通知开发人员。幂等**按人记**（`assigneeNotified` 是 open_id → 送达时间的账本），
+    // 不是打一个「已通知过」的总标记：定稿失败后可重试（上面每个工程的分支进度都落盘供自愈），
+    // 重试时已送达的人不会再收一条「新需求已收到」——对人的骚扰不像重建分支那样无害；
+    // 而上一轮发失败的人能在重试时补上。用总标记的话，3 人里 1 成 2 败就会把那 2 人
+    // 永久挡在补发之外，且没有任何补救路径（漏通知比重复通知严重得多）。
+    const cur = getRequirement(id) || req;
+    const notified = await notifyAssigneesOnFinalize(cur, guard.devProjects, {
+      alreadyNotified: cur.assigneeNotified,
+    });
+    if (notified.sent > 0) {
+      updateRequirement(
+        id,
+        { assigneeNotified: { ...normalizeNotifiedBook(cur.assigneeNotified), ...notified.sentOpenIds } },
+        `已通知开发人员 ${notified.sent} 人`,
+      );
+    }
+    return { ok: true, branch, notified };
   } finally {
     finalizing.delete(id);
   }
@@ -784,14 +1060,20 @@ export async function archiveRequirement(id, note, { runGit = defaultRunGit, run
 
     // fail-closed：note 非字符串（如前端传了对象）一律归空串，不落 [object Object]（同 handleGuidelines 的处理方式）
     const cleanNote = (typeof note === 'string' ? note : '').slice(0, 2000);
-    const summary = buildArchiveSummary({ req, note: cleanNote, branchLogs });
+    // 开发人员快照：归档是审计语义，固化「当时是谁」。名册后续改名/转职/删号都不该
+    // 反向改写已归档的历史（开发期的 assignees 存 id 是为了跟着名册同步，两者刻意相反）
+    const archiveAssignees = buildAssigneeSnapshot(resolveAssigneeList(req.assignees));
+    const summary = buildArchiveSummary({ req: { ...req, archiveAssignees }, note: cleanNote, branchLogs });
     fs.writeFileSync(reqDir(id, 'archive.md'), summary, 'utf8');
     updateRequirement(
       id,
-      { phase: 'archived', archive: { note: cleanNote, summary, archivedAt: new Date().toISOString() } },
+      {
+        phase: 'archived',
+        archive: { note: cleanNote, summary, archivedAt: new Date().toISOString(), assignees: archiveAssignees },
+      },
       '确认归档',
     );
-    logger.info('req-ops', '需求归档完成', { reqId: id, branches: branchLogs.length });
+    logger.info('req-ops', '需求归档完成', { reqId: id, branches: branchLogs.length, assignees: archiveAssignees.length });
     return { ok: true };
   } finally {
     archiving.delete(id);
@@ -882,7 +1164,16 @@ export function readMapVersion(req, v = null) {
   const target = v == null ? versions[versions.length - 1] : versions.find((x) => x.v === Number(v));
   if (!target) return null;
   try {
-    return JSON.parse(fs.readFileSync(target.path, 'utf8'));
+    const map = JSON.parse(fs.readFileSync(target.path, 'utf8'));
+    // 旧版地图（page.figma 单对象 + 页面级 restoredAt）在唯一的读出口统一升级为 figmas 数组，
+    // 下游（前端 / 路由就地改 / 重生成取 prev）一律只认新结构。
+    // 不回写落盘：upgradeFigmas 是确定性的，每次读都升级出同一份 id，没有回写的必要。
+    for (const p of map?.pages || []) {
+      p.figmas = upgradeFigmas(p);
+      delete p.figma;
+      delete p.restoredAt;
+    }
+    return map;
   } catch (e) {
     logger.warn('req-ops', '地图读取失败', { reqId: req.id, v: target.v, err: e?.message || String(e) });
     return null;

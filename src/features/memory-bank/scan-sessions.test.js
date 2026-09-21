@@ -1,6 +1,76 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { shouldReanalyzePath, scanForUnanalyzedSessions } from './scan-sessions.js';
+import { shouldReanalyzePath, scanForUnanalyzedSessions, isStaleAnalyzing, ANALYZING_STALE_MS, isSubagentTranscript } from './scan-sessions.js';
+
+// ===== isSubagentTranscript =====
+
+test('isSubagentTranscript: subagents 目录下的转录判为子代理', () => {
+  assert.strictEqual(
+    isSubagentTranscript('C:\\Users\\x\\.claude\\projects\\proj\\abc\\subagents\\agent-a1.jsonl'),
+    true
+  );
+  assert.strictEqual(
+    isSubagentTranscript('/home/x/.claude/projects/proj/abc/subagents/agent-a1.jsonl'),
+    true
+  );
+});
+
+test('isSubagentTranscript: 嵌套在 workflows 下的子代理转录同样命中', () => {
+  assert.strictEqual(
+    isSubagentTranscript('C:\\p\\subagents\\workflows\\wf_bc6d78f6\\agent-a878e148.jsonl'),
+    true
+  );
+});
+
+test('isSubagentTranscript: 主会话转录不命中', () => {
+  assert.strictEqual(
+    isSubagentTranscript('C:\\Users\\x\\.claude\\projects\\proj\\e4ffb914-33f4.jsonl'),
+    false
+  );
+});
+
+test('isSubagentTranscript: 目录名只是包含 subagents 子串的不算（必须是完整路径段）', () => {
+  assert.strictEqual(isSubagentTranscript('/p/my-subagents-backup/a.jsonl'), false);
+  assert.strictEqual(isSubagentTranscript('/p/subagentsx/a.jsonl'), false);
+});
+
+test('isSubagentTranscript: 空值不抛错', () => {
+  assert.strictEqual(isSubagentTranscript(''), false);
+  assert.strictEqual(isSubagentTranscript(null), false);
+});
+
+test('scanForUnanalyzedSessions: 扫描结果绝不含子代理转录', () => {
+  const result = scanForUnanalyzedSessions({ sessions: [] });
+  const subs = result.filter((r) => isSubagentTranscript(r.path));
+  assert.deepStrictEqual(subs, [], '子代理转录不该进入待分析列表');
+});
+
+// ===== isStaleAnalyzing =====
+
+test('isStaleAnalyzing: 刚标记为 analyzing 的会话不算陈旧（当前进程正在处理）', () => {
+  const now = Date.now();
+  assert.strictEqual(isStaleAnalyzing({ status: 'analyzing', analyzingAt: now - 1000 }, now), false);
+});
+
+test('isStaleAnalyzing: 超过阈值的 analyzing 视为陈旧，可重新分析', () => {
+  const now = Date.now();
+  assert.strictEqual(
+    isStaleAnalyzing({ status: 'analyzing', analyzingAt: now - ANALYZING_STALE_MS - 1 }, now),
+    true
+  );
+});
+
+test('isStaleAnalyzing: 缺 analyzingAt 的存量 analyzing 记录视为陈旧（本次改动前写下的，无从判断起始时刻）', () => {
+  const now = Date.now();
+  assert.strictEqual(isStaleAnalyzing({ status: 'analyzing' }, now), true);
+});
+
+test('isStaleAnalyzing: 非 analyzing 状态一律返回 false', () => {
+  const now = Date.now();
+  assert.strictEqual(isStaleAnalyzing({ status: 'analyzed' }, now), false);
+  assert.strictEqual(isStaleAnalyzing({ status: 'pending' }, now), false);
+  assert.strictEqual(isStaleAnalyzing(null, now), false);
+});
 
 // ===== shouldReanalyzePath =====
 

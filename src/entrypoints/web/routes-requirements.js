@@ -1,9 +1,13 @@
 /** web 入口：需求工作流 HTTP 路由 —— 单入口 handleRequirementRoutes 按 pathname+method 分发 */
 import fs from 'node:fs';
-import { getRequirement, getRequirements, updateRequirement, createRequirement, canTransition, normalizeSessions } from '../../store/requirements.js';
-import { enqueueSystemTask, finalizeRequirement, archiveRequirement, hasQueuedTasks, queuedTasks, reqDir, readMapVersion, DOCGEN_GUIDE, docgenAborts, userStoppedSet, docgenLiveLine } from './requirement-ops.js';
-import { pickCwdAndDirs, buildSeedPrompt } from './req-logic.js';
+import { getRequirement, getRequirements, updateRequirement, createRequirement, deleteRequirement, canTransition, normalizeSessions } from '../../store/requirements.js';
+import { enqueueSystemTask, finalizeRequirement, finalizePrecheck, archiveRequirement, resolveAssigneeList, hasQueuedTasks, queuedTasks, reqDir, readMapVersion, DOCGEN_GUIDE, docgenAborts, userStoppedSet, docgenLiveLine, registerApiDoc } from './requirement-ops.js';
+import { pickCwdAndDirs, buildSeedPrompt, buildFeatureSnapshot } from './req-logic.js';
 import { getTopFiles, getFeatureIndex } from '../../store/feature-index.js';
+import { getColleague } from '../../store/colleagues.js';
+import { getThread, markRead, appendMessage, dropReqThreads } from '../../store/colleague-messages.js';
+import { getActiveBot, getPluginEnabled } from '../../store/settings.js';
+import { sendTextToUser } from '../../integrations/lark.js';
 import { writePitfalls, ensureClaudeMdRef } from './req-pitfalls.js';
 import { inspectBitable, confirmBug, ignoreBug, retryBug, currentInspectIdentity } from './req-inspect.js';
 import { parseBitableLink } from '../../plugins/team-tools/bug-patrol/logic.js';
@@ -11,6 +15,7 @@ import { extractDocLinks } from '../../channels/feishu-normalize.js';
 import { fetchDocRawContent, resolveWikiNodeObj } from '../../integrations/lark.js';
 import { hasActiveRunForConv } from '../../store/runs.js';
 import { handleReqV2Routes } from './routes-req-v2.js';
+import { autoHandleMessages } from './colleague-auto.js';
 import { sendJson } from './http-util.js';
 import { withJsonBody } from './body.js';
 import { str } from './input.js';
@@ -62,16 +67,16 @@ function handleGet(url, res) {
   // devCwd：开发/系统任务所在的工程目录（pickCwdAndDirs 取第一个工程，与 dispatchSystemTask/runDocgen 同源）。
   // 前端据此按 cwd 定位 Claude 磁盘会话（~/.claude/projects/<encode(cwd)>/<devSession>.jsonl），
   // 用于「开发已完成、过程没进 localStorage」时从 session 转录回放开发过程。
-  const featureSnapshot =
-    r.featureTag && (r.phase === 'dev' || r.phase === 'test')
-      ? (() => {
-          const files = getTopFiles(r.featureTag);
-          return files ? { tag: r.featureTag, files } : null;
-        })()
-      : null;
+  const featureSnapshot = buildFeatureSnapshot(r, getTopFiles);
+  // 开发人员 join：名册在另一个文件，前端两处（评审卡 / 开发右栏）都要显示姓名。
+  // 在这里 join 一次，省掉前端「拿到需求再拉一次名册」的第二跳——
+  // 开发期右栏每 3s 轮询一次本接口，多一跳就是多一倍请求（同 mapLatest 的理由）。
+  // join 规则本身收在 ops 层，与定稿通知、归档快照共用同一份（见 resolveAssigneeList 注释）。
+  const assigneeList = resolveAssigneeList(r.assignees, { reqId: id });
   sendJson(res, 200, {
     ...r,
     devDocLatest,
+    assigneeList,
     // 地图一并带回，省掉前端「拿到需求再拉一次地图」的第二跳（busy 轮询每 3s 一次，多一跳就是多一倍请求）
     mapLatest: readMapVersion(r),
     queued: hasQueuedTasks(id),
@@ -197,6 +202,131 @@ function handleConfig(req, res) {
   });
 }
 
+/**
+ * PUT /api/req/assignees {id, assignees:[colleagueId]} —— 指派 / 修改开发人员。
+ *
+ * 刻意**不**并入 handleConfig：那条路由有「仅评审设计期可修改配置」的整体守卫，
+ * 而开发人员在开发期也要能改。往 handleConfig 里加字段级豁免，会让那句守卫文案变成谎言——
+ * 下一个读 handleConfig 的人必然误判「这里所有字段都只能评审期改」。
+ */
+function handleAssignees(req, res) {
+  return withJsonBody(req, res, (data) => {
+    const id = str(data.id);
+    const r = getRequirement(id);
+    if (!r) return sendJson(res, 404, { error: '需求不存在' });
+    if (r.phase !== 'review' && r.phase !== 'dev') {
+      return sendJson(res, 409, { error: '仅评审期与开发期可修改开发人员' });
+    }
+    if (!Array.isArray(data.assignees)) return sendJson(res, 400, { error: 'assignees 必须是数组' });
+    const ids = [...new Set(data.assignees.filter((x) => typeof x === 'string' && x))];
+    // 存在性校验：允许写入悬空 id 等于让「已移除的同事」凭空长出来，
+    // 而这里的悬空只该由「先指派、后删同事」产生
+    for (const cid of ids) {
+      if (!getColleague(cid)) return sendJson(res, 400, { error: `同事不存在：${cid}` });
+    }
+    const updated = updateRequirement(id, { assignees: ids }, '更新开发人员');
+    logger.info('req-routes', '更新开发人员', { reqId: id, count: ids.length });
+    sendJson(res, 200, { assignees: updated.assignees });
+  });
+}
+
+// ==== GET /api/req/colleague-messages?reqId=&colleagueId= ====
+function handleColleagueMessages(url, res) {
+  const reqId = str(url.searchParams.get('reqId'));
+  const colleagueId = str(url.searchParams.get('colleagueId'));
+  if (!reqId || !colleagueId) return sendJson(res, 400, { error: 'reqId / colleagueId 均必填' });
+  if (!getRequirement(reqId)) return sendJson(res, 404, { error: '需求不存在' });
+  const t = getThread(reqId, colleagueId);
+  sendJson(res, 200, { messages: t.messages, lastInboundAt: t.lastInboundAt });
+}
+
+// ==== POST /api/req/colleague-messages/read {reqId, colleagueId} ====
+function handleColleagueRead(req, res) {
+  return withJsonBody(req, res, (data) => {
+    const reqId = str(data.reqId);
+    const colleagueId = str(data.colleagueId);
+    if (!reqId || !colleagueId) return sendJson(res, 400, { error: 'reqId / colleagueId 均必填' });
+    // 与同组另外三个端点一致地校验需求存在：markRead 对未知会话本就不写盘，
+    // 但少这一句会让「需求已删」和「已读成功」回同一个 200，前端无从区分
+    if (!getRequirement(reqId)) return sendJson(res, 404, { error: '需求不存在' });
+    markRead(reqId, colleagueId);
+    sendJson(res, 200, { ok: true });
+  });
+}
+
+// ==== POST /api/req/colleague-messages/send {reqId, colleagueId, text} ====
+function handleColleagueSend(req, res) {
+  return withJsonBody(req, res, async (data) => {
+    const reqId = str(data.reqId);
+    const colleagueId = str(data.colleagueId);
+    const text = str(data.text);
+    if (!text) return sendJson(res, 400, { error: '消息内容不能为空' });
+    const r = getRequirement(reqId);
+    if (!r) return sendJson(res, 404, { error: '需求不存在' });
+    if (!(r.assignees || []).includes(colleagueId)) {
+      return sendJson(res, 400, { error: '该同事不在本需求的开发人员里' });
+    }
+    const c = getColleague(colleagueId);
+    if (!c) return sendJson(res, 400, { error: '同事不存在' });
+    if (!c.feishuOpenId) return sendJson(res, 400, { error: `${c.name} 未填飞书 open_id，无法发送` });
+
+    // 与二期同一硬约束：名册 open_id 是用启用机器人的凭证取的，open_id 是应用维度的，
+    // 换个应用发根本对不上人
+    const bot = getActiveBot();
+    if (!bot?.appId || !bot?.appSecret) {
+      return sendJson(res, 502, { error: '请先在「托管配置」里启用一个飞书机器人并填全凭证' });
+    }
+    let ok = false;
+    try {
+      ok = await sendTextToUser({ appId: bot.appId, appSecret: bot.appSecret }, c.feishuOpenId, text);
+    } catch (e) {
+      return sendJson(res, 502, { error: '发送失败：' + (e?.message || String(e)) });
+    }
+    // 发送失败不落消息：落了界面会显示一条其实没送达的消息，比不显示更糟
+    if (!ok) return sendJson(res, 502, { error: '飞书发送失败，请检查机器人权限与 open_id' });
+    const entry = appendMessage(reqId, colleagueId, { dir: 'out', text, status: 'read', role: c.role });
+    logger.info('req-routes', '向同事发送消息', { reqId, colleagueId });
+    sendJson(res, 200, { ok: true, message: entry });
+  });
+}
+
+// ==== POST /api/req/colleague-messages/auto {reqId, colleagueId, msgIds} ====
+// 飞书进程在消息归属确定后跨进程触发（四期）。路由只做四道校验就 202 交给 colleague-auto，
+// 分类是 LLM 调用（秒级），不能让飞书侧的 3s 超时等它。
+// handledBy 过滤在这里和 autoHandleMessages 内部各有一份，不要二选一删掉：路由这层是为了「一个 id 都不合法」
+// 能直接 400 给飞书侧留痕；内部那层是因为 autoHandleMessages 是可独立调用的契约、不该信任调用方。
+// 两层都只认 handledBy，而它在 run 收尾（onSettle）才写 —— 入队到收尾之间同 msgId 的重复触发两层都挡不住；
+// 排队中的重复靠 enqueueSystemTask 按 msgId 去重，运行中的重复是已知限制（调用方 notifyAutoHandle 不重试）。
+function handleColleagueAuto(req, res) {
+  return withJsonBody(req, res, (data) => {
+    const reqId = str(data.reqId);
+    const colleagueId = str(data.colleagueId);
+    // 去重：飞书侧偶发重复上报同一 msgId 时，若不去重 accepted 计数会虚高（[m,m] 报 2 实际只处理 1 条）
+    const msgIds = [...new Set((Array.isArray(data.msgIds) ? data.msgIds : []).map((x) => str(x)).filter(Boolean))];
+    // 拍板 #7：自动处理跟随 colleague-relay 插件启停。飞书侧附件链路（relayColleagueAttachment）是刻意绕过
+    // 插件开关的（三期决定：不该因插件停用就让同事发的文档变成「不支持的消息类型」），所以开关只能在这里认——
+    // 否则停用后文字不再中继、文件却仍会烧一次 Haiku 并起 bypassPermissions 的 run
+    if (!getPluginEnabled('colleague-relay')) return sendJson(res, 409, { error: '同事消息中继插件已停用，不自动处理' });
+    const r = getRequirement(reqId);
+    if (!r) return sendJson(res, 404, { error: '需求不存在' });
+    if (r.phase !== 'dev') return sendJson(res, 409, { error: '仅开发期自动处理同事消息' });
+    const c = getColleague(colleagueId);
+    if (!c) return sendJson(res, 400, { error: '同事不存在' });
+    if (c.role !== 'backend') return sendJson(res, 400, { error: '仅后端同事的消息自动处理' });
+    if (!msgIds.length) return sendJson(res, 400, { error: 'msgIds 为空' });
+    // 只认该线程里 dir=in 且尚未处理的：防重复触发与跨线程串号
+    const known = new Set(getThread(reqId, colleagueId).messages.filter((m) => m.dir === 'in' && !m.handledBy).map((m) => m.id));
+    const valid = msgIds.filter((id) => known.has(id));
+    if (!valid.length) return sendJson(res, 400, { error: 'msgIds 不属于该线程或已处理' });
+    // 路由级留痕：访问日志只有 method/path/status，看不到「传了 3 个 id 只受理 1 个」这种部分丢弃
+    logger.info('req-routes', '同事消息自动处理已受理', { reqId, colleagueId, accepted: valid.length, rejected: msgIds.length - valid.length });
+    sendJson(res, 202, { ok: true, accepted: valid.length });
+    autoHandleMessages(r, colleagueId, valid).catch((e) =>
+      logger.error('req-routes', '同事消息自动处理异常', { reqId, colleagueId, err: e?.message || String(e) }),
+    );
+  });
+}
+
 // ==== POST /api/req/doc-from-link {id,url?} ====
 /**
  * 飞书云文档 → 需求文档快照。
@@ -309,12 +439,31 @@ function handleSupplement(req, res) {
   });
 }
 
-// ==== POST /api/req/finalize {id,force} ====
+// ==== GET /api/req/finalize-precheck?id= ====
+// 定稿分支弹框的取数口：列出会建分支的开发工程、各自当前分支与本地分支清单。
+// 单独一个端点而不是并进 /api/req/get：它要跑几条 git 子进程，而 get 是 3s 轮询的热路径
+async function handleFinalizePrecheck(url, res) {
+  const id = str(url.searchParams.get('id'));
+  if (!getRequirement(id)) return sendJson(res, 404, { error: '需求不存在' });
+  const r = await finalizePrecheck(id);
+  if (!r.ok) return sendJson(res, r.status, { error: r.error });
+  sendJson(res, 200, { ok: true, suggested: r.suggested, projects: r.projects });
+}
+
+// ==== POST /api/req/finalize {id,force,branchMode,branch} ====
 function handleFinalize(req, res) {
   return withJsonBody(req, res, async (data) => {
     const id = str(data.id);
     if (!getRequirement(id)) return sendJson(res, 404, { error: '需求不存在' }); // 先 404，不让 finalizeGuard 对 null 回误导性 409
-    const result = await finalizeRequirement(id, { force: !!data.force });
+    // branchMode 白名单收口在这里：透传任意字符串的话 resolveTargetBranch 会走兜底自动命名，
+    // 用户点了「沿用当前分支」却被静默开了新分支——比报错糟得多
+    const rawMode = str(data.branchMode);
+    const branchMode = rawMode === 'current' || rawMode === 'new' ? rawMode : '';
+    const result = await finalizeRequirement(id, {
+      force: !!data.force,
+      branchMode,
+      branch: str(data.branch),
+    });
     if (!result.ok) {
       const body = { error: result.error };
       if (result.warn) {
@@ -323,41 +472,19 @@ function handleFinalize(req, res) {
       }
       return sendJson(res, result.status, body);
     }
-    sendJson(res, 200, { ok: true, branch: result.branch });
+    // notified 原样透传：定稿是重要操作，「哪几位同事没收到、为什么」必须让用户看见，
+    // 否则他会以为消息都送达了、等着对方回复
+    sendJson(res, 200, { ok: true, branch: result.branch, notified: result.notified || null });
   });
 }
 
 // ==== POST /api/req/apidoc {id,name,path} / DELETE /api/req/apidoc {id,docId} ====
-function newApiDocId() {
-  return 'ad_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-}
-
+// 登记逻辑在 requirement-ops#registerApiDoc（与同事消息自动处理共用），路由只做 body 归一与状态码映射
 function handleApidocPost(req, res) {
   return withJsonBody(req, res, (data) => {
-    const id = str(data.id);
-    const r = getRequirement(id);
-    if (!r) return sendJson(res, 404, { error: '需求不存在' });
-    if (r.phase !== 'dev') return sendJson(res, 409, { error: '仅开发期可维护 API 文档' });
-    const name = str(data.name);
-    const p = str(data.path);
-    if (!name || !p) return sendJson(res, 400, { error: 'name/path 均必填' });
-    if (!fs.existsSync(p)) return sendJson(res, 400, { error: '文件不存在：' + p });
-
-    const apiDocs = r.apiDocs || [];
-    const idx = apiDocs.findIndex((d) => d.name === name);
-    const now = new Date().toISOString();
-    let doc, action, nextApiDocs;
-    if (idx >= 0) {
-      doc = { ...apiDocs[idx], path: p, updatedAt: now };
-      nextApiDocs = apiDocs.map((d, i) => (i === idx ? doc : d));
-      action = '更新';
-    } else {
-      doc = { id: newApiDocId(), name, path: p, updatedAt: now };
-      nextApiDocs = [...apiDocs, doc];
-      action = '新增';
-    }
-    updateRequirement(id, { apiDocs: nextApiDocs }, `API 文档${action}：${name}`);
-    sendJson(res, 202, { ok: true, action, doc });
+    const result = registerApiDoc(getRequirement(str(data.id)), { name: str(data.name), path: str(data.path) });
+    if (!result.ok) return sendJson(res, result.status, { error: result.error });
+    sendJson(res, 202, { ok: true, action: result.action, doc: result.doc });
   });
 }
 
@@ -464,6 +591,40 @@ function handleDiscard(req, res) {
     updateRequirement(id, { phase: 'discarded', discardedAt: Date.now() }, '需求已废弃');
     logger.info('req-routes', '废弃需求', { reqId: id, fromPhase: r.phase });
     sendJson(res, 200, { ok: true });
+  });
+}
+
+// ==== POST /api/req/delete {id} ====
+// 物理移除已废弃的需求。只开放给 discarded：活跃需求的入口是「废弃」，已归档需求是存档不该删，
+// 侧栏右键菜单也只对废弃行给「移除」——这里把同一条契约在服务端再钉一遍，防 API 直调绕过。
+function handleDelete(req, res) {
+  return withJsonBody(req, res, (data) => {
+    const id = str(data.id);
+    if (!id) return sendJson(res, 400, { error: 'id 不能为空' });
+    const r = getRequirement(id);
+    if (!r) return sendJson(res, 404, { error: '需求不存在' });
+    if (r.phase !== 'discarded') return sendJson(res, 409, { error: '仅已废弃的需求可移除' });
+    if (r.busy || hasQueuedTasks(id)) return sendJson(res, 409, { error: '有任务进行中或排队，请稍候' });
+
+    // 会话 id 必须在删记录之前取：删完就再也查不到它绑过哪些 conv，
+    // 前端 localStorage 里的聊天记录就会变成永远清不掉的孤儿。
+    const convIds = [...new Set(normalizeSessions(r).map((s) => s.convId).filter(Boolean))];
+
+    deleteRequirement(id);
+    // 磁盘产物与同事对话紧随其后。两者失败都不回滚记录——记录已删是用户看得见的结果，
+    // 为残留文件把需求变回来只会更费解；留 warn 供事后清理。
+    try {
+      fs.rmSync(reqDir(id), { recursive: true, force: true });
+    } catch (e) {
+      logger.warn('req-routes', '移除需求目录失败', { reqId: id, err: e?.message || String(e) });
+    }
+    try {
+      dropReqThreads(id);
+    } catch (e) {
+      logger.warn('req-routes', '移除同事对话失败', { reqId: id, err: e?.message || String(e) });
+    }
+    logger.info('req-routes', '移除需求', { reqId: id, convIds: convIds.length });
+    sendJson(res, 200, { ok: true, convIds });
   });
 }
 
@@ -721,10 +882,16 @@ export function handleRequirementRoutes(req, res, url) {
   if (pathname === '/api/req/get' && method === 'GET') return handleGet(url, res);
   if (pathname === '/api/req/doc' && method === 'GET') return handleDoc(url, res);
   if (pathname === '/api/req/config' && method === 'PUT') return handleConfig(req, res);
+  if (pathname === '/api/req/assignees' && method === 'PUT') return handleAssignees(req, res);
+  if (pathname === '/api/req/colleague-messages' && method === 'GET') return handleColleagueMessages(url, res);
+  if (pathname === '/api/req/colleague-messages/read' && method === 'POST') return handleColleagueRead(req, res);
+  if (pathname === '/api/req/colleague-messages/send' && method === 'POST') return handleColleagueSend(req, res);
+  if (pathname === '/api/req/colleague-messages/auto' && method === 'POST') return handleColleagueAuto(req, res);
   if (pathname === '/api/req/doc-from-link' && method === 'POST') return handleDocFromLink(req, res);
   if (pathname === '/api/req/docgen' && method === 'POST') return handleDocgen(req, res);
   if (pathname === '/api/req/docgen/stop' && method === 'POST') return handleDocgenStop(req, res);
   if (pathname === '/api/req/supplement' && method === 'POST') return handleSupplement(req, res);
+  if (pathname === '/api/req/finalize-precheck' && method === 'GET') return handleFinalizePrecheck(url, res);
   if (pathname === '/api/req/finalize' && method === 'POST') return handleFinalize(req, res);
   if (pathname === '/api/req/apidoc' && method === 'POST') return handleApidocPost(req, res);
   if (pathname === '/api/req/apidoc' && method === 'DELETE') return handleApidocDelete(req, res);
@@ -738,6 +905,7 @@ export function handleRequirementRoutes(req, res, url) {
   if (pathname === '/api/req/test-pass' && method === 'POST') return handleTestPass(req, res);
   if (pathname === '/api/req/archive' && method === 'POST') return handleArchive(req, res);
   if (pathname === '/api/req/discard' && method === 'POST') return handleDiscard(req, res);
+  if (pathname === '/api/req/delete' && method === 'POST') return handleDelete(req, res);
   if (pathname === '/api/req/bitable' && method === 'POST') return handleBitable(req, res);
   if (pathname === '/api/req/bug/confirm' && method === 'POST') return handleBugConfirm(req, res);
   if (pathname === '/api/req/bug/ignore' && method === 'POST') return handleBugIgnore(req, res);

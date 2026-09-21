@@ -10,6 +10,7 @@ import { loadLogs } from './js/logs-panel.js';
 import { loadSettings, bindConfigTransfer } from './js/settings-panel.js';
 import './js/actions-panel.js'; // 副作用：动作配置面板自绑定
 import './js/bots-panel.js'; // 副作用：机器人面板自绑定（托管配置 tab）
+import './js/colleagues-panel.js'; // 副作用：同事名册面板自绑定（同事设置 tab）
 import './js/sidebar.js'; // 副作用：侧边栏展开/收起自初始化
 import { startTaskPolling, stopTaskPolling, requestNotifyPermission, refreshTaskBadge, bindTasksNav } from './js/tasks-panel.js';
 import { initChat, chatOnShow, bindChatNav, bindMarkdownNav, refreshAskChip, openConv, renderConvListNow, applyInjectedItems, getCurrentConvId } from './js/chat.js';
@@ -142,6 +143,9 @@ setOverlayHandoff(maybeStartOnboarding);
             if (title) title.textContent = '工具';
             if (sidebarSwitch) sidebarSwitch.hidden = true;
             window._setSidebarCreateVisible?.(false);
+            // 用户此刻才看得见「项目优化」那张卡片，探测放在这里既及时又天然节流。
+            // 这也是页面刷新后标签能恢复的唯一路径——刷新会清掉内存里的 SSE 状态
+            window._refreshOptimizeBadge?.();
           } else {
             // 退出工具模式：恢复切换 tab，交由 initSidebarSwitch 接管
             if (toolsList) toolsList.hidden = true;

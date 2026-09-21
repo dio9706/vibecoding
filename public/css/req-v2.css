@@ -239,21 +239,29 @@
 /* 跳转动作要盖掉上一条给逻辑点符号（＋/~/－）设的等宽粗体 */
 .rq-jump-item i.rq-elink { font-family: inherit; font-weight: 400; font-size: 11.5px; color: var(--faint); }
 
-/* ── 设计稿挂载 / 还原 ────────────────────────────────────────────────── */
-.rq-figrow { display: flex; gap: 8px; }
+/* ── 设计稿挂载 / 还原（一页可挂多张，对应页面的不同状态）─────────────── */
+.rq-figrow { display: flex; gap: 8px; margin-top: 10px; }
 .rq-figrow input {
   flex: 1; min-width: 0; padding: 8px 11px; border-radius: 8px;
   background: var(--panel-2, #1b1c26); border: 1px solid var(--border-soft);
   color: var(--text); font-family: var(--mono, monospace); font-size: 12px; outline: none;
 }
+.rq-figrow input.rq-figlabel { flex: 0 0 92px; font-family: inherit; }
 .rq-figrow input:focus { border-color: var(--accent); }
 .rq-tip { font-size: 12px; color: var(--faint); margin-top: 8px; line-height: 1.6; }
 .rq-figcard { border: 1px solid var(--border-soft); border-radius: 10px; overflow: hidden; }
+.rq-figitem + .rq-figitem { border-top: 1px solid var(--border-soft); }
 .rq-fh { display: flex; align-items: center; gap: 8px; padding: 9px 12px; background: var(--panel-2, #1b1c26); font-size: 12.5px; }
 .rq-fh .rq-ok { color: var(--green); }
+.rq-flabel {
+  flex: 0 0 auto; font-size: 11px; padding: 1px 7px; border-radius: 4px;
+  background: rgba(91, 141, 239, 0.16); color: var(--blue); white-space: nowrap;
+  max-width: 120px; overflow: hidden; text-overflow: ellipsis;
+}
 .rq-furl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 .rq-fb { padding: 11px 12px; font-size: 12px; color: var(--muted); }
 .rq-restored { color: var(--green); margin-bottom: 9px; }
+.rq-unrestored { color: var(--faint); margin-bottom: 9px; }
 .rq-facts { display: flex; gap: 8px; }
 
 /* ── 开发期右栏「需求管理」段 ─────────────────────────────────────────── */
@@ -271,11 +279,41 @@
 .rq-rt { flex: 1; min-width: 0; }
 .rq-rn { font-size: 11px; color: var(--faint); font-family: var(--mono, monospace); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* ── 需求变动弹框 ─────────────────────────────────────────────────────── */
-.rq-change-modal { width: min(600px, 94vw); }
+/* ── 右侧抽屉：需求变动 / 开发人员 / UI 规范 共用（见 js/req-drawer.js） ──────
+   刻意继承 .modal 的外观与 head/body/foot 排版，这里只覆盖定位与尺寸四件事。
+   没有遮罩：抽屉的意义就是让聊天区可读可点，加回遮罩等于又把它锁上了。 */
+.rq-drawer {
+  position: fixed;
+  top: 96px; /* 评审期（panel-view）没有需求横幅，按无横幅时的顶边算 */
+  right: 0; /* 评审期没有右栏，贴窗口右边缘 */
+  width: min(420px, calc(100vw - 24px)); /* 420 = 原需求变动弹框 600 的 70% */
+  height: 50vh;
+  max-height: none; /* 盖掉 .modal 的 82vh，否则矮屏上两者打架 */
+  border-radius: 12px 0 0 12px; /* 贴边那侧不留圆角 */
+  box-shadow: -10px 0 28px rgba(0, 0, 0, 0.3);
+  z-index: 40; /* 高于 .req-rail(30)，低于 .mask(50)：抽屉里仍可弹确认框 */
+  animation: rqDrawerIn 0.18s ease; /* 盖掉 .modal 的居中缩放动画 */
+}
+/* 开发期：右栏占着最右 300px，抽屉贴它的左边缘，顶边与它齐平。
+   --req-rail-top 由 req-chat.js 的 syncRailTop 写（需求横幅底边），横幅被
+   #tokenBanner 等下推时会跟着走 —— 与 .req-rail 同一口径，两者才不会错开。
+   刻意只在 with-rail 下取这个变量：评审期右栏不显示、syncRailTop 也不更新，
+   再读它就会沿用上一次开发期的残留值。 */
+.rq-drawer.with-rail {
+  top: var(--req-rail-top, 96px);
+  right: 300px;
+  width: min(420px, calc(100vw - 324px));
+}
+@keyframes rqDrawerIn { from { transform: translateX(16px); opacity: 0; } }
+/* 高度固定后，body 吃掉剩余空间、foot 不被压缩 —— 按钮由此固定在底部不随内容滚动。
+   min-height:0 是 flex 子项能真正滚动的前提（否则被内容撑破，滚动条落不到 body 上）。 */
+.rq-drawer .body { flex: 1; min-height: 0; }
+.rq-drawer .confirm-foot { flex-shrink: 0; }
+
+/* ── 需求变动抽屉 ─────────────────────────────────────────────────────── */
 .rq-change-sub { margin: 0 0 12px; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
 .rq-change-text {
-  width: 100%; min-height: 150px; resize: vertical; padding: 12px 14px; border-radius: 10px;
+  width: 100%; min-height: 110px; resize: vertical; padding: 12px 14px; border-radius: 10px;
   background: var(--panel-2, #1b1c26); border: 1px solid var(--border-soft);
   color: var(--text); font: inherit; font-size: 13.5px; line-height: 1.7; outline: none;
 }
@@ -300,16 +338,19 @@
 .rq-scope button.on { border-color: var(--accent); background: var(--accent-ultra-soft); color: var(--accent-hi); }
 .rq-scope button:disabled { opacity: 0.4; cursor: not-allowed; }
 
-/* ── UI 规范面板 ──────────────────────────────────────────────────────── */
-.rq-spec-modal { width: min(720px, 94vw); }
-.rq-spec-meta { font-family: var(--mono, monospace); font-size: 11.5px; color: var(--faint); margin-bottom: 10px; overflow-wrap: anywhere; }
+/* ── UI 规范抽屉 ──────────────────────────────────────────────────────── */
+/* 这里编辑的是整段规范文本，输入框该吃满抽屉的剩余高度；抽屉高度固定，
+   留着 resize 把手只会把 foot 顶出可视区，故关掉。 */
+.rq-spec-drawer .body { display: flex; flex-direction: column; }
+.rq-spec-meta { font-family: var(--mono, monospace); font-size: 11.5px; color: var(--faint); margin-bottom: 10px; overflow-wrap: anywhere; flex-shrink: 0; }
 .rq-spec-text {
-  width: 100%; min-height: 360px; resize: vertical; padding: 12px 14px; border-radius: 10px;
+  width: 100%; flex: 1; min-height: 120px; resize: none; padding: 12px 14px; border-radius: 10px;
   background: var(--panel-2, #1b1c26); border: 1px solid var(--border-soft);
   color: var(--text); font-family: var(--mono, monospace); font-size: 12.5px; line-height: 1.75; outline: none;
 }
 .rq-spec-text:focus { border-color: var(--accent); }
-.rq-spec-foot { align-items: center; }
+/* 「从代码抽草稿」在左、取消/保存在右，靠 .rq-spec-gap 撑开 */
+.rq-spec-drawer .confirm-foot { align-items: center; }
 .rq-spec-gap { flex: 1; }
 
 /* ── 地图浮层（开发/测试期从右栏打开）─────────────────────────────────── */

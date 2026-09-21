@@ -43,7 +43,7 @@
 - `settings.js` — 设置持久化唯一入口（`settings.json`）：飞书凭证 + token 池 + bots + 文案 + UI 偏好；含明文密钥（已 gitignore）。
 - `config-transfer.js` — 配置导入导出纯函数（无 I/O）：`buildExport`/`parseImport`，类型 + 版本校验。
 - `bots-migration.js` — bots 迁移编排：旧单凭证 → 机器人实体 + 收养孤儿动作，幂等。
-- `action-configs.js` — 通用动作配置 CRUD（`action-configs.json`），按 bot 归属。
+- `action-configs.js` — 通用动作配置 CRUD（`action-configs.json`），按 bot 归属。另含关键词自学习的两个专用口：`appendAutoKeyword`（**整个合并过程都在 `updateJson` 回调内**完成，去重与配额在锁内重做一次 —— 调用方过闸时读到的是快照，在外面读改写会被另一进程覆盖）与 `reconcileAutoKeywords`（纯函数对账：人工删掉的自动词进 `rejectedKeywords`，否则下次同样的话一来会被原样学回去；已知取舍是分不清「改字」和「删旧词」，详见该函数 JSDoc）。
 - `var-contract-migration.js` — 动作变量抽取契约的一次性迁移：给存量 `env`/`phone` 变量补 `preset`。**用条目上的 `_varContractMigrated` 标记位保证只跑一次**，不是每次按变量名重扫（后者会让用户手动删掉的 `preset` 一重启就被加回来）。
 
 ### 业务领域 store
@@ -53,10 +53,14 @@
 - `conv-messages.js` — 应用自持会话消息（per convId 的 ModelMessage 数组）。
 - `feature-index.js` — 功能账本：按功能标签记 git diff 收割的文件频次，开发期优先读。
 - `optimize.js` — 项目优化记录（`optimize.json`），含串行闸 `acquireBusy` + LLM 缓存。
+- `checkup-ignores.js` — 体检豁免清单（`checkup-ignores.json`）：用户点「这不是问题」的记录，键为 `(dim, code, file)` 三元组（**不含行号**，行号会漂移）。独立于 `optimize.json` 的理由见文件头注释（那份是高频读改写的体检产出，这份是低频长寿的人工判断）。
 - `review-log.js` — 评审判例库（`review-log.jsonl`，追加写）。
 - `ui-specs.js` — 按工程目录归属的 UI 规范文本。
 - `user-vars.js` — 用户变量 CRUD。
 - `saved-dirs.js` — web 端常用工作目录（最多 20）。
+- `colleague-messages.js` — 同事 ↔ 机器人的需求对话流（`colleague-messages.json`）：per `reqId × colleagueId` 的消息数组 + `_pending` 待归属缓冲。消息条目带 `role`/`files[].path`/`status`/`handledBy`/`handledNote`。`status` 是「主机看没看过」，`handledBy`（`manual|ai`，取值收在 `HANDLED_BY`）是「谁处理了」，**两维独立**：四期的 `markHandled` 只写后者，AI 处理过主机仍见红点；非法 `handledBy` 直接拒绝不写盘（否则「标记已处理」会把条目改回 null 还返回 true）。`flushPending` 返回 `{count, ids}`，`ids` 供四期按条触发自动处理。飞书进程写入站、web 进程写出站与已读，**并发写同一文件**，必须走 `updateJson`。
+- `patrol-loop.js` — BUG 巡检循环状态（`patrol-loop.json`）：**单例**，存 `active/stopping/phase/seen/cycleTaskIds/retried/report`。落盘而非内存的理由见文件头（循环最长跑 12 小时，pm2 重启是常态，内存态会让它在无人察觉时静默消失）。`seen`/`retried`/`report` 的增量更新必须走 `markSeen`/`markRetried`/`pushReport`/`pushCycleTask` 这四个**锁内**专用口，`updateLoop` 是整体替换。
+- `colleagues.js` — 同事名册（`colleagues.json`）：按职位（`ROLES` 6 类枚举）维护人员的姓名 / 备注 / 飞书 open_id。独立于 `settings.json` 的理由见文件头注释（后者含明文密钥且整份参与配置导入导出）。校验规则收在 `validateColleagueInput` 一处，HTTP 层与 store 写入口共用。
 
 ## 关键流程
 
@@ -103,7 +107,11 @@
 - **要改崩溃续跑的锚点字段或孤儿判定** → `active-runs.js`（`partitionActiveRuns`）；改续跑熔断次数 → `pending-resume.js`（`shouldAbandonResume`）。
 - **要改设置结构 / 默认值 / 归一逻辑** → `settings.js`（`DEFAULTS` + `normalizeSettings`，新字段必须在 normalize 里透传，否则整份回写时会被丢掉）。
 - **要改需求阶段流转** → `requirements.js`（`PHASE_FLOW` + `canTransition`）。
+- **要改同事对话的存储形状 / 未读口径 / 待归属缓冲** → `colleague-messages.js`；注意 `_pending` 与 `reqId` 共用一个顶层命名空间（靠下划线前缀隔离），新增顶层键前先读该文件头注释。
+- **要改同事名册的职位枚举 / 校验规则** → `colleagues.js`（`ROLES` + `validateColleagueInput`）；注意非法 role 与无 id 条目在 `normalizeColleagues` 里是**保留并补齐**而非丢弃，改这条前先读该函数注释。
 - **要改飞书通知登记 / 补充收件箱** → `conv-notify.js`。
 - **要改记忆库条目结构或扫描游标** → `memory-bank.js`；改用户输入采集埋点 → `user-log.js`；改终端转录扫描 → `transcript.js`。
 - **要改配置导入导出的版本兼容** → `config-transfer.js`（`CONFIG_VERSION` / `SUPPORTED_VERSIONS`）；改迁移编排 → `bots-migration.js`。
 - **要改功能账本的收割 / 取用** → `feature-index.js`（`harvestFiles` / `getTopFiles`）。
+- **要改自动学来的关键词怎么落盘 / 怎么对账** → `action-configs.js` 的 `appendAutoKeyword` / `reconcileAutoKeywords`；配额的单一真相源在 `plugins/action-runner/feature/keyword-guard.js#MAX_AUTO_KEYWORDS`，经 `meta.max` 传进来（store 是下层，不能反向 import plugins）。
+- **要改豁免记录的键或去重口径** → `checkup-ignores.js` 的 `sameRule`；改它之前先读 spec `docs/superpowers/specs/2026-09-18-checkup-phase2-design.md` §1.1（粒度是拍板过的取舍，不是随手选的）。
