@@ -115,6 +115,79 @@ export function handleFsRead(url, res) {
   }
 }
 
+/**
+ * 纯函数：校验 /api/fs/download 的 path 参数。
+ *
+ * 安全边界与 `/api/fs/read` **刻意不同**：那条靠扩展名白名单（.md/.markdown）放行任意绝对路径，
+ * 放出去的是纯文本；下载必须放开扩展名（附件可能是 json/yaml/pdf/图片），此时再不限目录，
+ * 这个端点就成了任意文件读取口 —— 拿 `?path=C:\Users\x\.ssh\id_rsa` 就能把私钥下走。
+ *
+ * 所以改用**目录白名单**：只放行 `.uploads/` 树内的文件。这刚好覆盖全部「附件」来源 ——
+ * 同事消息附件在 `.uploads/feishu/`、API 文档在 `.uploads/apidocs/`、web 拖入的在顶层。
+ * 用 `path.relative` 判归属而不是 `startsWith`：后者在 Windows 上对盘符大小写敏感
+ *（`C:\` 与 `c:\` 会判成不同根），而 win32 的 relative 本身是大小写不敏感的。
+ * 判据里的 `..` 前缀同时挡掉了 `%2e%2e` 一类穿越 —— resolve 之后才比较，穿越已被折叠掉。
+ *
+ * @returns {{ok:true, path:string}|{ok:false, error:string}}
+ */
+export function validateDownloadPath(raw) {
+  const p = str(raw);
+  if (!p) return { ok: false, error: '缺少 path 参数' };
+  if (!path.isAbsolute(p)) return { ok: false, error: '仅支持绝对路径' };
+  const resolved = path.resolve(p);
+  const rel = path.relative(path.resolve(UPLOADS_DIR), resolved);
+  // 空串 = 就是目录本身；`..` 开头或绝对路径 = 在白名单根之外
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    return { ok: false, error: '只能下载应用附件目录内的文件' };
+  }
+  return { ok: true, path: resolved };
+}
+
+/**
+ * 构造 Content-Disposition。
+ *
+ * 两份文件名缺一不可：`filename=` 只能是 ASCII（中文名到这里会变成乱码或被整个丢弃），
+ * `filename*=` 才是 RFC 5987 的 UTF-8 形式、现代浏览器优先认它。只给后者的话，
+ * 老浏览器会退化成用 URL 末段当文件名（下出来是个没扩展名的 `download`）。
+ *
+ * 控制字符与引号必须剥掉：它们能提前闭合 header 值，是 header 注入的经典入口。
+ */
+export function buildContentDisposition(name) {
+  const clean = String(name || 'download').replace(/[\r\n"\\]/g, '').replace(/[\u0000-\u001f\u007f]/g, '') || 'download';
+  const ascii = clean.replace(/[^\x20-\x7e]/g, '_'); // 非 ASCII 一律占位，保住扩展名的位置
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(clean)}`;
+}
+
+/**
+ * GET /api/fs/download?path=&name= —— 下载附件（原样回文件字节，浏览器另存为）。
+ *
+ * `name` 可选，用于让下载下来的文件叫「登记名」而不是盘上带随机前缀的副本名
+ *（API 文档在盘上是 `muc9i5asi7q-api.md`，用户要的是 `api.md`）。
+ * 走流而不是 readFileSync：附件没有 10MB 上限那样的约束，整份读进内存没有必要。
+ */
+export function handleFsDownload(url, res) {
+  const v = validateDownloadPath(url.searchParams.get('path'));
+  if (!v.ok) return sendJson(res, 400, { error: v.error });
+  let st;
+  try {
+    st = fs.statSync(v.path);
+  } catch {
+    return sendJson(res, 404, { error: '文件不存在：' + v.path });
+  }
+  if (!st.isFile()) return sendJson(res, 400, { error: '不是普通文件' });
+  const name = str(url.searchParams.get('name')) || path.basename(v.path);
+  res.writeHead(200, {
+    // 一律 octet-stream：附件是给用户存盘的，不该让浏览器按类型内联渲染（html 附件会当页面跑起来）
+    'Content-Type': 'application/octet-stream',
+    'Content-Length': st.size,
+    'Content-Disposition': buildContentDisposition(name),
+  });
+  const stream = fs.createReadStream(v.path);
+  // 流中途出错时 header 已发出，改不了状态码，只能断开——继续挂着会让浏览器一直转圈
+  stream.on('error', () => res.destroy());
+  stream.pipe(res);
+}
+
 /** 上传拖入的文件副本到 .uploads/，返回绝对路径（浏览器拿不到原始路径，故存副本供 Claude 读取） */
 export function handleUpload(req, res, url) {
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
@@ -287,7 +360,12 @@ export function pruneUploads() {
     for (const f of fs.readdirSync(dir)) {
       const fp = path.join(dir, f);
       try {
-        if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp);
+        const st = fs.statSync(fp);
+        // 子目录一律跳过：feishu/（收信原件）与 apidocs/（API 文档档案，见 requirement-ops.js）
+        // 都靠「只扫顶层」长期存活。此前这层保护纯属巧合——unlinkSync 删目录必然抛错被下面的
+        // catch 吞掉。显式写出来，免得哪天有人图省事换成 rmSync 就把两份档案一起清了。
+        if (st.isDirectory()) continue;
+        if (st.mtimeMs < cutoff) fs.unlinkSync(fp);
       } catch {
         /* 单个文件失败忽略 */
       }

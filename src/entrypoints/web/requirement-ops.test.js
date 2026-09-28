@@ -758,6 +758,32 @@ test('registerApiDoc：同一 req 快照连登两份异名文档，两份都在�
   assert.deepEqual(names, ['snap-a.md', 'snap-b.md']);
 });
 
+test('registerApiDoc：登记的是 .uploads/apidocs/ 下的副本，不是来源路径（回归：顶层 7 天被 pruneUploads 清）', () => {
+  const r = createRequirement({ title: 'apidoc 存档' });
+  updateRequirement(r.id, { phase: 'dev' });
+  // 模拟 web 手动上传：来源就落在 .uploads/ 顶层，正是会被 pruneUploads 清掉的位置
+  const uploadsDir = path.join(process.env.APP_DATA_DIR, '.uploads');
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  const src = path.join(uploadsDir, 'muc9i5asi7q-order-api.md');
+  fs.writeFileSync(src, '# ORDER API', 'utf8');
+
+  const a = registerApiDoc(getRequirement(r.id), { name: 'order-api.md', path: src });
+  assert.equal(a.ok, true);
+  const docsDir = path.join(uploadsDir, 'apidocs');
+  assert.equal(path.dirname(a.doc.path), docsDir, '登记的 path 应指向 apidocs 子目录');
+  assert.notEqual(a.doc.path, src, '不得直接登记来源路径');
+  assert.equal(fs.readFileSync(a.doc.path, 'utf8'), '# ORDER API', '副本内容须与来源一致');
+  assert.ok(fs.existsSync(src), '来源文件不应被移走（材料池等链路可能还在引用）');
+  assert.match(path.basename(a.doc.path), /-order-api\.md$/, '副本名保留原文件名与扩展名');
+
+  // 幂等：拿副本路径再登一次不再复制，否则重试链路会一路堆副本。
+  // 按「本次调用的增量」断言而非目录内绝对数量——同文件其它用例也往这个目录写副本
+  const before = fs.readdirSync(docsDir).length;
+  const b = registerApiDoc(getRequirement(r.id), { name: 'order-api.md', path: a.doc.path });
+  assert.equal(b.doc.path, a.doc.path, '来源已在 apidocs 内应原样返回');
+  assert.equal(fs.readdirSync(docsDir).length, before, '幂等登记不应新增副本');
+});
+
 test('registerApiDoc：非 dev 期 409、缺参 400、文件不存在 400、需求空 404', () => {
   const r = createRequirement({ title: 'apidoc 守卫' });
   const f = path.join(process.env.APP_DATA_DIR, 'x.md');
@@ -772,20 +798,20 @@ test('registerApiDoc：非 dev 期 409、缺参 400、文件不存在 400、需�
 // ---- colleague-dev（四期系统任务）----
 
 const { addColleague } = await import('../../store/colleagues.js');
-const { appendMessage, getThread } = await import('../../store/colleague-messages.js');
+const { appendTo, getColleagueThread } = await import('../../store/colleague-messages.js');
 
 test('dispatch(colleague-dev)：非 dev 期作废留痕，不写 busy、不建子会话，且消息标 handledBy:ai', async () => {
   const r = createRequirement({ title: 'colleague-dev 守卫' });
   updateRequirement(r.id, { phase: 'test' });
   const c = addColleague({ name: 'b', role: 'backend' });
-  const msg = appendMessage(r.id, c.id, { dir: 'in', text: 'x', role: 'backend' });
+  const msg = appendTo(c.id, { dir: 'in', text: 'x', role: 'backend', reqId: r.id });
   dispatch({ reqId: r.id, kind: 'colleague-dev', payload: { msgId: msg.id, colleagueId: c.id, prompt: 'p', title: 'T' } });
   await new Promise((res) => setImmediate(res));
   const after = getRequirement(r.id);
   assert.equal(after.busy, null);
   assert.deepEqual(after.sessions, []);
   assert.equal(after.history.at(-1).event, '系统任务 colleague-dev 作废：需求已离开开发期');
-  assert.equal(getThread(r.id, c.id).messages[0].handledBy, 'ai');
+  assert.equal(getColleagueThread(c.id).messages[0].handledBy, 'ai');
 });
 
 test('dispatch(colleague-dev)：dev 期但无工程目录时作废留痕', () => {

@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createServer } from 'node:http';
+import { Readable } from 'node:stream';
 
 // 防 env 污染：bitable 路由的「必然失败路径」测试依赖空凭证时 Lark SDK 同步抛错（见对应用例注释）。
 // 若 shell 环境导出了真实 LARK_APP_ID/LARK_APP_SECRET，会变成真的发起网络请求，必须先清空。
@@ -18,11 +19,12 @@ delete process.env.LARK_APP_SECRET;
 // 隔离数据目录：本模块间接 import store/requirements.js（读盘），须在 import 前设置
 process.env.APP_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'req-routes-'));
 
-const { handleRequirementRoutes } = await import('./routes-requirements.js');
-const { updateRequirement, getRequirement } = await import('../../store/requirements.js');
+const { handleRequirementRoutes, handleColleagueAgentTurn, handleColleagueMessages, handleDelete } = await import('./routes-requirements.js');
+const { updateRequirement, getRequirement, createRequirement } = await import('../../store/requirements.js');
 const { hasQueuedTasks, reqDir } = await import('./requirement-ops.js');
 const { setMyFeishuOpenId } = await import('../../store/settings.js');
-const { appendMessage, getThread } = await import('../../store/colleague-messages.js');
+const { appendTo, getColleagueThread } = await import('../../store/colleague-messages.js');
+const { createRun, finishRun } = await import('../../store/runs.js');
 
 function startServer() {
   const server = createServer((req, res) => {
@@ -68,8 +70,12 @@ test('create → list → get 回读：201/200，list 投影字段，get 含 dev
   assert.equal(list.status, 200);
   const item = list.json.requirements.find((r) => r.id === id);
   assert.ok(item, '新建需求应出现在列表中');
-  assert.deepEqual(Object.keys(item).sort(), ['busy', 'id', 'phase', 'sessions', 'title', 'updatedAt'].sort());
+  assert.deepEqual(
+    Object.keys(item).sort(),
+    ['busy', 'id', 'phase', 'sessions', 'title', 'unreadTotal', 'updatedAt'].sort(),
+  );
   assert.equal(item.busy, false);
+  assert.equal(item.unreadTotal, 0, '无同事消息时未读数为 0（侧栏据此决定不打小红点）');
 
   const got = await get('/api/req/get?id=' + id);
   assert.equal(got.status, 200);
@@ -425,6 +431,26 @@ test('archive：需求不存在 404；非 archiving 期（相邻推进不满足�
   assert.equal(after.phase, 'archived');
   assert.ok(after.archive?.summary);
   assert.equal(after.archive.note, '本次改动备注');
+});
+
+// 本用例必须排在文件末尾：它是这里唯一配「真实存在的目录」的地方，配完新建的需求就会继承到
+// 工程，会击穿前面「无工程 → 400」那类断言。收尾处还要把两条需求的 projects 清回空。
+test('create：工程配置沿用上一个需求（含只读标记）；目录已不存在的槽位不继承', async () => {
+  const liveDir = process.env.APP_DATA_DIR; // 测试数据目录，确定存在
+  const prev = await createReq('工程继承源需求');
+  const cfg = await put('/api/req/config', {
+    id: prev.id,
+    // 后端故意配成只读 + 不存在的目录：一次同时钉住 dev 标记要跟着走、坏路径不跟着走
+    projects: { frontend: { dir: liveDir, dev: false }, backend: { dir: 'D:/not-exist-backend', dev: false } },
+  });
+  assert.equal(cfg.status, 200);
+
+  const next = await createReq('工程继承测试需求');
+  assert.deepEqual(next.projects.frontend, { dir: liveDir, dev: false }, '前端工程连同只读标记一并沿用');
+  assert.equal(next.projects.backend, null, '目录已不存在的槽位留空，不继承坏路径');
+
+  updateRequirement(prev.id, { projects: { frontend: null, backend: null } });
+  updateRequirement(next.id, { projects: { frontend: null, backend: null } });
 });
 
 test('bitable：需求不存在 404；非测试期 409；busy/排队中 409', async () => {
@@ -1123,7 +1149,7 @@ test('定稿通知：未填 open_id / 运营职位 分别进不同的跳过桶',
 
 // ==== 三期：同事消息中继 ====
 
-const { appendMessage: cmAppend } = await import('../../store/colleague-messages.js');
+const { appendTo: cmAppend } = await import('../../store/colleague-messages.js');
 
 test('GET /api/req/get：assigneeList 回填 unreadCount', async () => {
   const c = addColleague({ role: 'backend', name: '后端丙', feishuOpenId: 'ou_be9' });
@@ -1133,8 +1159,8 @@ test('GET /api/req/get：assigneeList 回填 unreadCount', async () => {
   let got = await get('/api/req/get?id=' + r.id);
   assert.equal(got.json.assigneeList[0].unreadCount, 0, '无消息时必须是 0 而不是 undefined');
 
-  cmAppend(r.id, c.id, { dir: 'in', text: '接口文档发你了', role: 'backend' });
-  cmAppend(r.id, c.id, { dir: 'out', text: '收到', status: 'read' });
+  cmAppend(c.id, { dir: 'in', text: '接口文档发你了', role: 'backend', reqId: r.id });
+  cmAppend(c.id, { dir: 'out', text: '收到', status: 'read', reqId: r.id });
   got = await get('/api/req/get?id=' + r.id);
   assert.equal(got.json.assigneeList[0].unreadCount, 1, 'out 方向不计未读');
 });
@@ -1143,7 +1169,7 @@ test('GET /api/req/colleague-messages：回读会话；缺参 400', async () => 
   const c = addColleague({ role: 'product', name: '产品甲', feishuOpenId: 'ou_pm9' });
   const r = await createReq('会话回读验证');
   await put('/api/req/assignees', { id: r.id, assignees: [c.id] });
-  cmAppend(r.id, c.id, { dir: 'in', text: '需求要改', role: 'product' });
+  cmAppend(c.id, { dir: 'in', text: '需求要改', role: 'product', reqId: r.id });
 
   const ok = await get(`/api/req/colleague-messages?reqId=${r.id}&colleagueId=${c.id}`);
   assert.equal(ok.status, 200);
@@ -1154,11 +1180,44 @@ test('GET /api/req/colleague-messages：回读会话；缺参 400', async () => 
   assert.equal((await get('/api/req/colleague-messages')).status, 400);
 });
 
+test('GET /api/req/colleague-messages：需求不存在 → 404', async () => {
+  const r = await get('/api/req/colleague-messages?reqId=r_not_exist&colleagueId=cl_x');
+  assert.equal(r.status, 404);
+});
+
+// 存储从「按需求分组」换成「按人分组」后，reqId 降级为消息上的标签，
+// handleColleagueMessages 现在是「取整条线 → inline 按 reqId 过滤 → 重算 lastInboundAt」。
+// 这两条直调 mockRes（免走真实 HTTP），钉住「同一同事跨两个需求」这个此前没测过的场景。
+test('GET colleague-messages：按 reqId 过滤 —— 主机在需求 A 的面板不该看到需求 B 的对话', async () => {
+  const reqA = await createReq('跨需求过滤A');
+  const reqB = await createReq('跨需求过滤B');
+  cmAppend('cl_1', { dir: 'in', text: '属于A', reqId: reqA.id, at: '2026-09-01T00:00:00Z' });
+  cmAppend('cl_1', { dir: 'in', text: '属于B', reqId: reqB.id, at: '2026-09-09T00:00:00Z' });
+  const res = mockRes();
+  await handleColleagueMessages(new URL(`http://x/api/req/colleague-messages?reqId=${reqA.id}&colleagueId=cl_1`), res);
+  const body = JSON.parse(res.body);
+  assert.equal(body.messages.length, 1);
+  assert.equal(body.messages[0].text, '属于A');
+  // lastInboundAt 必须按**过滤后**的消息算。按整条线算的话，需求 A 的面板上
+  // 「最近来信」会显示需求 B 那条的时间（09-09），而那条消息本身根本不在这个列表里——
+  // 看起来就像「有新消息但我找不到」。这段逻辑从 store 挪进路由层 inline 计算，
+  // 挪的时候最容易只搬过滤、漏掉这一步。
+  assert.equal(body.lastInboundAt, '2026-09-01T00:00:00Z', 'lastInboundAt 不能带进别的需求的时间');
+});
+
+test('GET colleague-messages：无归属标签的消息不出现在任何需求面板里', async () => {
+  const reqA = await createReq('无归属标签验证');
+  cmAppend('cl_2', { dir: 'in', text: '没归属' });
+  const res = mockRes();
+  await handleColleagueMessages(new URL(`http://x/api/req/colleague-messages?reqId=${reqA.id}&colleagueId=cl_2`), res);
+  assert.equal(JSON.parse(res.body).messages.length, 0);
+});
+
 test('POST /api/req/colleague-messages/read：清零未读', async () => {
   const c = addColleague({ role: 'frontend', name: '前端乙', feishuOpenId: 'ou_fe9' });
   const r = await createReq('已读验证');
   await put('/api/req/assignees', { id: r.id, assignees: [c.id] });
-  cmAppend(r.id, c.id, { dir: 'in', text: 'a', role: 'frontend' });
+  cmAppend(c.id, { dir: 'in', text: 'a', role: 'frontend', reqId: r.id });
 
   assert.equal((await post('/api/req/colleague-messages/read', { reqId: r.id, colleagueId: c.id })).status, 200);
   const got = await get('/api/req/get?id=' + r.id);
@@ -1205,7 +1264,7 @@ test('discard → delete：仅 discarded 可移除，且记录/磁盘目录/同�
       { convId: 'conv_del_2', sessionId: null, title: '子', kind: 'sub', createdAt: '2026-09-20T00:00:00Z' },
     ],
   });
-  appendMessage(req.id, 'cl_del', { dir: 'in', text: '同事留言' });
+  appendTo('cl_del', { dir: 'in', text: '同事留言', reqId: req.id });
 
   assert.equal((await post('/api/req/discard', { id: req.id })).status, 200);
   const del = await post('/api/req/delete', { id: req.id });
@@ -1215,7 +1274,7 @@ test('discard → delete：仅 discarded 可移除，且记录/磁盘目录/同�
 
   assert.equal(getRequirement(req.id), null);
   assert.equal(fs.existsSync(docPath), false, '磁盘产物必须跟着走');
-  assert.deepEqual(getThread(req.id, 'cl_del').messages, [], '同事对话必须跟着走');
+  assert.deepEqual(getColleagueThread('cl_del').messages, [], '同事对话必须跟着走');
   assert.equal((await post('/api/req/delete', { id: req.id })).status, 404, '重复移除 → 404');
 });
 
@@ -1234,76 +1293,510 @@ test('delete：busy 中的废弃需求 → 409（不在任务跑着时抽掉它�
   assert.ok(getRequirement(req.id));
 });
 
-// ---- POST /api/req/colleague-messages/auto（四期触发口）----
-// 注：addColleague 已在文件前面「开发人员指派」一节 import 过（同一模块顶层 const，此处直接复用，
-// 不重复 import——重复 `const { addColleague } = await import(...)` 会撞出「重复声明」语法错误）。
+// ---- Task 10：删除需求前先回收 agent worktree（补 spec §5.3）----
+// 走 mockReq/mockRes 直调 handleDelete 注入 runScript 桩：真实 HTTP 路径不带 deps，
+// 走真实 runScript 会去动本机上真实的 git 仓库。
 
-test('/auto：需求不存在 404', async () => {
-  const r = await post('/api/req/colleague-messages/auto', { reqId: 'r_nope', colleagueId: 'c', msgIds: ['m'] });
-  assert.equal(r.status, 404);
+/** 造一个满足 handleDelete 两道前置闸的需求：phase=discarded 且无 busy/排队任务 */
+function seedDiscarded(worktrees) {
+  const r = createRequirement({ title: 'x' });
+  updateRequirement(r.id, { phase: 'discarded', agentWorktrees: worktrees });
+  return r;
+}
+
+test('删除需求：先回收 agent worktree 再删记录（顺序反了就读不到登记）', async () => {
+  const r = seedDiscarded([{ dir: 'D:/p', worktreeDir: 'D:/p.req-a', branch: 'b' }]);
+  const removed = [];
+  const res = mockRes();
+  await handleDelete(mockReq({ id: r.id }), res, {
+    runScript: async (_cmd, args) => (removed.push(args.at(-1)), { ok: true }),
+  });
+  assert.equal(res.statusCode, 200, `应删除成功，实际响应：${res.body}`);
+  assert.deepEqual(removed, ['D:/p.req-a']);
+  assert.equal(getRequirement(r.id), null);
 });
 
-test('/auto：非 dev 期 409', async () => {
-  const req = await createReq('auto 非 dev');
-  const c = addColleague({ name: 'b', role: 'backend' });
-  const m = appendMessage(req.id, c.id, { dir: 'in', text: 'x', role: 'backend' });
-  const r = await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [m.id] });
-  assert.equal(r.status, 409);
-  assert.match(r.json.error, /开发期/);
+test('删除需求：worktree 回收失败不阻塞删除（删不掉临时目录不该卡住用户）', async () => {
+  const r = seedDiscarded([{ dir: 'D:/p', worktreeDir: 'D:/p.req-a', branch: 'b' }]);
+  const res = mockRes();
+  await handleDelete(mockReq({ id: r.id }), res, {
+    runScript: async () => ({ ok: false, err: 'locked' }),
+  });
+  assert.equal(getRequirement(r.id), null, '回收失败也要把需求删掉');
 });
 
-test('/auto：非后端同事 400', async () => {
-  const req = await createReq('auto 非后端');
-  updateRequirement(req.id, { phase: 'dev' });
-  const c = addColleague({ name: 'p', role: 'product' });
-  const m = appendMessage(req.id, c.id, { dir: 'in', text: 'x', role: 'product' });
-  const r = await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [m.id] });
-  assert.equal(r.status, 400);
-  assert.match(r.json.error, /后端/);
-  // 同事不存在与非后端是两条独立错误：飞书侧 warn 要能看出真实原因
-  const ghost = await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: 'cl_ghost', msgIds: [m.id] });
-  assert.equal(ghost.status, 400);
-  assert.match(ghost.json.error, /不存在/);
+test('删除需求：没有 agentWorktrees 登记时不调 runScript（别对着空列表空跑 git）', async () => {
+  const r = seedDiscarded([]);
+  let called = 0;
+  const res = mockRes();
+  await handleDelete(mockReq({ id: r.id }), res, { runScript: async () => (called++, { ok: true }) });
+  assert.equal(called, 0);
+  assert.equal(getRequirement(r.id), null);
 });
 
-test('/auto：msgIds 为空 / 不属于线程 / 已 handled → 400', async () => {
-  const req = await createReq('auto msgIds');
-  updateRequirement(req.id, { phase: 'dev' });
-  const c = addColleague({ name: 'b', role: 'backend' });
-  const done = appendMessage(req.id, c.id, { dir: 'in', text: 'x', role: 'backend', handledBy: 'manual' });
-  assert.equal((await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [] })).status, 400);
-  assert.equal((await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: ['cm_ghost'] })).status, 400);
-  assert.equal((await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [done.id] })).status, 400);
+test('删除需求：存量需求盘上根本没有 agentWorktrees 字段，也要能删', async () => {
+  // 不是假想场景：`agentWorktrees` 是 P3 Task 10 才加的字段，此前建的需求盘上一个都没有。
+  // 上面那条传的是空数组（字段存在、值为空），这条是字段**整个不存在**（undefined）——
+  // 回收侧靠 `r.agentWorktrees || []` 兜底，兜不住就是 `undefined is not iterable`，
+  // 用户删一个老需求直接 500。
+  const r = createRequirement({ title: 'x' });
+  updateRequirement(r.id, { phase: 'discarded', agentWorktrees: undefined });
+  let called = 0;
+  const res = mockRes();
+  await handleDelete(mockReq({ id: r.id }), res, { runScript: async () => (called++, { ok: true }) });
+  assert.equal(res.statusCode, 200, `老需求应能正常删除，实际响应：${res.body}`);
+  assert.equal(called, 0);
+  assert.equal(getRequirement(r.id), null);
 });
 
-test('/auto：校验通过 202 并回 accepted 数（只数有效 id）', async () => {
-  const req = await createReq('auto 202');
-  updateRequirement(req.id, { phase: 'dev' });
-  const c = addColleague({ name: 'b', role: 'backend' });
-  // 空文本无附件 → autoHandleMessages 同步走 skip:empty，不触发真实 LLM 调用；不依赖扩展名白名单
-  const m = appendMessage(req.id, c.id, { dir: 'in', text: '', role: 'backend' });
-  const r = await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [m.id, 'cm_ghost'] });
-  assert.equal(r.status, 202);
-  assert.deepEqual(r.json, { ok: true, accepted: 1 });
+// ---- 阶段流转：会话运行守卫 ----
 
-  // Set 去重：同一个 id 传两次只算一条
-  const m2 = appendMessage(req.id, c.id, { dir: 'in', text: '', role: 'backend' });
-  const dup = await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [m2.id, m2.id] });
-  assert.deepEqual(dup.json, { ok: true, accepted: 1 });
-});
+/**
+ * 造一个挂在指定 convId 上的活跃 run，返回 run 供测试结束时收尾。
+ * createRun() 不收参数，convId 由调用方事后挂到 run 上——这是 store/runs.js 的既有形状，
+ * hasActiveRunForConv 就是按 `r.convId === convId && r.status === 'running'` 匹配的（runs.js:140-144）。
+ */
+function startRunOn(convId) {
+  const run = createRun();
+  run.convId = convId;
+  return run;
+}
 
-test('/auto：colleague-relay 插件停用 → 409（附件链路绕过插件开关，只能在这里认）', async () => {
-  const { setPluginEnabled } = await import('../../store/settings.js');
-  const req = await createReq('auto 插件停用');
-  updateRequirement(req.id, { phase: 'dev' });
-  const c = addColleague({ name: 'b', role: 'backend' });
-  const m = appendMessage(req.id, c.id, { dir: 'in', text: 'x', role: 'backend' });
-  setPluginEnabled('colleague-relay', false);
+test('dev-done：开发期子会话仍在跑 → 409 且响应列出该会话', async () => {
+  const req = await createReq('子会话在跑的需求');
+  const id = req.id;
+  updateRequirement(id, {
+    phase: 'dev',
+    convId: 'c_main_1',
+    sessions: [
+      { convId: 'c_main_1', sessionId: 's1', title: '主会话', kind: 'main', phase: 'dev', createdAt: '' },
+      { convId: 'c_sub_1', sessionId: null, title: '登录页修复', kind: 'sub', phase: 'dev', createdAt: '' },
+    ],
+  });
+  const run = startRunOn('c_sub_1');
   try {
-    const r = await post('/api/req/colleague-messages/auto', { reqId: req.id, colleagueId: c.id, msgIds: [m.id] });
+    const r = await post('/api/req/dev-done', { id });
     assert.equal(r.status, 409);
-    assert.match(r.json.error, /停用/);
+    assert.deepEqual(r.json.running, [{ convId: 'c_sub_1', title: '登录页修复' }]);
+    assert.equal(getRequirement(id).phase, 'dev'); // 没被流转
   } finally {
-    setPluginEnabled('colleague-relay', true);
+    // 必须 finally：gc() 对 status==='running' 的 run 直接跳过（runs.js:578），
+    // 断言一抛就永久漏一个活 run 在注册表里，污染后续任何复用该 convId 的用例。
+    finishRun(run);
   }
+});
+
+test('dev-done：会话全部跑完 → 200 放行', async () => {
+  const req = await createReq('会话已跑完的需求');
+  const id = req.id;
+  updateRequirement(id, {
+    phase: 'dev',
+    convId: 'c_main_2',
+    sessions: [
+      { convId: 'c_main_2', sessionId: 's1', title: '主会话', kind: 'main', phase: 'dev', createdAt: '' },
+    ],
+  });
+  const r = await post('/api/req/dev-done', { id });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.phase, 'test');
+});
+
+test('test-pass：测试期会话仍在跑 → 409 且带 running（守卫对两个流转口一视同仁）', async () => {
+  const req = await createReq('测试期会话在跑的需求');
+  const id = req.id;
+  updateRequirement(id, {
+    phase: 'test',
+    convId: 'c_test_main_x',
+    sessions: [
+      { convId: 'c_test_main_x', sessionId: 's1', title: '测试期主会话', kind: 'main', phase: 'test', createdAt: '' },
+      // 开发期的历史会话即便挂着 run 也不该拦住测试期的流转——不归这次流转管
+      { convId: 'c_dev_old_x', sessionId: 's0', title: '开发期旧会话', kind: 'sub', phase: 'dev', createdAt: '' },
+    ],
+  });
+  const run = startRunOn('c_test_main_x');
+  try {
+    const r = await post('/api/req/test-pass', { id });
+    assert.equal(r.status, 409);
+    assert.deepEqual(r.json.running, [{ convId: 'c_test_main_x', title: '测试期主会话' }]);
+    assert.equal(getRequirement(id).phase, 'test');
+  } finally {
+    finishRun(run);
+  }
+});
+
+test('test-pass：只有历史阶段会话在跑 → 放行（跨阶段不误拦）', async () => {
+  const req = await createReq('只有旧会话在跑的需求');
+  const id = req.id;
+  updateRequirement(id, {
+    phase: 'test',
+    convId: 'c_test_main_y',
+    sessions: [
+      { convId: 'c_test_main_y', sessionId: 's1', title: '测试期主会话', kind: 'main', phase: 'test', createdAt: '' },
+      { convId: 'c_dev_old_y', sessionId: 's0', title: '开发期旧会话', kind: 'sub', phase: 'dev', createdAt: '' },
+    ],
+  });
+  const run = startRunOn('c_dev_old_y');
+  try {
+    assert.equal((await post('/api/req/test-pass', { id })).status, 200);
+    assert.equal(getRequirement(id).phase, 'archiving');
+  } finally {
+    finishRun(run);
+  }
+});
+
+// ---- dev-done：阶段切换清锚点 + 物化会话 ----
+
+test('dev-done：流转后 convId/devSession 清空，sessions 保留且带 phase:dev', async () => {
+  const req = await createReq('阶段切换需求');
+  const id = req.id;
+  updateRequirement(id, {
+    phase: 'dev',
+    convId: 'c_main_3',
+    devSession: 'sess_dev_3',
+    sessions: [
+      { convId: 'c_main_3', sessionId: 'sess_dev_3', title: '主会话', kind: 'main', phase: 'dev', createdAt: '' },
+      { convId: 'c_sub_3', sessionId: 's2', title: '子会话', kind: 'sub', phase: 'dev', createdAt: '' },
+    ],
+  });
+  const r = await post('/api/req/dev-done', { id });
+  assert.equal(r.status, 200);
+
+  const after = getRequirement(id);
+  assert.equal(after.phase, 'test');
+  assert.equal(after.convId, null);
+  assert.equal(after.devSession, null);
+  assert.equal(after.sessions.length, 2);
+  assert.ok(after.sessions.every((s) => s.phase === 'dev'));
+});
+
+test('dev-done：老需求（sessions 空、只有 convId）流转时把主会话物化落盘，历史不丢', async () => {
+  const req = await createReq('老数据需求');
+  const id = req.id;
+  updateRequirement(id, {
+    phase: 'dev',
+    convId: 'c_legacy',
+    devSession: 'sess_legacy',
+    sessions: [],
+  });
+  const r = await post('/api/req/dev-done', { id });
+  assert.equal(r.status, 200);
+
+  const after = getRequirement(id);
+  assert.equal(after.convId, null);
+  assert.deepEqual(
+    after.sessions.map((s) => ({ convId: s.convId, sessionId: s.sessionId, kind: s.kind, phase: s.phase })),
+    [{ convId: 'c_legacy', sessionId: 'sess_legacy', kind: 'main', phase: 'dev' }],
+  );
+});
+
+test('dev-done：会话缺 phase 时按流转前的阶段物化成 dev，不是流转后的 test', async () => {
+  const req = await createReq('缺 phase 的存量需求');
+  const id = req.id;
+  updateRequirement(id, {
+    phase: 'dev',
+    convId: 'c_nophase',
+    devSession: 'sess_nophase',
+    // 刻意不带 phase：这是阶段隔离上线前的存量形状，normalizeSessions 会按 req.phase 回填。
+    // sessions 非空 → 必走路径 1，fallbackPhase 一定参与；元素无 phase → 不会被显式值短路。
+    // 前两条用例各自漏掉了这一半，这条才是排序不变式的唯一护栏。
+    sessions: [
+      { convId: 'c_nophase', sessionId: 'sess_nophase', title: '主会话', kind: 'main', createdAt: '' },
+      { convId: 'c_nophase_sub', sessionId: null, title: '子会话', kind: 'sub', createdAt: '' },
+    ],
+  });
+  assert.equal((await post('/api/req/dev-done', { id })).status, 200);
+
+  // 若实现改成「先落 phase:'test' 再 normalizeSessions(getRequirement(id))」，这里会全是 'test'，
+  // 开发期会话从此永不被隐藏——功能静默失效，不报错也不掉数据。
+  assert.deepEqual(getRequirement(id).sessions.map((s) => s.phase), ['dev', 'dev']);
+});
+
+test('dev-done → conv 端到端：开发期会话全留、测试期恰好一条新 main', async () => {
+  const req = await createReq('端到端阶段切换');
+  const id = req.id;
+  updateRequirement(id, {
+    phase: 'dev',
+    convId: 'c_dev_main',
+    devSession: 'sess_dev',
+    sessions: [
+      { convId: 'c_dev_main', sessionId: 'sess_dev', title: '主会话', kind: 'main', phase: 'dev', createdAt: '' },
+      { convId: 'c_dev_sub', sessionId: 's2', title: '登录页修复', kind: 'sub', phase: 'dev', createdAt: '' },
+    ],
+  });
+
+  assert.equal((await post('/api/req/dev-done', { id })).status, 200);
+  // 前端见 convId 为空 → 建新 conv 并回绑（openRequirementChat 的既有路径）
+  assert.equal((await post('/api/req/conv', { id, convId: 'c_test_main' })).status, 200);
+
+  const after = getRequirement(id);
+  assert.equal(after.phase, 'test');
+  assert.equal(after.convId, 'c_test_main');
+  // 开发期两条原样保留（归档期「优化汇总」还要读它们的转录）
+  assert.equal(after.sessions.filter((s) => s.phase === 'dev').length, 2);
+  // 测试期恰好一条 main，且是干净的新会话
+  const testMains = after.sessions.filter((s) => s.phase === 'test' && s.kind === 'main');
+  assert.equal(testMains.length, 1);
+  assert.equal(testMains[0].convId, 'c_test_main');
+  assert.equal(testMains[0].sessionId, null);
+  assert.equal(after.devSession, null); // dev-done 清掉后没被误回填
+});
+
+// ---- /api/req/conv：登记当前阶段的 main 会话 ----
+
+test('conv：绑定新 convId 时同步登记一条当前阶段的 main 会话', async () => {
+  const req = await createReq('测试期建主会话');
+  const id = req.id;
+  updateRequirement(id, {
+    phase: 'test',
+    convId: null,
+    devSession: null,
+    sessions: [
+      { convId: 'c_old_main', sessionId: 's_old', title: '主会话', kind: 'main', phase: 'dev', createdAt: '' },
+    ],
+  });
+
+  const r = await post('/api/req/conv', { id, convId: 'c_test_main' });
+  assert.equal(r.status, 200);
+
+  const after = getRequirement(id);
+  assert.equal(after.convId, 'c_test_main');
+  assert.equal(after.sessions.length, 2);
+  const fresh = after.sessions.find((s) => s.convId === 'c_test_main');
+  assert.equal(fresh.kind, 'main');
+  assert.equal(fresh.phase, 'test');
+  assert.equal(fresh.sessionId, null);
+  // 开发期那条原样保留
+  assert.equal(after.sessions.find((s) => s.convId === 'c_old_main').phase, 'dev');
+});
+
+test('conv：换浏览器铸了新 convId → 重指现有当前阶段 main，不堆出第二条', async () => {
+  const req = await createReq('换浏览器需求');
+  const id = req.id;
+  updateRequirement(id, {
+    phase: 'test',
+    convId: 'c_A',
+    devSession: 'sess_keep',
+    sessions: [
+      { convId: 'c_old_dev', sessionId: 's_dev', title: '开发主会话', kind: 'main', phase: 'dev', createdAt: '' },
+      { convId: 'c_A', sessionId: 'sess_keep', title: '我改过的标题', kind: 'main', phase: 'test', createdAt: '' },
+    ],
+  });
+
+  const r = await post('/api/req/conv', { id, convId: 'c_B' });
+  assert.equal(r.status, 200);
+
+  const after = getRequirement(id);
+  assert.equal(after.convId, 'c_B');
+  // 同阶段 main 仍然只有一条
+  assert.equal(after.sessions.filter((s) => s.kind === 'main' && s.phase === 'test').length, 1);
+  const main = after.sessions.find((s) => s.phase === 'test');
+  assert.equal(main.convId, 'c_B');
+  assert.equal(main.sessionId, 'sess_keep');   // 续得上原 Claude session
+  assert.equal(main.title, '我改过的标题');      // 用户改的标题没被打回默认名
+  // 开发期那条原样不动
+  assert.equal(after.sessions.find((s) => s.phase === 'dev').convId, 'c_old_dev');
+});
+
+test('conv：同 convId 重复绑定幂等，不插重复行、不覆盖已回填的 sessionId/title', async () => {
+  const req = await createReq('conv 幂等需求');
+  const id = req.id;
+  updateRequirement(id, { phase: 'test', convId: null, sessions: [] });
+
+  await post('/api/req/conv', { id, convId: 'c_dup' });
+  // 模拟 run 起来后回填了 sessionId，且用户顺手改了标题
+  await post('/api/req/session', { id, convId: 'c_dup', sessionId: 'sess_new', title: '改过的名字' });
+  await post('/api/req/conv', { id, convId: 'c_dup' });
+
+  const after = getRequirement(id);
+  assert.equal(after.sessions.filter((s) => s.convId === 'c_dup').length, 1);
+  assert.equal(after.sessions[0].sessionId, 'sess_new');
+  assert.equal(after.sessions[0].title, '改过的名字');
+});
+
+test('conv：反复换客户端也只有一条同阶段 main', async () => {
+  const req = await createReq('反复换客户端需求');
+  const id = req.id;
+  updateRequirement(id, { phase: 'test', convId: null, sessions: [] });
+  for (const c of ['c1', 'c2', 'c3']) await post('/api/req/conv', { id, convId: c });
+  const after = getRequirement(id);
+  assert.equal(after.sessions.filter((s) => s.kind === 'main').length, 1);
+  assert.equal(after.sessions[0].convId, 'c3');
+  assert.equal(after.convId, 'c3');
+});
+
+// ---- /api/req/session：phase 归属与阶段内 main 唯一 ----
+
+test('session：新建子会话打上需求当前阶段', async () => {
+  const req = await createReq('子会话打标需求');
+  const id = req.id;
+  updateRequirement(id, { phase: 'test', convId: 'c_tm', sessions: [
+    { convId: 'c_tm', sessionId: null, title: '主会话', kind: 'main', phase: 'test', createdAt: '' },
+  ] });
+
+  const r = await post('/api/req/session', { id, convId: 'c_new_sub', title: '巡检复现', kind: 'sub' });
+  assert.equal(r.status, 200);
+  assert.equal(getRequirement(id).sessions.find((s) => s.convId === 'c_new_sub').phase, 'test');
+});
+
+test('session：跨阶段两条 main 共存合法', async () => {
+  const req = await createReq('跨阶段 main 需求');
+  const id = req.id;
+  updateRequirement(id, { phase: 'test', sessions: [
+    { convId: 'c_dm', sessionId: 's1', title: '开发主会话', kind: 'main', phase: 'dev', createdAt: '' },
+  ] });
+
+  const r = await post('/api/req/session', { id, convId: 'c_tm2', title: '测试主会话', kind: 'main' });
+  assert.equal(r.status, 200);
+  assert.equal(getRequirement(id).sessions.filter((s) => s.kind === 'main').length, 2);
+});
+
+test('session：同阶段第二条 main → 409', async () => {
+  const req = await createReq('同阶段双 main 需求');
+  const id = req.id;
+  updateRequirement(id, { phase: 'test', sessions: [
+    { convId: 'c_tm3', sessionId: null, title: '测试主会话', kind: 'main', phase: 'test', createdAt: '' },
+  ] });
+
+  const r = await post('/api/req/session', { id, convId: 'c_tm4', title: '又一个主会话', kind: 'main' });
+  assert.equal(r.status, 409);
+  assert.equal(getRequirement(id).sessions.length, 1);
+});
+
+test('session：历史阶段 main 的迟到 sessionId 回填不污染当前阶段 devSession', async () => {
+  const req = await createReq('迟到回填需求');
+  const id = req.id;
+  updateRequirement(id, { phase: 'test', devSession: 'sess_test', sessions: [
+    { convId: 'c_dev_m', sessionId: null, title: '开发主会话', kind: 'main', phase: 'dev', createdAt: '' },
+    { convId: 'c_test_m', sessionId: 'sess_test', title: '测试主会话', kind: 'main', phase: 'test', createdAt: '' },
+  ] });
+
+  const r = await post('/api/req/session', { id, convId: 'c_dev_m', sessionId: 'sess_dev_late' });
+  assert.equal(r.status, 200);
+
+  const after = getRequirement(id);
+  assert.equal(after.devSession, 'sess_test'); // 没被开发期的迟到回填改掉
+  assert.equal(after.sessions.find((s) => s.convId === 'c_dev_m').sessionId, 'sess_dev_late'); // 但条目本身照常补齐
+});
+
+test('session：当前阶段 main 的 sessionId 回填仍写入 devSession', async () => {
+  const req = await createReq('正常回填需求');
+  const id = req.id;
+  updateRequirement(id, { phase: 'test', devSession: null, sessions: [
+    { convId: 'c_tm5', sessionId: null, title: '测试主会话', kind: 'main', phase: 'test', createdAt: '' },
+  ] });
+
+  await post('/api/req/session', { id, convId: 'c_tm5', sessionId: 'sess_fresh' });
+  assert.equal(getRequirement(id).devSession, 'sess_fresh');
+});
+
+// ---- POST /api/req/colleague-agent/turn（P3：飞书进程跨进程触发 agent）----
+//
+// 本组用例不走上面的「真实 HTTP server + fetch」范式：那条路会真的起一轮 agent（十几秒 + 烧额度）。
+// 必须注入 deps 直调 handleColleagueAgentTurn，故自建 mockReq/mockRes 两个最小替身。
+
+/**
+ * 最小 res 替身。四个成员缺一不可：
+ * - writeHead / end：sendJson 用
+ * - setHeader：withJsonBody 在 413 路径上会调
+ * - headersSent：withJsonBody 的 catch 分支靠它判断能不能再写响应头
+ */
+function mockRes() {
+  return {
+    statusCode: 0,
+    body: '',
+    headersSent: false,
+    writeHead(code) {
+      this.statusCode = code;
+      this.headersSent = true;
+    },
+    end(chunk) {
+      this.body = chunk || '';
+    },
+    setHeader() {},
+  };
+}
+
+/**
+ * 最小 req 替身。**必须喂 Buffer 而不是字符串** —— readJsonBody 里
+ * `size += c.length`（字符串算字符数，中文会少算）且 `Buffer.concat(chunks)`
+ * 拿到字符串数组直接抛。这是本项目踩过的「中文 body 被静默截断」同款坑。
+ */
+function mockReq(body) {
+  const req = Readable.from([Buffer.from(JSON.stringify(body), 'utf8')]);
+  req.method = 'POST';
+  req.url = '/api/req/colleague-agent/turn';
+  req.headers = {};
+  return req;
+}
+
+test('colleague-agent/turn：合法入参 → 202，且异步起了一轮', async () => {
+  let called = null;
+  const res = mockRes();
+  await handleColleagueAgentTurn(
+    mockReq({ colleagueId: 'cl_1', text: '接口给你了', msgId: 'cm_1' }),
+    res,
+    { handleTurn: async (i) => (called = i), isEnabled: () => true },
+  );
+  assert.equal(res.statusCode, 202);
+  await new Promise((r) => setImmediate(r)); // fire-and-forget，让微任务跑完
+  assert.equal(called.colleagueId, 'cl_1');
+  assert.equal(called.text, '接口给你了');
+});
+
+test('colleague-agent/turn：缺 colleagueId → 400，且绝不起 agent', async () => {
+  let ran = false;
+  const res = mockRes();
+  await handleColleagueAgentTurn(mockReq({ text: 'x' }), res, {
+    handleTurn: async () => (ran = true),
+    isEnabled: () => true,
+  });
+  assert.equal(res.statusCode, 400);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(ran, false);
+});
+
+test('colleague-agent/turn：text 与 files 同时为空 → 400（没内容可聊）', async () => {
+  const res = mockRes();
+  await handleColleagueAgentTurn(mockReq({ colleagueId: 'cl_1', text: '   ' }), res, {
+    handleTurn: async () => {},
+    isEnabled: () => true,
+  });
+  assert.equal(res.statusCode, 400);
+});
+
+test('colleague-agent/turn：只有 files 没有 text → 放行（同事直接甩个文档是常态）', async () => {
+  let called = null;
+  const res = mockRes();
+  await handleColleagueAgentTurn(
+    mockReq({ colleagueId: 'cl_1', text: '', files: [{ name: 'a.md', path: 'D:/a.md', kind: 'file' }] }),
+    res,
+    { handleTurn: async (i) => (called = i), isEnabled: () => true },
+  );
+  assert.equal(res.statusCode, 202);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(called.files.length, 1);
+});
+
+test('colleague-agent/turn：插件停用 → 409，不起 agent', async () => {
+  let ran = false;
+  const res = mockRes();
+  await handleColleagueAgentTurn(mockReq({ colleagueId: 'cl_1', text: 'x' }), res, {
+    handleTurn: async () => (ran = true),
+    isEnabled: () => false,
+  });
+  assert.equal(res.statusCode, 409);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(ran, false);
+});
+
+test('colleague-agent/turn：业务层抛错不能让进程崩（fire-and-forget 必须有 catch）', async () => {
+  const res = mockRes();
+  await handleColleagueAgentTurn(mockReq({ colleagueId: 'cl_1', text: 'x' }), res, {
+    handleTurn: async () => {
+      throw new Error('boom');
+    },
+    isEnabled: () => true,
+  });
+  assert.equal(res.statusCode, 202);
+  await new Promise((r) => setImmediate(r)); // 未捕获的 rejection 会让这里炸
 });

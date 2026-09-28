@@ -43,6 +43,28 @@ export const $ = (s) => document.querySelector(s);
         return /\.(md|markdown)$/i.test(p);
       }
 
+/**
+ * 触发附件下载（同事消息附件与需求右栏的 API 文档共用）。
+ *
+ * 用隐藏 `<a download>` 点一下而不是 `window.open`：后者会被弹窗拦截器挡，且对
+ * `Content-Disposition: attachment` 的响应会留下一个空白标签页。`download` 属性在这里
+ * 只是兜底提示，真正决定文件名的是服务端的 Content-Disposition（`name` 参数传的是登记名 ——
+ * 盘上是带随机前缀的副本名 `muc9i5asi7q-api.md`，用户要的是 `api.md`）。
+ *
+ * 放在 util 而不是各自的模块：两处都要下载，各写一份 URL 拼装迟早在转义上漂移（同 isMarkdownPath 的理由）。
+ */
+export function downloadFile(filePath, name = '') {
+  const url =
+    '/api/fs/download?path=' + encodeURIComponent(filePath) + (name ? '&name=' + encodeURIComponent(name) : '');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name || '';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 /** 时间戳 → 本地中文时间串（logs / tasks 共用） */
       export function fmtTime(iso) {
         try {

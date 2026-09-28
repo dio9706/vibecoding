@@ -838,17 +838,32 @@ function handleConv(req, res) {
     if (!convId) return sendJson(res, 400, { error: 'convId 不能为空' });
 
     const sessions = normalizeSessions(r);
-    // 幂等：前端网络重试、多标签页同开同一需求都会重复调本接口。已有同 convId 条目时
-    // 一个字段都不动——它可能已被 run 回填过 sessionId、被用户改过标题。
-    if (!sessions.some((s) => s.convId === convId)) {
-      sessions.push({
-        convId,
-        sessionId: null,
-        title: r.title,
-        kind: 'main',
-        phase: r.phase,
-        createdAt: new Date().toISOString(),
-      });
+    // 三种情形，顺序不能换：
+    // 1) 已有同 convId 的行 → 一个字段都不动（它可能已被 run 回填过 sessionId、被用户改过标题）。
+    //    覆盖前端网络重试；注意挡不住多标签页——每个标签页各铸各的 convId。
+    // 2) 没有该 convId、但当前阶段已有 main → **重指**那一行的 convId，而不是新推一条。
+    //    换浏览器 / 桌面版 / 清过站点数据时，openRequirementChat 查的是本浏览器 localStorage，
+    //    会铸一个全新 convId 过来（req-view.js openRequirementChat + chat.js createReqConv）。
+    //    这正是 devSession 存在的那个「换浏览器重建 conv 续接」流程（requirements.js 字段注释）。
+    //    若新推一条，每换一个客户端就多一条同阶段 main，而 main 在 handleSessionDelete 里
+    //    被无条件保护、前端也不渲染删除按钮 —— 用户除了手改 requirements.json 没有出路。
+    //    重指还保住了该行的 sessionId 与标题，让新 conv 直接续上原来的 Claude session。
+    // 3) 当前阶段还没有 main（刚流转完，或全新需求）→ 这才是真正该新建的时候。
+    const existing = sessions.find((s) => s.convId === convId);
+    if (!existing) {
+      const currentMain = sessions.find((s) => s.kind === 'main' && s.phase === r.phase);
+      if (currentMain) {
+        currentMain.convId = convId;
+      } else {
+        sessions.push({
+          convId,
+          sessionId: null,
+          title: r.title,
+          kind: 'main',
+          phase: r.phase,
+          createdAt: new Date().toISOString(),
+        });
+      }
     }
     updateRequirement(id, { convId, sessions }, '绑定会话');
     sendJson(res, 200, { ok: true, convId });
@@ -1097,14 +1112,9 @@ Expected: PASS，含既有 6 个用例。
       });
 ```
 
-- [ ] **Step 2: 改 UI 规范还原的守卫文案**
+- [ ] ~~**Step 2: 改 UI 规范还原的守卫文案**~~ —— **已撤回，不要做。**
 
-第 3040-3041 行替换为：
-
-```js
-        // 评审期还没有需求会话；测试期刚流转、用户还没打开过聊天时也可能暂时没有
-        if (!req.convId) return window.toast.error('还原需要需求会话，请先打开该需求的会话');
-```
+原计划要把 `onRestore` 的 `'还原需要开发会话，请先定稿进入开发期'` 改成阶段无关的措辞。代码评审追出该分支**只有评审期可达**（`renderReportArea` ← `renderMainCol` ← `renderWorkbench`，而 `renderWorkbench` 只在 `renderReqPage` 的 `req.phase === 'review'` 分支被调；dev/test 的还原在 `req-map-overlay.js`，没有 convId 守卫），而评审期 `req.convId` 恒为空——这句是每个评审期用户点还原时**必然**看到的。原文案给的是真实出路，改掉是净回归。**保持原样。**
 
 - [ ] **Step 3: 验证**
 
@@ -1113,6 +1123,43 @@ Expected: 无输出。
 
 Run: `node --test public/js/req-view.sessiontree.test.js`
 Expected: PASS（不得回归）。
+
+---
+
+## Task 11b: conv 注册成功后立刻刷侧栏（代码评审新增）
+
+**来由**：Task 11 落地后发现，点「完成开发」的瞬间侧栏会话树是**空的**。链路——`applyFetchedReq`（`req-view.js:847`）调 `openRequirementChat` 时**不 await**，而更早一步的 `patchListEntry`（`:262-271`）已把 `/api/req/get` 那一刻的 `sessions` 写进 `lastList`，那时只有开发期的行；叠加 Task 9 的过滤（只留当前阶段），用户看到需求已是测试期、会话树却一条不剩，只有「＋ 新会话」按钮，要等最长 30s 轮询才补上。
+
+**为什么不能在 `phaseAction` 侧修**：`openRequirement` 的 Promise 在 `POST /api/req/conv` 发出**之前**就 resolve 了（`applyFetchedReq` 不是 async、也不 await `openRequirementChat`），所以 `await openRequirement(id)` 无效。`setTimeout` 兜底是拿延时赌竞态，不接受。
+
+**修法**：在真正知道注册已完成的地方刷新 —— `openRequirementChat` 里 `POST /api/req/conv` 成功之后。这样每条铸新 conv 的路径（阶段流转、换浏览器、清过站点数据后首次打开）都一并修好，而不只是 dev-done 这一条。
+
+**Files:** Modify `public/js/req-view.js`（`openRequirementChat` 的绑定成功分支）
+
+- [ ] **Step 1: 改 `openRequirementChat`**
+
+在 `POST /api/req/conv` 的 `if (!r.ok) {...}` 错误分支之后、`catch` 之前，补一次刷新：
+
+```js
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          window.toast.error(d.error || 'conv 绑定失败，系统任务进度可能不可见');
+        } else {
+          // 绑定成功才刷：此刻后端才真正登记出当前阶段的 main 行。
+          // 不能交给 phaseAction 在流转后刷——applyFetchedReq 不 await 本函数，
+          // openRequirement 的 Promise 在这次 POST 发出前就 resolve 了，那边刷到的
+          // 还是流转瞬间的旧 sessions（开发期那批已被 Task 9 的过滤隐去 → 会话树空白）。
+          // 放在这里，每条铸新 conv 的路径（阶段流转 / 换浏览器 / 清过站点数据）都一并受益。
+          refreshReqList();
+        }
+```
+
+- [ ] **Step 2: 验证**
+
+Run: `node --check public/js/req-view.js` → 无输出
+Run: `timeout 180 node --test public/js/req-view.sessiontree.test.js` → PASS（不得回归）
+
+> 注意 `refreshReqList` 就定义在本文件内，无需 import。
 
 ---
 

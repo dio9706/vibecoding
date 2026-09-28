@@ -6,7 +6,7 @@ import os from 'node:os';
 
 // 隔离数据目录：store/index.js 按 APP_DATA_DIR 定位，须在 import store 之前设置
 process.env.APP_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'req-store-'));
-const { createRequirement, getRequirement, getRequirements, updateRequirement, deleteRequirement, canTransition, normalizeSessions } =
+const { createRequirement, getRequirement, getRequirements, updateRequirement, deleteRequirement, canTransition, normalizeSessions, addAgentWorktree } =
   await import('./requirements.js');
 
 test('createRequirement：初始 review 期、空骨架、history 有创建记录', () => {
@@ -128,6 +128,49 @@ test('normalizeSessions：sessions 空且 convId 空 → 返回空数组', () =>
   };
   const result = normalizeSessions(req);
   assert.deepEqual(result, []);
+});
+
+// ==== Task 10：per-需求 agent worktree 登记（补 spec §5.3）====
+
+test('agentWorktrees：新建需求默认空数组', () => {
+  const r = createRequirement({ title: 'x' });
+  assert.deepEqual(getRequirement(r.id).agentWorktrees, []);
+});
+
+test('addAgentWorktree：登记一条，字段齐全', () => {
+  const r = createRequirement({ title: 'x' });
+  addAgentWorktree(r.id, { dir: 'D:/p', worktreeDir: 'D:/p.req-r_ab', branch: 'agent/x' });
+  const list = getRequirement(r.id).agentWorktrees;
+  assert.equal(list.length, 1);
+  assert.deepEqual(list[0], { dir: 'D:/p', worktreeDir: 'D:/p.req-r_ab', branch: 'agent/x' });
+});
+
+test('addAgentWorktree：同一 worktreeDir 只登记一次（同需求多次派活是常态）', () => {
+  const r = createRequirement({ title: 'x' });
+  addAgentWorktree(r.id, { dir: 'D:/p', worktreeDir: 'D:/p.req-a', branch: 'b1' });
+  addAgentWorktree(r.id, { dir: 'D:/p', worktreeDir: 'D:/p.req-a', branch: 'b2' });
+  const list = getRequirement(r.id).agentWorktrees;
+  assert.equal(list.length, 1, 'ensureReqWorktree 对同一需求是幂等的，登记也该是');
+  assert.equal(list[0].branch, 'b1', '先登记的那条保留，不被后来的覆盖');
+});
+
+test('addAgentWorktree：缺 worktreeDir 的条目直接拒绝（那是要删的目录，缺了这条登记没意义）', () => {
+  const r = createRequirement({ title: 'x' });
+  addAgentWorktree(r.id, { dir: 'D:/p', branch: 'b' });
+  addAgentWorktree(r.id, null);
+  assert.deepEqual(getRequirement(r.id).agentWorktrees, []);
+});
+
+test('addAgentWorktree：需求不存在时安静返回 null，不写盘', () => {
+  assert.equal(addAgentWorktree('r_nope', { worktreeDir: 'D:/x' }), null);
+});
+
+test('存量需求（盘上没有 agentWorktrees 字段）也能登记', () => {
+  const r = createRequirement({ title: 'x' });
+  // 模拟存量数据：把字段删掉再登记
+  updateRequirement(r.id, { agentWorktrees: undefined });
+  addAgentWorktree(r.id, { dir: 'D:/p', worktreeDir: 'D:/p.req-old', branch: 'b' });
+  assert.equal(getRequirement(r.id).agentWorktrees.length, 1);
 });
 
 test('deleteRequirement：物理删除并返回被删记录；不存在返回 null 且不影响其它需求', () => {

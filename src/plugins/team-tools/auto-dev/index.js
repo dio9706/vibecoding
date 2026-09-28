@@ -156,6 +156,9 @@ async function runOne(task) {
   // merged 仍为 false，面板与飞书卡片照旧给合并按钮，不写任何新分支逻辑。
   const mg = await mergeTaskById(task.id, { auto: true });
   if (!mg.ok) logger.warn('auto-dev', '自动合并失败，退回待人工合并', { id: task.id, err: mg.error });
+  // 合并成功但留了尾巴（AI 解了冲突 / 维护者的未提交改动还压在 stash 里）同样要留痕：
+  // 这条泵是无人值守跑的，日志是事后复盘「我的改动什么时候没的」唯一的时间锚点
+  else if (mg.caveats?.length) logger.warn('auto-dev', '自动合并成功但需人工复核', { id: task.id, caveats: mg.caveats });
 
   // 飞书私聊卡片通知（管理员本人）。现读盘上值传入 —— 分支/基线/合并结果都是上面分步写入的，
   // 卡片要靠它们决定给「合并」还是「已自动合并」。fire-and-forget，失败不影响后续流程。

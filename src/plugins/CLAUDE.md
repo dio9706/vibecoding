@@ -7,7 +7,7 @@
 ## 文件清单
 
 ### 装配层（模块根）
-- `index.js` — 插件清单 `PLUGIN_MANIFEST` + 装配。`loadEnabledPluginFeatures` 逐个 `getPluginEnabled` 判断后**动态 import** 启用插件、收集其 `features` 条目；`assembleFeatures` 把 core + 插件条目按 `order` 稳定排序后摊平成 feature 数组。**本模块唯一对外入口**。
+- `index.js` — 插件清单 `PLUGIN_MANIFEST` + 装配。`loadEnabledPluginFeatures` 逐个 `getPluginEnabled` 判断后**动态 import** 启用插件、收集其 `features` 条目；`assembleFeatures` 把 core + 插件条目按 `order` 稳定排序后摊平成 feature 数组；`loadPluginSideEffects(ids)` 按 id 加载插件**只为触发模块级副作用**（不取 features），补的是「web 进程不走装配层」这个缺口（见下「关键流程 C」）。**本模块唯一对外入口**。
 - `index.test.js` — 装配层单测。
 
 ### team-tools/ —— 团队工具插件（一个插件 = 6 个 feature + 一组共享领域模块）
@@ -17,6 +17,7 @@
 - `team-tools/auto-dev/queue.js` — **入队 API 的零重依赖叶子**：`requestAutoDevelop`（置 `queued`，任意进程可调，幂等）+ `isOverrideStart`（纯谓词）。**只允许依赖 `store/tasks.js`**。要入队一律从这里引，**不要从 `index.js` 引**——那会把 git / 编译 / 飞书回发 / Claude 调用整条执行链拖进调用方，并让 `task-notify` 与执行管线成环（2026-09-04 实测检出过两个环，见该文件头）。
 - `team-tools/auto-dev/index.js` — **自动开发管线（执行侧）**：泵 `startAutoDevPump` **仅 web 进程**常驻，在常驻 auto 工作区建任务分支改码、提交、置 done。配套 `git.js`（git 封装，参数拼装抽纯函数）、`logic.js`（分支名/提交信息纯函数）、`compile.js`（DEV 编译二维码适配）。
 - `team-tools/auto-dev/revert.js`（+ `revert.logic.js`）— **放弃已合并改动**：`git revert -m 1 <mergeCommit>` 优先，冲突或无锚点则起 Claude 撤销再 `commitAll`。执行目录走 `git.js#withBranchWorktree`（与合并同一套路径 A/B 分流）。**进 LLM 兜底前有一道 `isClean` 闸**——路径 A 下执行目录就是用户主工作区，脏则停手报错：否则无关的未提交改动会被 `commitAll` 的 `add -A` 卷进撤销提交，且「无改动即失败」的防谎报闸会被脏文件顶开。`revert.logic.js` 存 prompt 与 commit message 纯函数（消息必须过 commitlint）。
+- `team-tools/auto-dev/merge-llm.js`（+ `merge-llm.logic.js`）— **自动合并的 LLM 兜底**，作为 `resolver` 由 `task-actions.js#mergeTaskById` 注入给 `git.js#mergeBranch`（`git.js` 只认回调、不认识模型，否则每个想跑 `git status` 的调用方都被拖上 SDK）。两个出口性质不同、prompt 不可互换：`resolveConflict` 解两个已提交分支的内容冲突（**明令禁止整块选一边**）；`mergeStash` 融合「合并结果 vs 维护者未提交、正在写的代码」（**两边都要保留，半成品原样留着，不许替人补全或删除**）。两个 prompt 共同禁止模型自己 `git add/commit` —— 提交与防谎报闸都在 `git.js` 里。**单测调 `mergeTaskById` 涉及冲突时必须传 `resolver: null`**，否则会起一次真实模型调用（实测 73 秒 + 真改了测试仓库的文件）。
 - `team-tools/task-triage/index.js` — feature「owner 待办分诊」（触发词进入，owner 专属）：交互式逐条呈现已分析任务，决策后入自动开发/后台串行开发队列。`logic.js` 分组/排序/意图解析纯函数。
 - `team-tools/bug-patrol/index.js` — feature「BUG 巡检」（`\10001`，可信提交人专属）：等多维表格 → 找 `phase==='test'` 需求（多个让用户选序号）→ 跨进程 POST `/api/patrol/start` **启动循环**（不再自己跑扫描）。导出的 `runPatrolRound` 是单轮扫描体，由循环泵调用：Haiku 字段映射 → 筛「我的待处理 BUG」→ `filterUnseen` 成本护栏 → 逐条评审 → 归属判定 → 前端自动修 / 后端转派。`logic.js` 链接解析/字段校验/文案纯函数；`hasPatrolPending` 供飞书入口绕过云文档摄取。**第三条出口「缺图转人工」**：归属判定同时判 `blocked==='need-assets'`（要新增 UI 图片资源、但附件与代码库里都没有），命中则不写表不建任务、`pushReport('needHuman')` 只在汇报里单列；无需求关联时走 `assetOnly` 精简 prompt 保证全覆盖。
 - `team-tools/bug-patrol/loop.js` — **巡检循环泵**（**仅 web 进程**，对齐 `startAutoDevPump`）：`scanning`（扫 + 等本轮任务全终结）→ `standby`(20min) → `scanning`，12 小时上限；出口为 `\10004` 或到期。放 web 进程是因为判「全修完」要读 auto-dev 任务终态，而那个泵只在 web 进程跑。`loop.logic.js` 存终态判定（**`isSettled` 必须认 `analyzed`** —— auto-dev 失败退回该状态，没有 failed 态，只认 `done` 会让泵永远等不到终态而卡死）、额度错误识别、汇报文案等纯函数。
@@ -29,7 +30,7 @@
 - `team-tools/project-qa/index.js` — feature「项目问答」（`intents:[question]`）：只读起 Claude 查代码回答，带同用户串行闸/3 分钟超时/答案截断三道保护。
 - `team-tools/task-ops.js` — **共享领域模块**（非 feature）：`analyze`（只读分析）/`develop`（实际改码）/`attachMaterialToRecentTask`。供 feedback/task-triage/auto-dev/web 入口共用。
 - `team-tools/task-actions.js` — **共享领域模块**：任务分支 `mergeTaskById`/`discardTaskById` 及 `isAwaitingMerge`/`isDiscardable` 谓词。web 路由与飞书任务卡片共用一套编排。**放弃按 `task.merged` 分流**：未合并删分支、已合并走 `auto-dev/revert.js` 撤销（合并已自动化，「删分支」不再等于撤销）；`isDiscardable` 因此**不含 `!merged`**，合并前后都可放弃。
-- `team-tools/task-notify.js`（+ `task-notify.logic.js`）— 任务完成 → 飞书私聊卡片（发给管理员本人），处理「合并/补充/放弃」卡片回调；`.logic.js` 为卡片构造/回调解析纯函数。
+- `team-tools/task-notify.js`（+ `task-notify.logic.js`）— 任务完成 → 飞书私聊卡片（发给管理员本人），处理「合并/补充/放弃」卡片回调；`.logic.js` 为卡片构造/回调解析纯函数。**合并结果必须上卡片正文**（`mergeLine`）：2026-09-28 实测事故——自动合并失败后卡片只写「✅ 已处理完成」配一个合并按钮，人看不出自动合并已试过并失败，会以为是自己还没点，三条任务因此积压四天。卡片与降级纯文本（`taskDoneFallbackText`）共用 `mergeStatusOf` 这一把尺子，否则两条通道口径会分叉。整条通知受 `uiPrefs.taskNotifyFeishu` 总开关管（面板上的 🔔 chip），**关着就一条都收不到**。
 - `team-tools/material-pool.js` — 材料暂存池（先发文件后发描述的归并），内存态 + TTL 10 分钟 + 单 key 上限。
 - `team-tools/trusted-trigger.js` — 可信提交人指令共用纯函数 `matchesExactTrigger`（严格全等匹配）+ 再导出内核 `isTrustedSubmitter`。
 - `team-tools/**/*.test.js` — 对应单测（含 `auto-dev/git.test.js` 真实 git 仓库测试、`task-actions.test.js` 编排测试）。
@@ -49,11 +50,15 @@
 - `action-runner/card-action.js` — `quick-action` 卡片按钮回调 → 构造虚拟 ctx 直接调 `feature/index.js#handle`（绕过意图识别）。
 - `action-runner/**/*.test.js` — 对应单测。
 
-### colleague-relay/ —— 同事消息中继（→ web 自动处理）
-- `colleague-relay/index.js` — 插件装配（order 35：action-runner 之后、feedback 之前，同事说「帮我退款」仍该触发动作，说「接口文档给你」才归需求对话）；模块加载即注册 `colleague-pick` 卡片回调 `onPickCardAction`：`flushPending` 后把归入的 `ids` 送 `notifyAutoHandle`，再私聊回执。
-- `colleague-relay/feature.js` — feature（`intents:[bug,feature,question,material,other]`，`permission:'any'`）：`resolveTargets` 判「发信人是否某开发期需求的开发人员」，否则 PASS 回落 feedback；单需求直归 + `void notifyAutoHandle`；多需求入 `_pending` 缓冲发选择卡。**只覆盖文本** —— 附件在 `entrypoints/feishu/index.js#relayColleagueAttachment` 早期分支就被接走（到不了 dispatch），两条链路共用本目录 `logic.js#resolveTargets`。
-- `colleague-relay/logic.js` — 纯函数：`resolveTargets`（只认 `phase==='dev'`）、`buildPickCard`（按钮 value 自带全部上下文、无内存态，重启后点旧卡仍有效）、`ACK_TEXT`、`PICK_KIND`。
-- `colleague-relay/auto-notify.js` — 四期跨进程直送 `notifyAutoHandle`：fire-and-forget `POST /api/req/colleague-messages/auto`，3s 超时、非 JSON 不抛穿、**不重试**（重试会在入队到收尾的窗口制造同 msgId 的重复任务）；`role!=='backend'` 本地预判不发请求，插件开关由 web 路由认。
+### colleague-agent/ —— 同事侧对话 Agent
+- `colleague-agent/index.js` — 插件装配（order 35：action-runner 之后、feedback 之前）；**模块加载时**把 `tools/req-read.js` + `tools/req-write.js` 的工具定义逐个 `assertRoles` 校验后 `registerAgentTool`（工具自注册，与卡片回调同一范式）。
+- `colleague-agent/feature.js` — **feishu 进程** dispatch feature（`intents:[bug,feature,question,material,other]`，`permission:'any'`）：只覆盖文本，调 `relay.js#relayToAgent` 判定归属；接管则不回 ACK（回复由 web 侧跑完 agent 后经 lark 直发），否则 PASS 回落 feedback。
+- `colleague-agent/relay.js` — **文本与附件两条入站链路共用**的判定 + 落盘 + 跨进程触发层：`isColleagueMessage` 判「这个 open_id 在不在同事名册」，命中则 `appendTo` 落一条 `dir:'in'` 消息、`reqId` 留 null（归属交给 agent 判），再 fire-and-forget `POST /api/req/colleague-agent/turn` 触发 web 跑一轮。附件在 `entrypoints/feishu/index.js` 的 image/file 早期分支就被接走（到不了 dispatch），必须调本文件而非另写一份判定。
+- `colleague-agent/session.js` — **web 进程**编排层：`handleColleagueTurn` 过限流闸 → 按角色装配 MCP server（`agent-tools.js#buildAgentMcpServer`）→ 组装 system prompt（`prompt.js`）→ `agent-session.js#runAgentTurn` → `lark.js#sendTextToUser` 直接回同事 → 落出站消息 + 回填 `agentSessionId`。任何失败（限流/超时/额度耗尽/异常）一律退化到固定 ACK 文案，绝不静默不回。
+- `colleague-agent/rate-limit.js` — 两道限流闸（per-人滑动窗口 + 全局并发上限）的纯函数状态机 + 进程内单例；**必须在 web 进程用**（feishu 进程数的只是自己发出去几个 POST，拦不住实际并发）。
+- `colleague-agent/prompt.js` — system prompt 组装纯函数：按角色标签 + 他参与的需求列表拼「先查证再质疑 / 不确定就问 / 不替主机做承诺 / 阶段流转不归他管」等硬约束。
+- `colleague-agent/tools/req-read.js` — 5 个 `safe` 只读工具（`list_my_requirements`/`get_requirement`/`get_api_doc`/`get_dev_progress`/`read_project_code`）：fail-closed 可见性（不含 `colleagueId` 不外推）、不倒整条记录、不给落盘绝对路径。
+- `colleague-agent/tools/req-write.js` — 2 个 `reversible` 写工具（`register_api_doc`/`start_dev_task`）：`buildUndo` 骨架先占注册期不变式的位，真正带 `mergeSha` 的撤销台账由 `entrypoints/web/colleague-dev.js` 跑完后覆盖式补全；handler 动态 `import()` `entrypoints/web/requirement-ops.js` 的 `registerApiDoc`/`enqueueSystemTask`（避免插件层静态反向依赖 entrypoints，见该文件头）。
 
 ### feishu-relay/ —— 飞书 → web 会话回控
 - `feishu-relay/index.js` — feature（order 16）：把飞书侧「补充内容/结束会话」（等待态卡片 + 文本兜底 + 会话 ID 路由三条路径）跨进程 POST 注入 web 执行台会话；注册会话卡片回调。
@@ -90,7 +95,11 @@
 另有两条入口汇入同一后段：`task-triage/index.js`（owner 主动分诊，走 `task-ops`/`auto-dev`）、`bug-patrol/index.js`（多维表格 → 逐条 `reviewTask` → 建 Task → `requestAutoDevelop`）。**它们彼此不互相 import feature；跨 feature 协作一律经共享领域模块（task-ops/task-actions/auto-dev 的导出函数）与 `store`。**
 
 ### C. 卡片回调自注册 + 跨进程直送
-feishu 与 web 进程都会加载插件。多个模块在**模块加载时**副作用调用 `shared/card-actions.js#registerCardKindHandler` 注册卡片回调 kind：`quick-action`（`action-runner/card-action.js`）、`review-verdict`（`feedback/index.js`）、任务卡（`task-notify.js`）、会话卡（`feishu-relay/index.js`）、`colleague-pick`（`colleague-relay/index.js`）。**插件停用即不加载 → 回调自然缺席**，这是「停用插件不载入业务代码」的落地。
+**先认准一个事实：只有走 dispatch 的进程（feishu / console）会加载插件。** `loadEnabledPluginFeatures` 只被 `src/features/index.js` 调用，后者只被 `src/app/dispatch.js` import，而 **web 入口对 `app/` 零引用** —— web 进程走装配层的次数是零。（`routes-settings.js` 确实 import 了本模块，但只取 `PLUGIN_MANIFEST` 这份**数据**；清单里的 `load` 是惰性函数，不调就不加载。）
+
+在会加载插件的那些进程里，多个模块在**模块加载时**副作用调用 `shared/card-actions.js#registerCardKindHandler` 注册卡片回调 kind：`quick-action`（`action-runner/card-action.js`）、`review-verdict`（`feedback/index.js`）、任务卡（`task-notify.js`）、会话卡（`feishu-relay/index.js`）。**插件停用即不加载 → 回调自然缺席**，这是「停用插件不载入业务代码」的落地。
+
+**卡片回调在 web 进程缺席是无害的**（web 收不到飞书卡片事件），**但靠同一机制注册的 agent 工具不是** —— `colleague-agent` 的工具恰恰只在 web 进程被调用（起 run 必须在 web）。web 侧因此必须用 `index.js#loadPluginSideEffects(['colleague-agent'])` 显式加载，落点在 `entrypoints/web/server.js` 的 listen 回调。它**仍逐个过 `getPluginEnabled`**，是补装配层的缺口而不是绕开停用开关的后门。忘了加的失败形态极隐蔽：注册表为空 → `buildAgentMcpServer` 安静造出一个零工具 MCP server → 模型凭记忆作答，**回复照样通顺、日志里什么都没有**（`capabilities/agent-tools.js` 里 `picked.length === 0` 那行 warn 是最后一道哨）。
 
 会话注入/新建会话需操作 web 进程内存里的 run 注册表，故 `feishu-relay/index.js` 与 `create-session/index.js` 都用 `fetch('http://127.0.0.1:${config.web.port}/...')` 跨进程直送（3s 超时、无 Origin 头放行），而非直接改状态。
 
@@ -115,6 +124,32 @@ feishu 与 web 进程都会加载插件。多个模块在**模块加载时**副�
 ### E. tracking-stats 两阶段
 `feature.js#handle`：前缀 match → `understand.js#understandRequest`（阶段 A 理解时间/目标/检索词）→ `logic.js#recallCandidates` 纯函数召回 → `understand.js#pickTargets`（阶段 B 精选）→ `logic.js#validateSelection` 硬校验（剔除模型编造的标识）→ 写 spec 临时文件 → 跑 `tracking_report.py` 查生产库渲染 HTML → 先发摘要后发附件。无身份门禁，`throttle.js` 兜速率/并发。
 
+### F. 同事对话 agent 的两进程分工
+
+`colleague-agent` 的判定与执行分落两个进程，中间隔一次跨进程 POST —— 这不是绕路，是因为 `start_dev_task` 要调的 `registerApiDoc`/`enqueueSystemTask` 操作的是 **web 进程内存里**的需求泵与 busy 状态机，在 feishu 进程动态 import 它们拿到的是另一份模块实例，任务入队后永远不会被执行：
+
+```
+feishu 进程                              web 进程
+─────────────────────────────────       ─────────────────────────────────
+onInbound（群聊仅 @ 才放行——见下）
+ ├─ 文字 → dispatch → feature.js
+ └─ 附件 → 早期分支（到不了 dispatch）
+      ↓ 共用 relay.js#relayToAgent()
+   名册判定
+   appendTo 落盘（dir:'in'）
+   POST /api/req/colleague-agent/turn ──→ handleColleagueAgentTurn
+   （fire-and-forget，不回 ACK）           ├─ 限流闸（per-人 + 全局并发，rate-limit.js）
+                                          ├─ session.js 组装 prompt / 取 agentSessionId
+                                          ├─ runAgentTurn（工具齐备，因为 server.js
+                                          │   已 loadPluginSideEffects(['colleague-agent'])）
+                                          ├─ lark.sendTextToUser 直接回复同事
+                                          └─ appendTo(dir:'out') + 回填 sessionId/toolTrace
+```
+
+限流两道闸都放 web 进程（`rate-limit.js`），不放 feishu 侧的 `feature.js`——真正并发跑 agent 的是 web 进程，feishu 进程数的只是自己发出去了几个 POST，放错进程等于没拦。
+
+**群聊 @ 过滤不是 `relay.js` 的逻辑**，是 `entrypoints/feishu/index.js#onInbound` 最上面的通用入口判定，对所有消息类型生效、不止同事消息。而且**只挡 `text`/`unsupported`**——`image`/`file` 分支在判定之前就已经分流走了 `relayColleagueAttachment`，压根不过这道闸（飞书图片/文件报文本就不含 `mentions`，发图时无法 @ 人）。也就是说：群里发图会直接触发 agent，不受「有没有 @」约束；只有文字消息才需要 @ 机器人。
+
 ## 常见改动入口
 
 - **要新增一个业务对话功能** → 新建 `<新插件>/index.js`（default 导出 `{ id, features:[{order, feature}] }`）+ 在 `index.js` 的 `PLUGIN_MANIFEST` 登记；若属团队工具范畴，在 `team-tools/` 下加 feature 子目录并在 `team-tools/index.js` 挂 order。不改 dispatch / 入口。
@@ -123,6 +158,10 @@ feishu 与 web 进程都会加载插件。多个模块在**模块加载时**副�
 - **要改 AI 评审的判决口径 / 阈值** → 改 `team-tools/review/logic.js#decideVerdict`（纯判决矩阵）；改评审提示词或只读闸 → `review/index.js` + `logic.js#buildReviewPrompt`。
 - **要改自动开发的工作区/分支/提交/重启恢复策略** → 改 `team-tools/auto-dev/index.js`（泵与 runOne 流程）；git 参数拼装 → `auto-dev/git.js`；分支命名/提交信息 → `auto-dev/logic.js`。
 - **要改自动合并的时机 / 失败降级策略** → 改 `team-tools/auto-dev/index.js#runOne` 里 `status='done'` 之后那次 `mergeTaskById` 调用（**必须在 done 之后**，之前调会被 `isAwaitingMerge` 谓词挡回、自动合并静默失效）；改合并本身的 git 行为 → `auto-dev/git.js`。
+- **要改合并失败的救援策略** → 认准三层逐级升级、各有各的落点：① 提交钩子拦截 → `--no-verify` 重提（`git.js#attemptMerge`）；② 工作区脏 → 自动 `stash` 后重试、合完 `pop` 回来（`git.js#mergeWithStash` / `popStash`）；③ 内容冲突 → 交注入的 resolver（`auto-dev/merge-llm.js`）。改 prompt 只动 `merge-llm.logic.js`，改 git 编排只动 `git.js`。
+  - **`popStash` 里每条出口都在保同一样东西：维护者未提交的代码**。`git stash drop` 只允许出现在「融合确认成功」之后，其余分支一律留着条目并把 sha 写进提示——那是改动的最后一份拷贝，没有任何地方能找回。
+  - **脏工作区是两类失败的共同放大器**，所以 stash 对两者都有效：预检拒绝（脏文件与合并内容重叠，git 根本不开始合并）与内容冲突（LLM 解完要 `add -A`，无关脏文件会被一并提交，即 `revert.js` 踩过的坑）。判脏**必须在 merge 之前**——冲突态下 `status --porcelain` 恒非空，事后再判分不清「维护者的脏」和「冲突造成的脏」。
+  - 合并成功但留了尾巴走 `task.mergeWarning`（面板琥珀色）而**不是** `mergeError`（面板红色「上次合并失败」）：混用会让人去排查一次根本不存在的失败。
 - **要改「放弃已合并改动」的撤销策略或 AI 兜底提示词** → 改 `team-tools/auto-dev/revert.js` / `revert.logic.js`；**不要**改 `git.js#deleteBranch`（那条是未合并任务的路径）。
 - **要改入队条件 / 幂等判定 / 覆盖判定** → 改 `team-tools/auto-dev/queue.js`；往那里加东西前先读它的文件头纪律（**只许依赖 `store/tasks.js`**，破了纪律 import 环会原样回来）。
 - **要改「只读分析」或「实际改码」的提示词 / 权限模式** → 改 `team-tools/task-ops.js`（`analyze`/`develop`，被多入口共用，一处改全局生效）。
@@ -141,5 +180,5 @@ feishu 与 web 进程都会加载插件。多个模块在**模块加载时**副�
 - **要加变量声明的新字段 / 新校验** → 改 `action-runner/feature/var-contract.js`（`CONTRACT_KEYS` + `validateVariable`），并同步 `public/js/actions-panel.js` 表单与 `actions-panel.logic.js#buildVarDecl`（空字段必须省略，否则会把 preset 覆盖成空）。
 - **要改埋点统计的理解/精选/校验/限流** → 分别改 `tracking-stats/` 下 `understand.js`（两阶段 LLM）、`logic.js`（召回/校验/文案）、`throttle.js`（限流）；改查库或报告渲染 → `tracking_report.py`（注意与 `logic.js` 的 QuerySpec 契约须同版本）。
 - **要改飞书补充内容注入 web 会话的路径** → 改 `feishu-relay/index.js`（三条命中路径 + `postInject` 跨进程直送）。
-- **要改同事消息的归属规则** → `colleague-relay/logic.js#resolveTargets`（文本与附件两条入站链路共用，勿在 `entrypoints/feishu/index.js` 另写一份）。
-- **要改四期自动处理的触发条件** → 飞书侧本地预判在 `colleague-relay/auto-notify.js`；真正的守门（插件开关 / phase / role / msgIds）在 `entrypoints/web/routes-requirements.js#handleColleagueAuto`。跨进程 `postToWeb` 范式目前有 5 份复制（create-session / stop-patrol / feishu-relay / bug-patrol / auto-notify），已够抽到 `shared/`，待办。
+- **要改同事消息的归属规则** → `colleague-agent/relay.js#isColleagueMessage`（文本与附件两条入站链路共用，勿在 `entrypoints/feishu/index.js` 另写一份）。2.0 判定**不再看开发期需求** —— 只要在同事名册里就接管，需求归属改由 agent 逐条判并打 `reqId` 标签（判不准会直接问同事），不像上一代 `colleague-relay` 只认 `phase==='dev'` 的开发人员。
+- **要改 agent 对话的限流 / 触发条件** → per-人频率与全局并发闸在 `colleague-agent/rate-limit.js`；真正的守门（插件开关 / 限流执行 / agent 调用）在 `entrypoints/web/routes-requirements.js` 的 `POST /api/req/colleague-agent/turn`（`handleColleagueAgentTurn` → `colleague-agent/session.js#handleColleagueTurn`）。跨进程 `postToWeb` 范式目前有 5 份复制（create-session / stop-patrol / feishu-relay / bug-patrol / colleague-agent/relay），已够抽到 `shared/`，待办。

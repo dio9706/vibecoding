@@ -169,9 +169,10 @@ test('mergeTaskById：合并成功 → 200，落 merged/mergedAt，history 记�
   assert.equal(fs.existsSync(path.join(repo, 'b.txt')), true, '合并内容应落到 main');
 });
 
-test('mergeTaskById：冲突 → 409，error 只带一层「合并冲突：」前缀且状态不变', async () => {
-  const repo = makeRepo('merge-conflict');
-  sh(['checkout', '-b', 'task/c'], repo);
+/** 造一个「两边都改了 a.txt」的真冲突仓库 */
+function makeConflictRepo(name, branch) {
+  const repo = makeRepo(name);
+  sh(['checkout', '-b', branch], repo);
   fs.writeFileSync(path.join(repo, 'a.txt'), 'from-branch\n');
   sh(['add', '-A'], repo);
   sh(['commit', '-m', 'fix: branch side'], repo);
@@ -179,9 +180,16 @@ test('mergeTaskById：冲突 → 409，error 只带一层「合并冲突：」�
   fs.writeFileSync(path.join(repo, 'a.txt'), 'from-main\n');
   sh(['add', '-A'], repo);
   sh(['commit', '-m', 'fix: main side'], repo);
+  return repo;
+}
+
+// ⚠️ 涉及冲突的用例**必须传 resolver: null**。不传就会起一次真实 Claude 调用——
+// 实测一条用例跑了 73 秒、烧了额度，还真去改了测试仓库里的文件。
+test('mergeTaskById：冲突 + 关掉 AI 兜底 → 409，error 只带一层「合并冲突：」前缀且状态不变', async () => {
+  const repo = makeConflictRepo('merge-conflict', 'task/c');
   const t = seedTask({ repo, branch: 'task/c', baseBranch: 'main' });
 
-  const r = await mergeTaskById(t.id);
+  const r = await mergeTaskById(t.id, { resolver: null });
   assert.equal(r.ok, false);
   assert.equal(r.code, 409);
   assert.match(r.error, /^合并冲突：/);
@@ -191,6 +199,69 @@ test('mergeTaskById：冲突 → 409，error 只带一层「合并冲突：」�
   // history 文案就是 r.error 原文，同样不套前缀
   assert.equal(r.task.history.at(-1).event, r.error);
   assert.equal(getTask(t.id).mergeError, r.error, 'mergeError 必须落盘');
+});
+
+test('mergeTaskById：AI 解开冲突 → 200 且 caveats 提示复核，mergeError 保持 null', async () => {
+  const repo = makeConflictRepo('merge-conflict-llm', 'task/cl');
+  const t = seedTask({ repo, branch: 'task/cl', baseBranch: 'main' });
+  const resolver = {
+    resolveConflict: async ({ dir }) => {
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'merged-by-ai\n');
+      return { ok: true };
+    },
+  };
+
+  const r = await mergeTaskById(t.id, { resolver });
+  assert.equal(r.ok, true, `AI 解完应合并成功，实际：${r.error || ''}`);
+  assert.equal(r.task.merged, true);
+  assert.equal(r.task.mergeError, null, 'AI 救回来了就不该留失败标记');
+  // 「AI 动过手」必须留痕：面板出黄字提醒而非红字失败
+  assert.match(r.task.mergeWarning, /AI 解决/);
+  assert.ok(r.caveats.some((c) => /建议复核/.test(c)));
+  assert.match(r.task.history.at(-1).event, /已合并 task\/cl → main（.*AI 解决/);
+  assert.equal(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8').replace(/\r\n/g, '\n'), 'merged-by-ai\n');
+});
+
+test('mergeTaskById：AI 兜底失败 → 409，错误里同时保留 git 诊断与 AI 失败原因', async () => {
+  const repo = makeConflictRepo('merge-conflict-llm-fail', 'task/cf');
+  const t = seedTask({ repo, branch: 'task/cf', baseBranch: 'main' });
+  const resolver = { resolveConflict: async () => ({ ok: false, error: '额度耗尽' }) };
+
+  const r = await mergeTaskById(t.id, { resolver });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 409);
+  assert.match(r.error, /^合并冲突：/, 'git 的原始诊断仍是第一信息源');
+  assert.match(r.error, /AI 兜底亦失败/);
+  assert.match(r.error, /额度耗尽/);
+  assert.notEqual(r.task.merged, true);
+});
+
+test('mergeTaskById：干净合并不留任何警告（黄字提醒不该无中生有）', async () => {
+  const repo = makeRepo('merge-no-caveat');
+  commitOnBranch(repo, 'task/nc', 'nc.txt', 'x\n');
+  const t = seedTask({ repo, branch: 'task/nc', baseBranch: 'main' });
+
+  const r = await mergeTaskById(t.id, { resolver: null });
+  assert.equal(r.ok, true);
+  assert.equal(r.task.mergeWarning, null);
+  assert.deepEqual(r.caveats, []);
+});
+
+test('mergeTaskById：本地改动未能自动恢复 → 合并算成功，但 stranded 警告必须进 mergeWarning', async () => {
+  // 合并成功与「你的改动还没回来」可以同时发生，这条链路上最危险的就是把后半句吞掉。
+  // 用未跟踪同名文件构造：stash -u 存下 b.txt，合并把 b.txt 建了出来，pop 无法恢复。
+  const repo = makeRepo('merge-stranded');
+  commitOnBranch(repo, 'task/sd', 'b.txt', 'from-branch\n');
+  fs.writeFileSync(path.join(repo, 'b.txt'), 'my-untracked-wip\n'); // main 上的未跟踪同名文件
+  const t = seedTask({ repo, branch: 'task/sd', baseBranch: 'main' });
+
+  const r = await mergeTaskById(t.id, { resolver: null });
+  assert.equal(r.ok, true, `合并本身应成功，实际：${r.error || ''}`);
+  assert.equal(r.task.merged, true);
+  assert.equal(r.task.mergeError, null, '合并成功就不该报失败');
+  assert.match(r.task.mergeWarning, /未能自动恢复/, '改动没回来必须让人看见');
+  assert.match(r.task.history.at(-1).event, /⚠️/);
+  assert.match(sh(['stash', 'list'], repo), /stash@\{0\}/, '改动必须还在 stash 里等人来取');
 });
 
 test('mergeTaskById：提交钩子拦截 → hookBypassed，history 追加钩子提示', async () => {

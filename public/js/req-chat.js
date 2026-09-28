@@ -2,17 +2,17 @@
  *  经 chat.js 的 bindReqConvHook 在 openConv/newConversation 时挂/卸载；数据自取（GET /api/req/get）。
  *  依赖方向：req-chat → req-view（openRequirement 供阶段流转后重开）→ chat.js，单向无环；
  *  req-view 不感知本模块，chat.js 只认 hook 回调。竞态/轮询纪律对齐 req-view（世代号 + 自杀式清理）。 */
-import { $, dirTail, renderMarkdown, fmtTime, isMarkdownPath } from './util.js';
+import { $, dirTail, renderMarkdown, fmtTime, isMarkdownPath, downloadFile } from './util.js';
 import { confirmDialog } from './ui.js';
 import { bindReqConvHook, ensureConvRunAttached, loadReqTranscript, sendMessageProgrammatically, getCurrentConvId, openMarkdownFile } from './chat.js';
-import { openRequirement, refreshReqList } from './req-view.js';
+import { openRequirement } from './req-view.js';
 import { openChangeDialog } from './req-change.js';
 import { openUiSpecDialog } from './req-uispec.js';
 import { openMapOverlay } from './req-map-overlay.js';
 import {
   iconEl, setIconText, FRONTEND_ICON_SVG, BACKEND_ICON_SVG, DOC_ICON_SVG,
   MAP_ICON_SVG, DESIGN_ICON_SVG, CHANGE_ICON_SVG,
-  REFRESH_ICON_SVG, WAITING_ICON_SVG, SETTINGS_ICON_SVG, TEAM_ICON_SVG,
+  REFRESH_ICON_SVG, WAITING_ICON_SVG, SETTINGS_ICON_SVG, TEAM_ICON_SVG, DOWNLOAD_ICON_SVG,
 } from './icons.js';
 import { openAssigneeDialog } from './req-assignee-dialog.js';
 import { openColleagueList } from './colleague-chat.js';
@@ -295,14 +295,14 @@ function renderBanner(data) {
   if (data.phase === 'dev') {
     btn.textContent = '✅ 完成开发';
     btn.addEventListener('click', () =>
-      phaseAction(data.id, '/api/req/dev-done', '完成开发后进入测试期，确认吗？', 'remount'));
+      phaseAction(data.id, '/api/req/dev-done', '完成开发后进入测试期：开发期会话将归档隐藏，测试期从新会话开始。确认吗？'));
     bannerEl.appendChild(btn);
   } else if (data.phase === 'test') {
     // 显式分支而非 else 兜底：mountReqChrome 已有 phase 守卫，这里再收紧一道，
     // 防止将来新增阶段被误渲染成「测试通过」按钮
     btn.textContent = '✅ 测试通过';
     btn.addEventListener('click', () =>
-      phaseAction(data.id, '/api/req/test-pass', '测试通过后进入归档期（对话将禁用），确认吗？', 'leave'));
+      phaseAction(data.id, '/api/req/test-pass', '测试通过后进入归档期（对话将禁用），确认吗？'));
     bannerEl.appendChild(btn);
   }
 }
@@ -328,8 +328,7 @@ function renderBusyChip(busy) {
   }
 }
 
-/** @param {'remount'|'leave'} after 流转成功后的装饰层处置：remount=原地重挂（同 conv 继续聊）；leave=卸载并转文档模式 */
-async function phaseAction(id, url, confirmText, after) {
+async function phaseAction(id, url, confirmText) {
   // confirmDialog 收对象（{title,message,...}），传裸字符串会被解构成全默认值、正文空白
   const ok = await confirmDialog({ title: '阶段流转', message: confirmText });
   if (!ok) return;
@@ -342,19 +341,31 @@ async function phaseAction(id, url, confirmText, after) {
     });
     const d = await r.json().catch(() => ({}));
     if (epoch !== chromeEpoch || currentReqId !== id) return; // 已切走：静默作废
-    if (!r.ok) return window.toast.error(d.error || '操作失败');
-    window.toast.success('已流转到下一阶段');
-    // 不能依赖 openRequirement→openConv 触发钩子刷新：conv 未变时 openConv 会同会话早返回，
-    // 钩子不触发，横幅会停留在旧阶段。流转后的装饰层刷新由本模块自己负责：
-    // dev→test 仍在同一 conv 上聊天，原地重挂（横幅按钮/右栏随新 phase 重画）；
-    // test→archiving 离开聊天模式，先卸载再交 openRequirement 进文档模式（归档表单页）。
-    if (after === 'remount') {
-      mountReqChrome(id);
-      refreshReqList(); // 侧栏阶段徽标立即联动（否则最长等 30s 轮询才由蓝「开发」变紫「测试」）
-    } else {
-      unmountReqChrome();
-      openRequirement(id);
+    if (!r.ok) {
+      // 被运行中的会话拦下：单行 toast 说不清是哪几个会话，列出标题让用户能直接去停
+      if (d.running?.length) {
+        const names = d.running.map((s) => `· ${s.title}`).join('\n');
+        await confirmDialog({
+          title: '还有会话在运行',
+          message: `以下会话仍在运行，请先等待完成或手动停止后再流转：\n\n${names}`,
+          confirmText: '知道了',
+          hideCancel: true,
+        });
+        return;
+      }
+      return window.toast.error(d.error || '操作失败');
     }
+    window.toast.success('已流转到下一阶段');
+    // 两个流转口都走「卸载装饰层 + 重开需求」，不能原地 remount：
+    // dev→test 后端已清空 convId，必须让 openRequirementChat 见空锚点建出测试期的新主会话，
+    //   原地 remount 会把用户留在开发期那个 conv 上，与「新阶段」语义相悖；
+    // test→archiving 要离开聊天模式进归档表单页。
+    // 两者的去向差异由 openRequirement 内部按 phase 分流决定，这里不需要分支。
+    // 侧栏刷新也不在这里做：newconv 路径上 refreshReqList 会早于 POST /api/req/conv 落地、
+    // 必然刷出空会话树（refreshReqList 无序号守卫，是 last-response-wins），
+    // 正确的刷新点在 req-view.js 的 openRequirementChat 里、那次 POST 成功之后。
+    unmountReqChrome();
+    openRequirement(id);
   } catch (e) {
     window.toast.error('网络错误：' + (e?.message || e));
   }
@@ -486,6 +497,14 @@ function renderDevRail(data) {
           if (!openMarkdownFile(doc.path)) window.toast.error('Markdown 查看器未就绪，请刷新页面重试');
         });
       }
+      // 下载：不受 md 判据约束。查看器只认 md，json/yaml 这类 API 文档在此之前
+      // 在界面上是纯文本，用户拿不到文件本身。name 传登记名，避免下出带随机前缀的副本名
+      const dl = document.createElement('button');
+      dl.className = 'q-btn';
+      setIconText(dl, DOWNLOAD_ICON_SVG);
+      dl.title = '下载';
+      dl.setAttribute('aria-label', `下载 ${doc.name}`);
+      dl.addEventListener('click', () => downloadFile(doc.path, doc.name));
       const replace = document.createElement('button');
       replace.className = 'q-btn';
       setIconText(replace, REFRESH_ICON_SVG);
@@ -531,7 +550,7 @@ function renderDevRail(data) {
         }
         refreshRail(data.id);
       });
-      row.append(name, replace, del);
+      row.append(name, dl, replace, del);
       listBox.appendChild(row);
     }
     if (uploadingName) {

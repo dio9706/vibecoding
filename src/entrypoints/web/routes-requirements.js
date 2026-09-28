@@ -2,12 +2,13 @@
 import fs from 'node:fs';
 import { getRequirement, getRequirements, updateRequirement, createRequirement, deleteRequirement, canTransition, normalizeSessions } from '../../store/requirements.js';
 import { enqueueSystemTask, finalizeRequirement, finalizePrecheck, archiveRequirement, resolveAssigneeList, hasQueuedTasks, queuedTasks, reqDir, readMapVersion, DOCGEN_GUIDE, docgenAborts, userStoppedSet, docgenLiveLine, registerApiDoc } from './requirement-ops.js';
-import { pickCwdAndDirs, buildSeedPrompt, buildFeatureSnapshot } from './req-logic.js';
+import { pickCwdAndDirs, buildSeedPrompt, buildFeatureSnapshot, runningSessions } from './req-logic.js';
 import { getTopFiles, getFeatureIndex } from '../../store/feature-index.js';
 import { getColleague } from '../../store/colleagues.js';
-import { getThread, markRead, appendMessage, dropReqThreads } from '../../store/colleague-messages.js';
+import { getColleagueThread, markColleagueRead, appendTo, dropReqThreads, getUnreadTotals } from '../../store/colleague-messages.js';
 import { getActiveBot, getPluginEnabled } from '../../store/settings.js';
 import { sendTextToUser } from '../../integrations/lark.js';
+import { runScript } from '../../integrations/shell.js';
 import { writePitfalls, ensureClaudeMdRef } from './req-pitfalls.js';
 import { inspectBitable, confirmBug, ignoreBug, retryBug, currentInspectIdentity } from './req-inspect.js';
 import { parseBitableLink } from '../../plugins/team-tools/bug-patrol/logic.js';
@@ -15,11 +16,35 @@ import { extractDocLinks } from '../../channels/feishu-normalize.js';
 import { fetchDocRawContent, resolveWikiNodeObj } from '../../integrations/lark.js';
 import { hasActiveRunForConv } from '../../store/runs.js';
 import { handleReqV2Routes } from './routes-req-v2.js';
-import { autoHandleMessages } from './colleague-auto.js';
+import { handleColleagueTurn } from '../../plugins/colleague-agent/session.js';
 import { sendJson } from './http-util.js';
 import { withJsonBody } from './body.js';
 import { str } from './input.js';
 import { logger } from '../../shared/logger.js';
+
+/**
+ * 新建需求的工程配置默认值：沿用最近一次新建的、配过工程的需求（含「开发 / 只读」标记）。
+ *
+ * 同一批需求几乎总落在同一套前后端工程上，每建一个需求都重走两次系统文件夹框是纯重复劳动。
+ *
+ * 按 createdAt 倒序而不是直接用 getRequirements 的 updatedAt 序：后者会被 busy 写入、会话
+ * 绑定、巡检回填等任何一次落盘刷新，回头动过的老需求会插到队首，「上一个需求」就名不副实。
+ *
+ * 目录已不存在的槽位跳过（两侧都不存在就继续往前找）：工程被挪走或删掉后继承一个坏路径，
+ * 界面上看不出任何异常，要等 docgen 报错才发现；宁可留空逼用户重选一次。
+ */
+function inheritProjects() {
+  const list = getRequirements().sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  for (const r of list) {
+    const picked = { frontend: null, backend: null };
+    for (const key of ['frontend', 'backend']) {
+      const p = r.projects?.[key];
+      if (p?.dir && fs.existsSync(p.dir)) picked[key] = { dir: p.dir, dev: !!p.dev };
+    }
+    if (picked.frontend || picked.backend) return picked;
+  }
+  return { frontend: null, backend: null };
+}
 
 // ==== POST /api/req/create ====
 function handleCreate(req, res) {
@@ -27,13 +52,15 @@ function handleCreate(req, res) {
     const title = str(data.title);
     if (!title) return sendJson(res, 400, { error: 'title 不能为空' });
     if (title.length > 60) return sendJson(res, 400, { error: 'title 不能超过 60 字符' });
-    const created = createRequirement({ title });
+    const created = createRequirement({ title, projects: inheritProjects() });
     sendJson(res, 201, created);
   });
 }
 
 // ==== GET /api/req/list ====
 function handleList(res) {
+  // 一次读盘算出全量未读，再按 id 取：逐需求调 getUnreadCounts 会在几十条需求上放大成几十次读盘
+  const unreadTotals = getUnreadTotals();
   const requirements = getRequirements().map((r) => ({
     id: r.id,
     title: r.title,
@@ -41,6 +68,9 @@ function handleList(res) {
     updatedAt: r.updatedAt,
     // 排队中（泵尚未派发、busy 未写入）也算 busy：否则 docgen 202 后的短窗口里列表看不到任何进行中迹象
     busy: !!r.busy || hasQueuedTasks(r.id),
+    // 同事未读总数：侧栏据此打小红点。不进需求就能看到「哪个需求有人找我」——
+    // 详情页右栏那个 badge 要点进需求才看得见，后端同事发来接口文档时主机常常整天没注意到
+    unreadTotal: unreadTotals[r.id] || 0,
     // 会话树要靠它渲染。前端 refreshReqList 用本接口返回值整体替换 lastList，
     // 少了这个字段，30s 轮询一到开发/测试期的子会话行就全部消失（看起来像「下拉自动收起」）。
     sessions: normalizeSessions(r),
@@ -231,13 +261,19 @@ function handleAssignees(req, res) {
 }
 
 // ==== GET /api/req/colleague-messages?reqId=&colleagueId= ====
-function handleColleagueMessages(url, res) {
+// export：供 routes-requirements.test.js 直调（跨需求过滤 / lastInboundAt 回归测试无需真起 HTTP server）
+export function handleColleagueMessages(url, res) {
   const reqId = str(url.searchParams.get('reqId'));
   const colleagueId = str(url.searchParams.get('colleagueId'));
   if (!reqId || !colleagueId) return sendJson(res, 400, { error: 'reqId / colleagueId 均必填' });
   if (!getRequirement(reqId)) return sendJson(res, 404, { error: '需求不存在' });
-  const t = getThread(reqId, colleagueId);
-  sendJson(res, 200, { messages: t.messages, lastInboundAt: t.lastInboundAt });
+  // getColleagueThread 拿的是该人跨需求的整条线；这个端点只该给该需求的一段，
+  // 按消息上的 reqId 标签过滤，lastInboundAt 也要按过滤后的算——否则面板「最近来信」
+  // 会显示别的需求的时间
+  const all = getColleagueThread(colleagueId);
+  const messages = all.messages.filter((m) => m.reqId === reqId);
+  const lastInboundAt = messages.filter((m) => m.dir === 'in').at(-1)?.at || null;
+  sendJson(res, 200, { messages, lastInboundAt });
 }
 
 // ==== POST /api/req/colleague-messages/read {reqId, colleagueId} ====
@@ -246,10 +282,10 @@ function handleColleagueRead(req, res) {
     const reqId = str(data.reqId);
     const colleagueId = str(data.colleagueId);
     if (!reqId || !colleagueId) return sendJson(res, 400, { error: 'reqId / colleagueId 均必填' });
-    // 与同组另外三个端点一致地校验需求存在：markRead 对未知会话本就不写盘，
+    // 与同组另外三个端点一致地校验需求存在：markColleagueRead 对未知会话本就不写盘，
     // 但少这一句会让「需求已删」和「已读成功」回同一个 200，前端无从区分
     if (!getRequirement(reqId)) return sendJson(res, 404, { error: '需求不存在' });
-    markRead(reqId, colleagueId);
+    markColleagueRead(colleagueId, { reqId });
     sendJson(res, 200, { ok: true });
   });
 }
@@ -284,45 +320,39 @@ function handleColleagueSend(req, res) {
     }
     // 发送失败不落消息：落了界面会显示一条其实没送达的消息，比不显示更糟
     if (!ok) return sendJson(res, 502, { error: '飞书发送失败，请检查机器人权限与 open_id' });
-    const entry = appendMessage(reqId, colleagueId, { dir: 'out', text, status: 'read', role: c.role });
+    const entry = appendTo(colleagueId, { dir: 'out', text, status: 'read', role: c.role, reqId });
     logger.info('req-routes', '向同事发送消息', { reqId, colleagueId });
     sendJson(res, 200, { ok: true, message: entry });
   });
 }
 
-// ==== POST /api/req/colleague-messages/auto {reqId, colleagueId, msgIds} ====
-// 飞书进程在消息归属确定后跨进程触发（四期）。路由只做四道校验就 202 交给 colleague-auto，
-// 分类是 LLM 调用（秒级），不能让飞书侧的 3s 超时等它。
-// handledBy 过滤在这里和 autoHandleMessages 内部各有一份，不要二选一删掉：路由这层是为了「一个 id 都不合法」
-// 能直接 400 给飞书侧留痕；内部那层是因为 autoHandleMessages 是可独立调用的契约、不该信任调用方。
-// 两层都只认 handledBy，而它在 run 收尾（onSettle）才写 —— 入队到收尾之间同 msgId 的重复触发两层都挡不住；
-// 排队中的重复靠 enqueueSystemTask 按 msgId 去重，运行中的重复是已知限制（调用方 notifyAutoHandle 不重试）。
-function handleColleagueAuto(req, res) {
-  return withJsonBody(req, res, (data) => {
-    const reqId = str(data.reqId);
-    const colleagueId = str(data.colleagueId);
-    // 去重：飞书侧偶发重复上报同一 msgId 时，若不去重 accepted 计数会虚高（[m,m] 报 2 实际只处理 1 条）
-    const msgIds = [...new Set((Array.isArray(data.msgIds) ? data.msgIds : []).map((x) => str(x)).filter(Boolean))];
-    // 拍板 #7：自动处理跟随 colleague-relay 插件启停。飞书侧附件链路（relayColleagueAttachment）是刻意绕过
-    // 插件开关的（三期决定：不该因插件停用就让同事发的文档变成「不支持的消息类型」），所以开关只能在这里认——
-    // 否则停用后文字不再中继、文件却仍会烧一次 Haiku 并起 bypassPermissions 的 run
-    if (!getPluginEnabled('colleague-relay')) return sendJson(res, 409, { error: '同事消息中继插件已停用，不自动处理' });
-    const r = getRequirement(reqId);
-    if (!r) return sendJson(res, 404, { error: '需求不存在' });
-    if (r.phase !== 'dev') return sendJson(res, 409, { error: '仅开发期自动处理同事消息' });
-    const c = getColleague(colleagueId);
-    if (!c) return sendJson(res, 400, { error: '同事不存在' });
-    if (c.role !== 'backend') return sendJson(res, 400, { error: '仅后端同事的消息自动处理' });
-    if (!msgIds.length) return sendJson(res, 400, { error: 'msgIds 为空' });
-    // 只认该线程里 dir=in 且尚未处理的：防重复触发与跨线程串号
-    const known = new Set(getThread(reqId, colleagueId).messages.filter((m) => m.dir === 'in' && !m.handledBy).map((m) => m.id));
-    const valid = msgIds.filter((id) => known.has(id));
-    if (!valid.length) return sendJson(res, 400, { error: 'msgIds 不属于该线程或已处理' });
-    // 路由级留痕：访问日志只有 method/path/status，看不到「传了 3 个 id 只受理 1 个」这种部分丢弃
-    logger.info('req-routes', '同事消息自动处理已受理', { reqId, colleagueId, accepted: valid.length, rejected: msgIds.length - valid.length });
-    sendJson(res, 202, { ok: true, accepted: valid.length });
-    autoHandleMessages(r, colleagueId, valid).catch((e) =>
-      logger.error('req-routes', '同事消息自动处理异常', { reqId, colleagueId, err: e?.message || String(e) }),
+// ==== POST /api/req/colleague-agent/turn {colleagueId, text, msgId?, files?} ====
+// 飞书进程在落盘入站消息后跨进程触发（P3）。agent 必须在 web 进程跑：
+// 写工具要调本进程内存里的需求泵与 busy 状态机（见 colleague-agent/session.js 文件头）。
+//
+// 202 立即返回：对面是 3s 超时的 fire-and-forget，一轮 agent 要十几秒，同步等必然超时，
+// 而超时重发会在「入队到收尾」的窗口里制造重复任务（四期 auto-notify 踩过同款坑）。
+export async function handleColleagueAgentTurn(req, res, deps = {}) {
+  const { handleTurn = handleColleagueTurn, isEnabled = getPluginEnabled } = deps;
+  return withJsonBody(req, res, async (data) => {
+    if (!isEnabled('colleague-agent')) {
+      return sendJson(res, 409, { error: '同事对话 Agent 插件已停用' });
+    }
+    const colleagueId = str(data?.colleagueId);
+    if (!colleagueId) return sendJson(res, 400, { error: '缺少 colleagueId' });
+    const text = str(data?.text);
+    const files = Array.isArray(data?.files) ? data.files : [];
+    // 纯空白且无附件 = 没内容可聊，起 agent 纯属烧额度
+    if (!text.trim() && !files.length) return sendJson(res, 400, { error: '缺少 text 或 files' });
+
+    // 先回 202 再干活：顺序反了的话对面已经超时断开，这个响应发给了空气
+    sendJson(res, 202, { ok: true });
+    // fire-and-forget 必须带 catch：未捕获的 rejection 在 Node 里会让进程退出
+    handleTurn({ colleagueId, text, msgId: str(data?.msgId) || null, files }).catch((e) =>
+      logger.warn('routes-req', 'colleague agent 一轮异常（已捕获）', {
+        colleagueId,
+        err: e?.message || String(e),
+      }),
     );
   });
 }
@@ -520,6 +550,12 @@ function handleGuidelines(req, res) {
 }
 
 // ==== POST /api/req/conv {id,convId} ====
+/**
+ * 绑定需求主会话。除了写 convId，还必须往 sessions[] 登记一条**当前阶段**的 main 行——
+ * normalizeSessions 的「convId → 合成 main」只在 sessions 为空时生效，测试期换主会话时
+ * sessions 里已有开发期那批，合成路径不会触发，不显式登记的话新主会话在侧栏根本不出现，
+ * 也逃过阶段流转守卫（spec §6.2）。
+ */
 function handleConv(req, res) {
   return withJsonBody(req, res, (data) => {
     const id = str(data.id);
@@ -527,19 +563,59 @@ function handleConv(req, res) {
     if (!r) return sendJson(res, 404, { error: '需求不存在' });
     const convId = str(data.convId);
     if (!convId) return sendJson(res, 400, { error: 'convId 不能为空' });
-    updateRequirement(id, { convId }, '绑定会话');
+
+    const sessions = normalizeSessions(r);
+    // 三种情形，顺序不能换：
+    // 1) 已有同 convId 的行 → 一个字段都不动（它可能已被 run 回填过 sessionId、被用户改过标题）。
+    //    覆盖的是前端网络重试。
+    // 2) 没有该 convId、但当前阶段已有 main → **重指**那一行的 convId，而不是新推一条。
+    //    换浏览器 / 桌面版 / 清过站点数据时，openRequirementChat 查的是本浏览器 localStorage，
+    //    会铸一个全新 convId 过来（req-view.js openRequirementChat + chat.js createReqConv）。
+    //    这正是 devSession 存在的那个「换浏览器重建 conv 续接」流程（requirements.js 字段注释）。
+    //    若新推一条，每换一个客户端就多一条同阶段 main —— 而 main 在 handleSessionDelete 里
+    //    被无条件保护、前端也不渲染删除按钮，用户除了手改 requirements.json 没有出路。
+    //    重指还保住了该行的 sessionId 与标题，让新 conv 直接续上原来的 Claude session。
+    // 3) 当前阶段还没有 main（刚流转完，或全新需求）→ 这才是真正该新建的时候。
+    const existing = sessions.find((s) => s.convId === convId);
+    if (!existing) {
+      const currentMain = sessions.find((s) => s.kind === 'main' && s.phase === r.phase);
+      if (currentMain) {
+        currentMain.convId = convId;
+      } else {
+        sessions.push({
+          convId,
+          sessionId: null,
+          title: r.title,
+          kind: 'main',
+          phase: r.phase,
+          createdAt: new Date().toISOString(),
+        });
+      }
+    }
+    updateRequirement(id, { convId, sessions }, '绑定会话');
     sendJson(res, 200, { ok: true, convId });
   });
 }
 
-/** dev-done / test-pass 共用的阶段流转守卫：404 → canTransition 不过 409 → 有任务进行中/排队 409 */
+/**
+ * dev-done / test-pass 共用的阶段流转守卫：404 → canTransition 不过 409 → 有任务进行中/排队 409。
+ *
+ * 会话判据覆盖**当前阶段全部会话**而非只有主会话：开发期开的子会话（kind:'sub'）同样在改代码，
+ * 它还在跑就流转，等于让上个阶段的 run 在新阶段继续落盘（spec §1 缺陷 A）。
+ */
 function phaseGuard(id, toPhase) {
   const r = getRequirement(id);
   if (!r) return { ok: false, status: 404, error: '需求不存在' };
   const t = canTransition(r.phase, toPhase);
   if (!t.ok) return { ok: false, status: 409, error: t.error };
-  if (r.busy || hasQueuedTasks(id) || hasActiveRunForConv(r.convId)) {
+  if (r.busy || hasQueuedTasks(id)) {
     return { ok: false, status: 409, error: '有任务进行中/排队，请先等待完成或停止' };
+  }
+  // ★ 第二参传 r.phase（当前阶段），不是 toPhase。传目标阶段会让守卫检查一批还不存在的会话、
+  // 对当前正在跑的那批视而不见——真空通过。runningSessions 的形参就叫 currentPhase，别传错。
+  const running = runningSessions(normalizeSessions(r), r.phase, hasActiveRunForConv);
+  if (running.length) {
+    return { ok: false, status: 409, error: '有会话正在运行，请先等待完成或停止', running };
   }
   return { ok: true };
 }
@@ -549,9 +625,23 @@ function handleDevDone(req, res) {
   return withJsonBody(req, res, (data) => {
     const id = str(data.id);
     const g = phaseGuard(id, 'test');
-    if (!g.ok) return sendJson(res, g.status, { error: g.error });
-    const updated = updateRequirement(id, { phase: 'test' }, '开发完成，进入测试期');
-    logger.info('req-routes', '阶段流转：开发→测试', { reqId: id });
+    if (!g.ok) return sendJson(res, g.status, { error: g.error, running: g.running });
+    const r = getRequirement(id);
+    // ★ normalizeSessions(r) 必须在这一次 updateRequirement 之前、且读未更新的 r 求值，两个理由：
+    //   1) 老需求的主会话是读侧靠 convId 合成的，锚点一清合成路径就失效，开发期这段历史
+    //      再也拿不回来（归档期「优化汇总」会直接少一整段）；
+    //   2) normalizeSessions 的 phase 缺省取 req.phase，此刻还是 'dev'。若改成先落 phase:'test'
+    //      再去 normalizeSessions(getRequirement(id))，开发期会话会被全部钉成 'test'、此后永不被隐藏——
+    //      功能静默退化成空操作，不报错也不红测。下面那条「会话缺 phase 时按流转前的阶段物化成 dev」
+    //      的用例是这条不变式的唯一护栏——前两条用例的 fixture 都显式带了 phase，钉不住它。
+    // 清 convId/devSession 是「测试期开新主会话」的触发器：前端见空锚点走既有的
+    // 「新建 conv 并回填」路径（req-view.js openRequirementChat），开发期会话随 phase 沉为历史。
+    const updated = updateRequirement(
+      id,
+      { sessions: normalizeSessions(r), phase: 'test', convId: null, devSession: null },
+      '开发完成，进入测试期（开发期会话已归档）',
+    );
+    logger.info('req-routes', '阶段流转：开发→测试', { reqId: id, archivedSessions: updated.sessions.length });
     sendJson(res, 200, { ok: true, phase: updated.phase });
   });
 }
@@ -561,7 +651,7 @@ function handleTestPass(req, res) {
   return withJsonBody(req, res, (data) => {
     const id = str(data.id);
     const g = phaseGuard(id, 'archiving');
-    if (!g.ok) return sendJson(res, g.status, { error: g.error });
+    if (!g.ok) return sendJson(res, g.status, { error: g.error, running: g.running });
     const updated = updateRequirement(id, { phase: 'archiving' }, '测试通过，进入归档期');
     logger.info('req-routes', '阶段流转：测试→归档', { reqId: id });
     sendJson(res, 200, { ok: true, phase: updated.phase });
@@ -597,8 +687,9 @@ function handleDiscard(req, res) {
 // ==== POST /api/req/delete {id} ====
 // 物理移除已废弃的需求。只开放给 discarded：活跃需求的入口是「废弃」，已归档需求是存档不该删，
 // 侧栏右键菜单也只对废弃行给「移除」——这里把同一条契约在服务端再钉一遍，防 API 直调绕过。
-function handleDelete(req, res) {
-  return withJsonBody(req, res, (data) => {
+export function handleDelete(req, res, deps = {}) {
+  const { runScript: runGit = runScript } = deps;
+  return withJsonBody(req, res, async (data) => {
     const id = str(data.id);
     if (!id) return sendJson(res, 400, { error: 'id 不能为空' });
     const r = getRequirement(id);
@@ -609,6 +700,15 @@ function handleDelete(req, res) {
     // 会话 id 必须在删记录之前取：删完就再也查不到它绑过哪些 conv，
     // 前端 localStorage 里的聊天记录就会变成永远清不掉的孤儿。
     const convIds = [...new Set(normalizeSessions(r).map((s) => s.convId).filter(Boolean))];
+
+    // 先回收 agent worktree 再删需求记录：顺序反了就读不到 agentWorktrees 了，
+    // 目录会永远留在盘上（每个都是一份完整工作区拷贝）
+    for (const w of r.agentWorktrees || []) {
+      // 幂等：目录不存在时 git 返回非 0 但无副作用。失败只告警——
+      // 删不掉一个临时目录不该阻止用户删需求
+      const rm = await runGit('git', ['-C', w.dir, 'worktree', 'remove', '--force', w.worktreeDir], { shell: false });
+      if (!rm.ok) logger.warn('req-routes', '回收 agent worktree 失败（不阻塞删除）', { reqId: id, dir: w.worktreeDir });
+    }
 
     deleteRequirement(id);
     // 磁盘产物与同事对话紧随其后。两者失败都不回滚记录——记录已删是用户看得见的结果，
@@ -668,6 +768,9 @@ function handleSession(req, res) {
 
     // 幂等 upsert
     const sessions = normalizeSessions(r);
+    // 本函数内所有 phase 判据都直接比较、不加 || 'dev' 兜底：sessions 是 normalizeSessions 的产物，
+    // 每行都保证带 phase（与 req-logic.js runningSessions 不同——那个是导出函数，会收到未归一的裸数组，
+    // 所以那边的冗余防御要留）。
     const idx = sessions.findIndex((s) => s.convId === convId);
 
     let updated = false;
@@ -689,15 +792,32 @@ function handleSession(req, res) {
         updated = true;
       }
     } else {
+      // 阶段内 main 唯一：跨阶段共存合法（开发期一条 + 测试期一条），同阶段第二条是数据错乱。
+      // 注意 handleConv 已会为主会话登记 main 行，正常前端流程不会走到这里再建 main。
+      if (kind === 'main' && sessions.some((s) => s.kind === 'main' && s.phase === r.phase)) {
+        return sendJson(res, 409, { error: '当前阶段已有主会话' });
+      }
       // 新增：此时没有既有标题可保，才用默认名兜底
-      sessions.push({ convId, sessionId, title: title || '新会话', kind, createdAt: new Date().toISOString() });
+      sessions.push({
+        convId,
+        sessionId,
+        title: title || '新会话',
+        kind,
+        phase: r.phase,
+        createdAt: new Date().toISOString(),
+      });
       updated = true;
     }
 
     // devSession 回写认「既有记录的 kind」而不是请求传入的 kind：
     // 回填方不传 kind 时上面会默认成 'sub'，用它判断的话主会话的 devSession 永远回填不了。
-    const effectiveKind = idx >= 0 ? sessions[idx].kind : kind;
-    if (effectiveKind === 'main' && sessionId) {
+    // 再加一道 phase 判据：历史阶段（如开发期）的 main 若有迟到的 sessionId 回填，
+    // 不能覆盖当前阶段的 devSession 锚点——那会让 bug-fix 续到上个阶段的 session 上去。
+    // else 半边取 length - 1：走到这里说明上面同阶段 main 409 已提前返回过、没命中，
+    // 必然刚 push 过一条，末位就是它。
+    const target = idx >= 0 ? sessions[idx] : sessions[sessions.length - 1];
+    const effectiveKind = target.kind;
+    if (effectiveKind === 'main' && sessionId && target.phase === r.phase) {
       devSessionPatch = sessionId;
     }
 
@@ -708,7 +828,7 @@ function handleSession(req, res) {
         patch.devSession = devSessionPatch;
       }
       const event =
-        effectiveKind === 'main' ? '主会话 sessionId 回填' : `会话登记 ${title || sessions[idx >= 0 ? idx : sessions.length - 1].title}`;
+        effectiveKind === 'main' ? '主会话 sessionId 回填' : `会话登记 ${title || target.title}`;
       updateRequirement(id, patch, event);
     }
 
@@ -730,7 +850,8 @@ function handleSessionDelete(req, res) {
     if (idx < 0) return sendJson(res, 404, { error: '会话不存在' });
 
     if (sessions[idx].kind === 'main') {
-      return sendJson(res, 409, { error: '不能删除主会话（bug-fix 落点）' });
+      // 所有阶段的 main 都不可删：当前阶段的是 bug-fix 落点，历史阶段的是归档期「优化汇总」的转录数据源。
+      return sendJson(res, 409, { error: '不能删除主会话（bug-fix 落点 / 归档汇总数据源）' });
     }
 
     const title = sessions[idx]?.title || convId;
@@ -886,7 +1007,7 @@ export function handleRequirementRoutes(req, res, url) {
   if (pathname === '/api/req/colleague-messages' && method === 'GET') return handleColleagueMessages(url, res);
   if (pathname === '/api/req/colleague-messages/read' && method === 'POST') return handleColleagueRead(req, res);
   if (pathname === '/api/req/colleague-messages/send' && method === 'POST') return handleColleagueSend(req, res);
-  if (pathname === '/api/req/colleague-messages/auto' && method === 'POST') return handleColleagueAuto(req, res);
+  if (pathname === '/api/req/colleague-agent/turn' && method === 'POST') return handleColleagueAgentTurn(req, res);
   if (pathname === '/api/req/doc-from-link' && method === 'POST') return handleDocFromLink(req, res);
   if (pathname === '/api/req/docgen' && method === 'POST') return handleDocgen(req, res);
   if (pathname === '/api/req/docgen/stop' && method === 'POST') return handleDocgenStop(req, res);

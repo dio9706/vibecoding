@@ -103,7 +103,17 @@ updateRequirement(id, {
 
 理由：`normalizeSessions` 的路径 1（`sessions` 非空 → 直接返回）会原样返回开发期那批，**不会**为新 `convId` 合成 main 行。不补这一步，测试期新主会话在侧栏根本不出现（也无法重命名、无法被守卫看见）。
 
-登记内容：`{ convId, sessionId: null, title: r.title, kind: 'main', phase: r.phase, createdAt: now }`。幂等：`sessions[]` 中已存在同 `convId` 的条目时不插入、不改动该条目（`handleConv` 可能被重复调用 —— 前端网络重试、多标签页同时打开同一需求）。
+三种情形，顺序不能换（2026-09-21 经代码评审修正，原设计只有 1 和 3，漏了 2）：
+
+1. **已有同 `convId` 的行** → 一个字段都不动（它可能已被 run 回填过 `sessionId`、被用户改过标题）。覆盖前端网络重试。
+2. **没有该 `convId`、但当前阶段已有 main** → **重指**那一行的 `convId`，不新推一条。
+3. **当前阶段还没有 main**（刚流转完，或全新需求）→ 这才是真正该新建的时候：`{ convId, sessionId: null, title: r.title, kind: 'main', phase: r.phase, createdAt: now }`。
+
+**为什么情形 2 必须是重指**：`openRequirementChat`（`req-view.js`）判断 conv 是否存在，查的是**本浏览器的 localStorage**；`createReqConv`（`chat.js`）用 `'c' + Date.now()` 铸新 id，与 `reqId` 无关。所以换浏览器 / 用桌面版 / 清过站点数据后打开同一需求，服务端拿到的必然是一个全新 `convId`。若新推一条，每换一个客户端就多一条同阶段 main —— 而 main 在 `handleSessionDelete` 里被无条件保护、前端也不渲染删除按钮，用户除了手改 `requirements.json` 没有出路。这正是 `requirements.js` 字段注释里写明 `devSession` 存在的那个「换浏览器重建 conv 续接」流程，是一等公民而非边角。
+
+重指还顺带保住该行的 `sessionId` 与用户改过的标题，让新 conv 直接续上原来的 Claude session —— 恰是该流程的设计意图。
+
+> 注意 `handleConv` 是**唯一**会创建 main 的路径：四个前端调用 `/api/req/session` 的点（重命名 / 新建子会话 / retro / `sessionId` 回填）没有一处发 `kind:'main'`。因此 §6.3 里 `handleSession` 的同阶段 main 唯一守卫实际是纯防御（防数据损坏与 API 直调），真正的唯一性由本节保证。
 
 ### 6.3 main 唯一性：从全局收窄到阶段内
 
@@ -120,12 +130,20 @@ updateRequirement(id, {
 
 现有 `after` 两种取值：`'remount'`（原地重挂横幅）/ `'leave'`（卸载转文档模式）。`dev-done` 当前用 `'remount'`，它只调 `mountReqChrome(id)` + `refreshReqList()`，**不会创建新 conv** —— 用户会原地卡在开发期那个 conv 上。
 
-新增 `'newconv'` 分支供 `dev-done` 使用：
+改为两个流转口都走「卸载装饰层 + 重开需求」：
 
 ```js
 unmountReqChrome();
 openRequirement(id);   // → openRequirementChat：convId 为 null → 新建 + 绑定 + openConv
 ```
+
+**`after` 参数已整个删除**（2026-09-21 经代码评审）：原计划是加第三个分支 `'newconv'`，但落地后发现 `'newconv'` 与 `'leave'` 的代码完全相同——去向差异（进聊天 / 进归档表单页）由 `openRequirement` 内部按 `phase` 自己分流，与参数无关；而 `'remount'` 在 dev-done 改道后已无任何调用方。三路契约零消费者，留着只会误导。
+
+**侧栏刷新不在这里做**：`newconv` 路径上 `refreshReqList()` 会早于 `POST /api/req/conv` 落地，必然刷出空会话树（`refreshReqList` 无序号守卫，是 last-response-wins，输掉竞速时空白会一直留到 30s 轮询）。正确刷新点见 §6.4b。
+
+### 6.4b 侧栏刷新落在 conv 注册成功处
+
+`openRequirementChat` 里 `POST /api/req/conv` 成功后就地 `refreshReqList()`。原因：`applyFetchedReq` **不 await** `openRequirementChat`，所以 `openRequirement` 的 Promise 在那次 POST 发出**之前**就 resolve 了 —— 在调用方加 `await` 也堵不住。放在注册成功处，每条铸新 conv 的路径（阶段流转 / 换浏览器 / 清过站点数据）都一并受益。
 
 `openRequirementChat`（`req-view.js:874`）建 conv 时补两项参数：
 
@@ -166,7 +184,11 @@ const sessions = (r.sessions || []).filter((s) => !s.phase || s.phase === r.phas
 
 ## 10. 已知边角
 
-`req-view.js:3041`（UI 规范还原）守卫 `if (!req.convId) return window.toast.error('还原需要开发会话，请先定稿进入开发期')`。测试期 `convId` 清空后、用户尚未打开过聊天前会命中并给出误导性文案。处置：只改文案为「请先打开需求会话」，不为它额外加自动建 conv 的逻辑。
+~~`req-view.js` UI 规范还原的守卫文案在测试期会误导，改成「请先打开需求会话」。~~ **这条经代码评审判定为错误结论，已撤回（2026-09-21）。**
+
+追调用链：该 `onRestore` 所在的 `renderReportArea` ← `renderMainCol` ← `renderWorkbench`，而 `renderWorkbench` **只**在 `renderReqPage` 的 `req.phase === 'review'` 分支被调用。dev/test 的还原是另一个回调（`req-map-overlay.js`），那边没有 `convId` 守卫。所以这句提示**只有评审期可达**，而评审期 `req.convId` 恒为空（全前端唯一写 `/api/req/conv` 的是 `openRequirementChat`，只在 dev/test 跑；`PHASE_FLOW` 单向，不会带 convId 退回评审期）——它是每个评审期用户点还原时必然看到的那句。原文案「请先定稿进入开发期」给的是真实出路，改成阶段无关的措辞反而让人去打开一个那个阶段不可能存在的会话。**保持原样。**
+
+教训：改用户可见文案前先确认该分支的真实可达阶段，别按「理论上也可能发生」来措辞。
 
 ## 11. 改动落点汇总
 

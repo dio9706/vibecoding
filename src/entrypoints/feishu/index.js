@@ -23,11 +23,7 @@ import { getCardKindHandler } from '../../shared/card-actions.js';
 // 角色判定上移到 shared：卡片回调住在插件里，不能 import 本入口（分层单向依赖），
 // 而它此前因此写死了 role 导致按钮全废。判定只留一份，两条链路共用。
 import { roleOf } from '../../shared/roles.js';
-import { getColleagues } from '../../store/colleagues.js';
-import { getRequirements } from '../../store/requirements.js';
-import { appendMessage, addPending, getPending } from '../../store/colleague-messages.js';
-import { resolveTargets, buildPickCard, ACK_TEXT } from '../../plugins/colleague-relay/logic.js';
-import { notifyAutoHandle } from '../../plugins/colleague-relay/auto-notify.js';
+import { relayToAgent } from '../../plugins/colleague-agent/relay.js';
 import { installProcessGuards } from '../../shared/process-guard.js';
 
 // 最后兜底：单条畸形消息/一次飞书 API 抛错不得打死长连接进程。详见 process-guard.js。
@@ -72,53 +68,28 @@ async function onCardAction(data) {
 }
 
 /**
- * 同事发来的附件（图片 / 文件）→ 归入其开发期需求的对话流。
+ * 同事发来的附件（图片 / 文件）→ 交给 agent。
  *
- * 为什么不放在 dispatch 的 colleague-relay feature 里：附件消息在 onInbound 早期就被
- * image/file 两个分支接走并 `return`，**根本到不了 dispatch**。只做 feature 的话，
- * 同事发的文字能收到、发的接口文档永远收不到——而后者正是四期最重要的输入。
+ * 为什么不放在 dispatch 的 feature 里：附件消息在 onInbound 早期就被 image/file 两个分支
+ * 接走并 `return`，**根本到不了 dispatch**。只做 feature 的话，同事发的文字能收到、
+ * 发的接口文档永远收不到 —— 而后者正是最重要的输入。
  *
- * 判定共用 colleague-relay/logic.js 的 resolveTargets，避免两条链路各写一份归属规则，
- * 漂移成「文字归对了需求、附件归错了」。
+ * 判定与落盘共用 `colleague-agent/relay.js`，与文本链路同一份规则。
+ *
+ * **这里不再自己回 ACK**（2.0 起）：接管后由 web 进程跑完 agent、经 lark 直接回复同事实质内容，
+ * 正常路径只回这一条。以前那句 `await say(ACK_TEXT)` 是刻意删掉的，不是漏了 ——
+ * 留着会让同事先收到「已收到」再收到真回复，像两个机器人在说话。
+ * 代价是附件处理从「秒回执」变成「等约 10 秒拿实质回复」，与文本链路一致。
+ * 失败与限流时的回执由 `colleague-agent/session.js` 按情况发（三句话术）。
  *
  * @returns {Promise<boolean>} true = 已接管（调用方应 return），false = 不是同事的附件，走原有材料池
  */
-async function relayColleagueAttachment(m, say, file, kind) {
-  const openId = m.userId;
-  const colleagues = getColleagues();
-  const { colleague, reqs } = resolveTargets(openId, colleagues, getRequirements());
-  if (!colleague || !reqs.length) {
-    // 不接管时必须留痕：否则「同事发了文档却走了材料池」只能靠「日志里缺少成功那条」倒推，
-    // 分不清是名册没这人、还是他没有开发期需求、还是代码压根没加载（已实际踩过一次）。
-    logger.info('feishu', '附件未走同事中继，落回材料池', {
-      openId,
-      kind,
-      reason: !colleague ? '该 open_id 不在同事名册' : '该同事没有开发期需求',
-      colleagueCount: colleagues.length,
-    });
-    return false;
-  }
-
-  const entry = {
-    dir: 'in',
+async function relayColleagueAttachment(m, file, kind) {
+  return relayToAgent({
+    openId: m.userId,
     text: m.text || '',
-    role: colleague.role,
     files: [{ name: file.name || '', path: file.path || '', kind }],
-  };
-
-  if (reqs.length === 1) {
-    const saved = appendMessage(reqs[0].id, colleague.id, entry);
-    logger.info('feishu', '同事附件已归入需求', { reqId: reqs[0].id, colleague: colleague.name, kind });
-    void notifyAutoHandle({ reqId: reqs[0].id, colleagueId: colleague.id, role: colleague.role, msgIds: [saved?.id] });
-    await say(ACK_TEXT);
-    return true;
-  }
-  // 多个开发期需求：入缓冲等他选。已在等待中就不重复发卡
-  const already = !!getPending(openId);
-  addPending(openId, entry);
-  if (already) await say('已记下，请点上面的按钮选一下需求～');
-  else await channel.sendCard(m.chatKey, buildPickCard(openId, colleague.id, reqs));
-  return true;
+  });
 }
 
 async function onInbound(m) {
@@ -147,7 +118,7 @@ async function onInbound(m) {
   // 同事中继抢在 team-tools 开关之前：这条链路与需求/故障收集无关，
   // 不该因为那个插件被停用就让同事发来的截图变成「目前支持文本和富文本消息～」
   if (m.kind === 'image' && m.images?.[0]) {
-    if (await relayColleagueAttachment(m, say, { name: '', path: m.images[0] }, 'image')) return;
+    if (await relayColleagueAttachment(m, { name: '', path: m.images[0] }, 'image')) return;
   }
   if (m.kind === 'image' && !getPluginEnabled('team-tools')) {
     await say('目前支持文本和富文本消息～');
@@ -188,7 +159,7 @@ async function onInbound(m) {
   // 文件消息：按扩展名归一化为材料（先挂近期任务，挂不上入池）
   if (m.kind === 'file') {
     // 同上：同事发来的接口文档不该被 team-tools 的启停挡住
-    if (m.files?.[0] && (await relayColleagueAttachment(m, say, m.files[0], 'file'))) return;
+    if (m.files?.[0] && (await relayColleagueAttachment(m, m.files[0], 'file'))) return;
     if (!getPluginEnabled('team-tools')) {
       await say('目前支持文本和富文本消息～');
       return;

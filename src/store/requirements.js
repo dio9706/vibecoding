@@ -25,13 +25,35 @@ export function getRequirement(id) {
 // phase 字段同批迁移：存量会话补「需求当前阶段」——缺 phase 说明这个需求从没经历过阶段拆分
 // （老流程 dev-done 只改 phase、convId 原样延续），那根会话一路服务到了现在这个阶段。
 
-export function createRequirement({ title }) {
+/**
+ * 工程槽位归一：只认 `dir` / `dev` 两个字段，其余一律丢弃。
+ *
+ * createRequirement 的 projects 入参多半是从另一条需求上整条读来的（沿用上一个需求的配置），
+ * 直接塞进去会把那条记录日后新增的字段一并带过来，形状悄悄发散。
+ */
+function normalizeProjectSlot(p) {
+  if (!p || typeof p !== 'object' || !p.dir) return null;
+  return { dir: String(p.dir), dev: !!p.dev };
+}
+
+/**
+ * @param {object} args
+ * @param {string} args.title 需求标题
+ * @param {object} [args.projects] 工程配置初值 `{frontend, backend}`，缺省为两侧皆空。
+ *   「沿用上一个需求」的选源策略是业务判断，收在 `web/routes-requirements.js#inheritProjects`，
+ *   store 只负责把调用方给的值归一落盘。
+ */
+export function createRequirement({ title, projects }) {
   const now = new Date().toISOString();
   const req = {
     id: 'r_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     title: String(title || '').slice(0, 60),
     phase: 'review',
-    projects: { frontend: null, backend: null }, // { dir, dev:boolean } | null
+    // { dir, dev:boolean } | null
+    projects: {
+      frontend: normalizeProjectSlot(projects?.frontend),
+      backend: normalizeProjectSlot(projects?.backend),
+    },
     assignees: [], // 开发人员：同事 id 数组（src/store/colleagues.js）。存 id 不存姓名快照，
     // 改名/换 open_id 自动同步；同事被删产生的悬空 id 由读侧标 missing，不回头清理历史需求
     reqDoc: null, // { name, path }
@@ -60,6 +82,10 @@ export function createRequirement({ title }) {
     bitable: null, // { url, appToken, tableId }
     bugs: [], // [{ id, recordId, title, detail, verdict:'sure'|'doubt', reason, status, at }]
     busy: null, // { kind, runId, startedAt, convId? } —— 串行闸落盘镜像；convId 仅系统任务落在非主会话时有（colleague-dev 子会话），前端接流与 healStaleBusy 判泄漏都靠它
+    // agent 派活时建的 per-需求 worktree 登记（spec §5.3）。记它只为一件事：
+    // 需求被删除时要 `git worktree remove` 掉这些目录，否则每个需求留下一份完整
+    // 工作区拷贝、无人回收。写入走 addAgentWorktree（锁内去重），不要在外面读改写。
+    agentWorktrees: [], // [{ dir, worktreeDir, branch }]
     archive: null, // { note, summary, archivedAt }
     createdAt: now,
     updatedAt: now,
@@ -125,6 +151,53 @@ export function updateRequirement(id, patch = {}, event) {
     const now = new Date().toISOString();
     list[i] = { ...list[i], ...patch, updatedAt: now };
     if (event) list[i].history.push({ at: now, event });
+    updated = list[i];
+    return list;
+  });
+  return updated;
+}
+
+/**
+ * 登记一个 agent worktree。**整个去重过程都在 `updateJson` 回调内完成** ——
+ * 这是本仓 `action-configs.js#appendAutoKeyword` 立下的纪律：调用方在锁外读到的是快照，
+ * 在外面读改写会被另一进程/另一个并发任务覆盖。同一需求可能同时有两个 agent 任务在派活。
+ *
+ * 按 `worktreeDir` 去重且**先登记的保留**：`ensureReqWorktree` 对同一需求是幂等的
+ * （返回同一个目录），重复登记只会让列表越堆越长，而 dir/branch 以首次为准即可 ——
+ * 回收时只用 `worktreeDir` 和 `dir`，branch 只是给人看的。
+ *
+ * @param {string} reqId
+ * @param {{dir?:string, worktreeDir:string, branch?:string}} wt
+ * @returns {object|null} 更新后的需求；需求不存在或入参非法时返回 null（不写盘）
+ */
+export function addAgentWorktree(reqId, wt) {
+  // worktreeDir 是唯一必需字段 —— 它就是将来要删的那个目录，缺了这条登记毫无意义
+  if (!reqId || !wt || typeof wt !== 'object') return null;
+  const worktreeDir = typeof wt.worktreeDir === 'string' ? wt.worktreeDir : '';
+  if (!worktreeDir) return null;
+
+  let updated = null;
+  updateJson(FILE, [], (list) => {
+    const i = list.findIndex((r) => r.id === reqId);
+    if (i < 0) return undefined; // 无此需求：不写盘
+    // 存量需求盘上没有这个字段，兜底成空数组（getRequirement 是裸读、无归一）
+    const cur = Array.isArray(list[i].agentWorktrees) ? list[i].agentWorktrees : [];
+    if (cur.some((x) => x?.worktreeDir === worktreeDir)) {
+      updated = list[i];
+      return undefined; // 已登记过：不写盘，保持首次登记的 dir/branch
+    }
+    list[i] = {
+      ...list[i],
+      agentWorktrees: [
+        ...cur,
+        {
+          dir: typeof wt.dir === 'string' ? wt.dir : '',
+          worktreeDir,
+          branch: typeof wt.branch === 'string' ? wt.branch : '',
+        },
+      ],
+      updatedAt: new Date().toISOString(),
+    };
     updated = list[i];
     return list;
   });

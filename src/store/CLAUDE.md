@@ -47,7 +47,7 @@
 - `var-contract-migration.js` — 动作变量抽取契约的一次性迁移：给存量 `env`/`phone` 变量补 `preset`。**用条目上的 `_varContractMigrated` 标记位保证只跑一次**，不是每次按变量名重扫（后者会让用户手动删掉的 `preset` 一重启就被加回来）。
 
 ### 业务领域 store
-- `requirements.js` — 「新需求」全生命周期，含状态机 `PHASE_FLOW` + `canTransition`。
+- `requirements.js` — 「新需求」全生命周期，含状态机 `PHASE_FLOW` + `canTransition`。`sessions[]` 每条带 `phase`（会话诞生时的需求阶段），`normalizeSessions` 读侧给存量会话回填 **`req.phase`** 而非字面量 `'dev'`——缺 `phase` 说明该需求从没经历过阶段拆分（老流程 dev-done 只改 phase、`convId` 原样延续），那根会话一路服务到了现在这个阶段；补 `'dev'` 会让已在测试期的存量需求会话树整棵从侧栏消失。
 - `tasks.js` — 需求 / 故障任务存储（feedback / dev-task / doc-driven 共用）。
 - `conv-notify.js` — 会话飞书通知登记表 + 补充内容收件箱（web 写、飞书读）。
 - `conv-messages.js` — 应用自持会话消息（per convId 的 ModelMessage 数组）。
@@ -58,7 +58,7 @@
 - `ui-specs.js` — 按工程目录归属的 UI 规范文本。
 - `user-vars.js` — 用户变量 CRUD。
 - `saved-dirs.js` — web 端常用工作目录（最多 20）。
-- `colleague-messages.js` — 同事 ↔ 机器人的需求对话流（`colleague-messages.json`）：per `reqId × colleagueId` 的消息数组 + `_pending` 待归属缓冲。消息条目带 `role`/`files[].path`/`status`/`handledBy`/`handledNote`。`status` 是「主机看没看过」，`handledBy`（`manual|ai`，取值收在 `HANDLED_BY`）是「谁处理了」，**两维独立**：四期的 `markHandled` 只写后者，AI 处理过主机仍见红点；非法 `handledBy` 直接拒绝不写盘（否则「标记已处理」会把条目改回 null 还返回 true）。`flushPending` 返回 `{count, ids}`，`ids` 供四期按条触发自动处理。飞书进程写入站、web 进程写出站与已读，**并发写同一文件**，必须走 `updateJson`。
+- `colleague-messages.js` — 同事 ↔ 机器人的对话流（`colleague-messages.json`）：锚点是 **`colleagueId`**（一个同事一条长期线，跨需求）；`reqId` 降级为消息条目上的**标签**（agent 逐条判定，判不出是 `null`，不是分组键），线上另存 `agentSessionId`（Agent SDK `resume` 锚点，靠它维持「记得这个人上周说过什么」）。消息条目带 `role`/`files[].path`/`status`/`handledBy`/`handledNote`/`toolTrace`（这轮 agent 调了什么，**入站消息恒为 `null`**）。`status` 是「主机看没看过」，`handledBy`（`manual|ai`，取值收在 `HANDLED_BY`）是「谁处理了」，**两维独立**；非法 `handledBy` 直接拒绝不写盘（否则「标记已处理」会把条目改回 `null` 还返回 `true`）。`markHandled(colleagueId, msgId, opts)` 已收窄签名——`msgId` 本就全局唯一，换锚点后不需要 `reqId` 参与定位。`dropReqThreads(reqId)` 语义是**摘掉各人名下带该标签的消息**，不是删整条线——换锚点后一条线属于人不属于需求，删线会把同事的全部历史对话一起抹掉。`_pending` 待归属缓冲全族（`addPending`/`getPending`/`flushPending`/…）已随选择卡一起下线：锚在人身上之后不再需要「你同时在 3 个需求里，选一个」。飞书进程写入站、web 进程写出站与已读，**并发写同一文件**，必须走 `updateJson`。
 - `patrol-loop.js` — BUG 巡检循环状态（`patrol-loop.json`）：**单例**，存 `active/stopping/phase/seen/cycleTaskIds/retried/report`。落盘而非内存的理由见文件头（循环最长跑 12 小时，pm2 重启是常态，内存态会让它在无人察觉时静默消失）。`seen`/`retried`/`report` 的增量更新必须走 `markSeen`/`markRetried`/`pushReport`/`pushCycleTask` 这四个**锁内**专用口，`updateLoop` 是整体替换。
 - `colleagues.js` — 同事名册（`colleagues.json`）：按职位（`ROLES` 6 类枚举）维护人员的姓名 / 备注 / 飞书 open_id。独立于 `settings.json` 的理由见文件头注释（后者含明文密钥且整份参与配置导入导出）。校验规则收在 `validateColleagueInput` 一处，HTTP 层与 store 写入口共用。
 
@@ -106,8 +106,8 @@
 - **要改 run 状态机 / 看门狗阈值 / 审批队列 / SSE 事件类型** → `runs.js`。
 - **要改崩溃续跑的锚点字段或孤儿判定** → `active-runs.js`（`partitionActiveRuns`）；改续跑熔断次数 → `pending-resume.js`（`shouldAbandonResume`）。
 - **要改设置结构 / 默认值 / 归一逻辑** → `settings.js`（`DEFAULTS` + `normalizeSettings`，新字段必须在 normalize 里透传，否则整份回写时会被丢掉）。
-- **要改需求阶段流转** → `requirements.js`（`PHASE_FLOW` + `canTransition`）。
-- **要改同事对话的存储形状 / 未读口径 / 待归属缓冲** → `colleague-messages.js`；注意 `_pending` 与 `reqId` 共用一个顶层命名空间（靠下划线前缀隔离），新增顶层键前先读该文件头注释。
+- **要改需求阶段流转** → `requirements.js`（`PHASE_FLOW` + `canTransition`）；涉及会话按阶段隔离的还要看 `sessions[].phase` 与 `normalizeSessions` 的回填口径。**改 `normalizeSessions` 前先读它的 JSDoc**：它的返回值对**调用时序**敏感（phase 缺省取 `req.phase`），`routes-requirements.js` 的 `handleDevDone` 必须在改写 phase **之前**读未更新的 `req` 求值；写反了开发期会话会被全部钉成 `'test'`、此后永不被隐藏——功能静默退化成空操作，不报错也不红测。唯一护栏是 `routes-requirements.test.js` 里「会话缺 phase 时按流转前的阶段物化成 dev」那条用例，别删。
+- **要改同事对话的存储形状 / 未读口径** → `colleague-messages.js`；新能力一律走按人读写的 `getColleagueThread`/`appendTo`/`markColleagueRead`（`getUnreadCounts`/`getUnreadTotals` 对外语义不变，内部已改按消息 `reqId` 标签过滤）。
 - **要改同事名册的职位枚举 / 校验规则** → `colleagues.js`（`ROLES` + `validateColleagueInput`）；注意非法 role 与无 id 条目在 `normalizeColleagues` 里是**保留并补齐**而非丢弃，改这条前先读该函数注释。
 - **要改飞书通知登记 / 补充收件箱** → `conv-notify.js`。
 - **要改记忆库条目结构或扫描游标** → `memory-bank.js`；改用户输入采集埋点 → `user-log.js`；改终端转录扫描 → `transcript.js`。

@@ -65,6 +65,7 @@ import {
   pruneUploads,
   handleFsStat,
   handleFsRead,
+  handleFsDownload,
 } from './routes-files.js';
 import { handleGitStatus, handleGitBranches, handleGitCheckout } from './routes-git.js';
 import { handleRequirementRoutes } from './routes-requirements.js';
@@ -78,6 +79,7 @@ import { handleConvNotifyRoutes } from './routes-conv-notify.js';
 import { startConvNotify } from './conv-notify.js';
 import { handlePatrolRoutes } from './routes-patrol.js';
 import { startPatrolLoopPump } from '../../plugins/team-tools/bug-patrol/loop.js';
+import { loadPluginSideEffects } from '../../plugins/index.js';
 import {
   handleLogs,
   handleLogsClear,
@@ -148,6 +150,7 @@ const ROUTES = [
   { path: '/api/upload', h: (req, res, url) => handleUpload(req, res, url) },
   { path: '/api/fs/stat', h: (req, res) => handleFsStat(req, res) },
   { path: '/api/fs/read', h: (req, res, url) => handleFsRead(url, res) },
+  { path: '/api/fs/download', h: (req, res, url) => handleFsDownload(url, res) },
   { path: '/api/dirs/browse', h: (req, res, url) => handleBrowse(url, res) },
   { path: '/api/dirs/pick', h: (req, res) => handlePickDir(res) },
   { path: '/api/dirs/saved', h: (req, res) => handleSaved(req, res) },
@@ -294,6 +297,11 @@ export const ready = new Promise((resolve) => {
     startRequirementPump(); // 需求工作流串行闸泵：docgen/系统任务出队 + busy 崩溃恢复
     startConvNotify(); // 会话飞书通知：注册 run 终结监听器
     startPatrolLoopPump(); // BUG 巡检循环泵：仅 web 进程（需读 auto-dev 任务终态判「本轮全修完」）
+    // 同事 agent 的业务工具靠**模块加载时的副作用**自注册，而 web 进程不走插件装配层
+    // （loadEnabledPluginFeatures 只被 app/dispatch.js 那条链调用，web 入口对 app/ 零引用）。
+    // 不显式加载 = agent 拿到一个零工具的 MCP server、凭记忆作答，且全链路无声。
+    // 详见 plugins/index.js#loadPluginSideEffects。内部已逐个 try/catch，不会 reject。
+    loadPluginSideEffects(['colleague-agent']);
     startMemoryBankTicker({ cwd: process.cwd() }); // 记忆库 10 分钟 tick：窗口内才真跑提炼
     startProjectMapIdleTicker(); // 项目地图闲时刷新 10 分钟 tick：凌晨窗口且用户开启才真跑
     resolve();

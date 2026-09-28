@@ -19,6 +19,22 @@ function summarize(text, max = 200) {
   return s.length > max ? s.slice(0, max) + '…' : s;
 }
 
+/**
+ * 合并状态判定 —— 卡片与降级纯文本**共用这一把尺子**，否则两条通道的文案迟早分叉
+ * （典型后果：卡片说合并失败、发不出去降级的纯文本却只说「已处理完成」）。
+ *
+ * `mergeError` 优先于 `merged`：两者正常流程不会同时为真，但盘上数据可能因历史版本或
+ * 并发写而不一致；此时必须报失败 —— 漏报「其实还没合上」远比多报一次严重。
+ *
+ * @returns {{kind:'failed'|'warned'|'merged'|'none', detail?:string}}
+ */
+export function mergeStatusOf(task) {
+  if (task?.mergeError) return { kind: 'failed', detail: task.mergeError };
+  if (!task?.merged) return { kind: 'none' };
+  if (task?.mergeWarning) return { kind: 'warned', detail: task.mergeWarning };
+  return { kind: 'merged' };
+}
+
 /** 一个按钮的 value：三个动作共用同一契约，parseTaskCardAction 按此校验 */
 function btn(content, type, taskId, action) {
   return {
@@ -27,6 +43,41 @@ function btn(content, type, taskId, action) {
     type,
     value: { kind: TASK_CARD_KIND, taskId, action },
   };
+}
+
+/**
+ * 卡片正文里的合并结果行。
+ *
+ * **这行不写才是最坏的情况**：2026-09-28 实测事故——三条任务自动合并失败后，卡片只显示
+ * 「✅ 已处理完成」配一个合并按钮，收卡片的人根本看不出自动合并已经试过并失败，
+ * 会以为是自己还没点；任务因此在面板上积压四天无人处理。所以失败与警告都必须上卡片正文。
+ */
+function mergeLine(task) {
+  const s = mergeStatusOf(task);
+  const base = `\n${task.autoMerged ? '已自动合并到' : '已合并到'} ${task.baseBranch || '基线分支'}`;
+  if (s.kind === 'failed') return `\n⚠️ **自动合并失败**：${summarize(s.detail, 200)}`;
+  // 合并成功不等于没事要管：AI 解过冲突要复核，改动没从 stash 回来更要人立刻处理
+  if (s.kind === 'warned') return `${base}\n⚠️ ${summarize(s.detail, 200)}`;
+  if (s.kind === 'merged') return base;
+  return '';
+}
+
+/**
+ * 卡片发不出去时的降级纯文本。与卡片同源（都走 mergeStatusOf），但**不能带 lark_md 标记**——
+ * 纯文本通道里 `**` 会原样显示成两个星号。
+ *
+ * 降级态用户点不到任何按钮，所以必须指明去哪处理，否则这条通知就是死路一条。
+ */
+export function taskDoneFallbackText(task, ok) {
+  const tag = task?.type === 'bug' ? '[故障]' : '[需求]';
+  const s = mergeStatusOf(task);
+  const note =
+    s.kind === 'failed'
+      ? `\n⚠️ 自动合并失败：${summarize(s.detail, 200)}`
+      : s.kind === 'warned'
+        ? `\n⚠️ ${summarize(s.detail, 200)}`
+        : '';
+  return `${ok ? '✅ 已处理完成' : '❌ 处理失败'}\n${tag}「${task?.title || ''}」${note}\n请到网页端任务面板处理。`;
 }
 
 /**
@@ -41,10 +92,7 @@ export function buildTaskDoneCard(task, ok) {
   const head = ok ? '✅ **已处理完成**' : '❌ **处理失败**';
   // 两者都有才显示：缺一个就拼出「分支：auto/x → null」这种误导性文案，不如不显示
   const branchLine = task.branch && task.baseBranch ? `\n分支：${task.branch} → ${task.baseBranch}` : '';
-  // 已合并的改动已经在基线分支上了，必须说清——否则收卡片的人以为还等着自己点合并
-  const mergedLine = task.merged
-    ? `\n${task.autoMerged ? '已自动合并到' : '已合并到'} ${task.baseBranch || '基线分支'}`
-    : '';
+  const mergedLine = mergeLine(task);
   const awaiting = isAwaitingMerge(task);
   const actions = [];
   if (awaiting) actions.push(btn('✅ 合并到主分支', 'primary', task.id, 'merge'));

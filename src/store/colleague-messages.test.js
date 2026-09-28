@@ -8,17 +8,15 @@ import os from 'node:os';
 process.env.APP_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'cmsg-store-'));
 const {
   normalizeEntry,
-  appendMessage,
-  getThread,
   getUnreadCounts,
-  markRead,
+  getUnreadTotals,
   markHandled,
-  addPending,
-  getPending,
-  flushPending,
-  dropPending,
-  applyPendingFlush,
   dropReqThreads,
+  getColleagueThread,
+  appendTo,
+  markColleagueRead,
+  getAgentSessionId,
+  setAgentSessionId,
 } = await import('./colleague-messages.js');
 
 test('normalizeEntry：补齐缺省字段，status 非法归 unread', () => {
@@ -34,132 +32,88 @@ test('normalizeEntry：补齐缺省字段，status 非法归 unread', () => {
   assert.equal(normalizeEntry({ dir: 'nonsense' }).dir, 'in', 'dir 非法时 fail-safe 到 in');
 });
 
-test('appendMessage → getThread 回读；in 更新 lastInboundAt，out 不更新', () => {
-  appendMessage('r_1', 'cl_a', { dir: 'in', text: '第一条', role: 'backend' });
-  const t1 = getThread('r_1', 'cl_a');
+test('appendTo → getColleagueThread 回读；in 更新 lastInboundAt，out 不更新', () => {
+  appendTo('cl_a', { dir: 'in', text: '第一条', role: 'backend', reqId: 'r_1' });
+  const t1 = getColleagueThread('cl_a');
   assert.equal(t1.messages.length, 1);
   assert.equal(t1.messages[0].text, '第一条');
   assert.equal(t1.messages[0].role, 'backend');
   assert.ok(t1.lastInboundAt);
 
-  const before = getThread('r_1', 'cl_a').lastInboundAt;
-  appendMessage('r_1', 'cl_a', { dir: 'out', text: '我的回复', status: 'read' });
-  const t2 = getThread('r_1', 'cl_a');
+  const before = getColleagueThread('cl_a').lastInboundAt;
+  appendTo('cl_a', { dir: 'out', text: '我的回复', status: 'read', reqId: 'r_1' });
+  const t2 = getColleagueThread('cl_a');
   assert.equal(t2.messages.length, 2);
   assert.equal(t2.lastInboundAt, before, 'out 方向不该刷新「最近来信时间」');
 });
 
-test('getThread：未知需求/未知同事返回空骨架而非 undefined', () => {
-  const t = getThread('r_none', 'cl_none');
+test('getColleagueThread：未知同事返回空骨架而非 undefined', () => {
+  const t = getColleagueThread('cl_none');
   assert.deepEqual(t.messages, []);
   assert.equal(t.lastInboundAt, null);
 });
 
 test('getUnreadCounts：只数 in+unread；out 与已读不计', () => {
-  appendMessage('r_2', 'cl_x', { dir: 'in', text: 'a' });
-  appendMessage('r_2', 'cl_x', { dir: 'in', text: 'b' });
-  appendMessage('r_2', 'cl_x', { dir: 'out', text: 'c' });
-  appendMessage('r_2', 'cl_y', { dir: 'in', text: 'd' });
+  appendTo('cl_x', { dir: 'in', text: 'a', reqId: 'r_2' });
+  appendTo('cl_x', { dir: 'in', text: 'b', reqId: 'r_2' });
+  appendTo('cl_x', { dir: 'out', text: 'c', reqId: 'r_2' });
+  appendTo('cl_y', { dir: 'in', text: 'd', reqId: 'r_2' });
   assert.deepEqual(getUnreadCounts('r_2'), { cl_x: 2, cl_y: 1 });
   assert.deepEqual(getUnreadCounts('r_none'), {});
 });
 
-test('markRead：只清该会话的 in+unread，其它会话不受影响', () => {
-  markRead('r_2', 'cl_x');
+test('getUnreadTotals：按需求汇总，与逐需求调 getUnreadCounts 求和一致', () => {
+  // 独立 reqId：本文件后续用例按条数断言 r_2 / r_3 的线程，往那里写会串台
+  appendTo('cl_a', { dir: 'in', text: 'a', reqId: 'r_tot' });
+  appendTo('cl_a', { dir: 'in', text: 'b', reqId: 'r_tot' });
+  appendTo('cl_b', { dir: 'in', text: 'c', reqId: 'r_tot' });
+  appendTo('cl_b', { dir: 'out', text: '去信不计', reqId: 'r_tot' });
+
+  const totals = getUnreadTotals();
+  assert.equal(totals.r_tot, 3, '跨同事求和，out 不计');
+  // 与另一条口径交叉验证：两个函数各数一遍必须相等，否则侧栏红点与右栏 badge 会对不上
+  const sum = Object.values(getUnreadCounts('r_tot')).reduce((n, v) => n + v, 0);
+  assert.equal(totals.r_tot, sum, '总数应与逐同事求和一致');
+  assert.ok(!('r_none' in totals), '无未读的需求不出现在结果里');
+
+  markColleagueRead('cl_a', { reqId: 'r_tot' });
+  assert.equal(getUnreadTotals().r_tot, 1, '标已读后总数应回落');
+  markColleagueRead('cl_b', { reqId: 'r_tot' });
+  assert.ok(!('r_tot' in getUnreadTotals()), '全部已读的需求应从结果里消失（前端据此不打红点）');
+});
+
+test('markColleagueRead(colleagueId, {reqId})：只清该需求下的 in+unread，其它需求不受影响', () => {
+  markColleagueRead('cl_x', { reqId: 'r_2' });
   assert.deepEqual(getUnreadCounts('r_2'), { cl_y: 1 });
-  assert.ok(getThread('r_2', 'cl_x').messages.every((m) => m.dir === 'out' || m.status === 'read'));
+  assert.ok(getColleagueThread('cl_x').messages.every((m) => m.dir === 'out' || m.status === 'read'));
 });
 
-test('markRead：未知会话不炸、不写盘', () => {
-  assert.doesNotThrow(() => markRead('r_none', 'cl_none'));
+test('markColleagueRead：未知同事不炸、不写盘', () => {
+  assert.doesNotThrow(() => markColleagueRead('cl_none', { reqId: 'r_none' }));
 });
 
-test('addPending / getPending：同一人多条累积在一个缓冲里', () => {
-  addPending('ou_1', { dir: 'in', text: '第一条待归属' });
-  addPending('ou_1', { dir: 'in', text: '第二条待归属' });
-  const p = getPending('ou_1');
-  assert.equal(p.messages.length, 2, '累积而非覆盖——否则同事连发两条只有最后一条被归入');
-  assert.ok(p.askedAt);
-  assert.equal(getPending('ou_none'), null);
-});
-
-test('flushPending：缓冲整体归入目标需求并清空', () => {
-  const { count: n } = flushPending('ou_1', 'r_3', 'cl_z');
-  assert.equal(n, 2);
-  assert.equal(getThread('r_3', 'cl_z').messages.length, 2);
-  assert.equal(getThread('r_3', 'cl_z').messages[0].text, '第一条待归属');
-  assert.equal(getPending('ou_1'), null, '归入后必须清空，否则同事再点一次按钮会重复归入');
-});
-
-test('flushPending：空缓冲返回 0，不写盘', () => {
-  assert.deepEqual(flushPending('ou_none', 'r_3', 'cl_z'), { count: 0, ids: [] });
-});
-
-test('_pending 不污染需求命名空间（getUnreadCounts 不把它当成需求）', () => {
-  addPending('ou_2', { dir: 'in', text: 'x' });
-  assert.deepEqual(getUnreadCounts('_pending'), {}, '缓冲节必须与 reqId 隔离');
-});
-
-test('applyPendingFlush：归入锁内快照里的全部 pending，不是调用方预读的那批', () => {
-  // 竞态复现：flushPending 曾在锁**外** getPending 拿快照（2 条），却在锁内 delete 掉全部。
-  // 若飞书进程在这个窗口里 addPending 了第 3 条，那条会被删且从未归入任何需求 —— 永久丢失。
-  // 这里直接把「锁内 raw 比预读快照多一条」编码成入参：按快照算就会漏掉第 3 条。
-  const raw = {
-    _pending: {
-      ou_race: {
-        messages: [
-          { id: 'cm_r1', dir: 'in', text: '预读时就有的第一条' },
-          { id: 'cm_r2', dir: 'in', text: '预读时就有的第二条' },
-          { id: 'cm_r3', dir: 'in', text: '竞态窗口里进来的第三条' },
-        ],
-        askedAt: '2026-09-16T00:00:00.000Z',
-      },
-    },
-  };
-  const { next, count } = applyPendingFlush(raw, 'ou_race', 'r_race', 'cl_race');
-  assert.equal(count, 3, '锁内有几条就归入几条');
-  const msgs = next.r_race.cl_race.messages;
-  assert.equal(msgs.length, 3);
-  assert.equal(msgs[2].text, '竞态窗口里进来的第三条', '窗口内新增的那条不能被吞掉');
-  assert.ok(!next._pending.ou_race, '归入后必须清空缓冲，否则再点一次按钮会重复归入');
-});
-
-test('applyPendingFlush：空缓冲返回 count=0 且 next=undefined（放弃写盘）', () => {
-  const { next, count } = applyPendingFlush({}, 'ou_empty', 'r_x', 'cl_x');
-  assert.equal(count, 0);
-  assert.equal(next, undefined, 'updateJson 靠 undefined 表示无变更，不能白写一次盘');
-});
-
-test('dropPending：丢弃缓冲，hasPending 不再为真（防同事被永久粘住）', () => {
-  addPending('ou_drop', { dir: 'in', text: 'x' });
-  assert.ok(getPending('ou_drop'));
-  dropPending('ou_drop');
-  assert.equal(getPending('ou_drop'), null);
-  assert.doesNotThrow(() => dropPending('ou_never'));
-});
-
-test('dropReqThreads：整条需求的同事会话被清空，别的需求与 _pending 不受影响', () => {
-  appendMessage('r_drop', 'cl_a', { dir: 'in', text: '甲' });
-  appendMessage('r_drop', 'cl_b', { dir: 'in', text: '乙' });
-  appendMessage('r_keep', 'cl_a', { dir: 'in', text: '留着' });
-  addPending('ou_keep', { dir: 'in', text: '缓冲' });
+test('dropReqThreads：整条需求的同事会话被清空，别的需求不受影响', () => {
+  appendTo('cl_a', { dir: 'in', text: '甲', reqId: 'r_drop' });
+  appendTo('cl_b', { dir: 'in', text: '乙', reqId: 'r_drop' });
+  appendTo('cl_a', { dir: 'in', text: '留着', reqId: 'r_keep' });
 
   dropReqThreads('r_drop');
 
-  assert.deepEqual(getThread('r_drop', 'cl_a').messages, []);
-  assert.deepEqual(getThread('r_drop', 'cl_b').messages, []);
-  assert.equal(getThread('r_keep', 'cl_a').messages.length, 1, '别的需求不能被连坐');
-  assert.ok(getPending('ou_keep'), '_pending 是另一命名空间，不该被波及');
+  assert.deepEqual(getColleagueThread('cl_a').messages.filter((m) => m.reqId === 'r_drop'), []);
+  assert.deepEqual(getColleagueThread('cl_b').messages.filter((m) => m.reqId === 'r_drop'), []);
+  assert.equal(getColleagueThread('cl_a').messages.filter((m) => m.reqId === 'r_keep').length, 1, '别的需求不能被连坐');
   assert.doesNotThrow(() => dropReqThreads('r_never'), '不存在的需求应静默返回');
 });
 
 // ---- 四期：AI 自动处理落点 ----
+// （四期分类器管线本身已在 P3 下线，见 colleague-dev.js 文件头；markHandled 作为通用的
+// 「标记某条消息处理状态」仍被 colleague-dev 等新管线使用，回归用例留着。）
 
 test('markHandled：只改目标条目的 handledBy/handledNote，不动 status，其余条目不变', () => {
-  const a = appendMessage('r_h', 'cl_h', { dir: 'in', text: '接口文档', role: 'backend' });
-  const b = appendMessage('r_h', 'cl_h', { dir: 'in', text: '另一条', role: 'backend' });
-  assert.equal(markHandled('r_h', 'cl_h', a.id, { handledBy: 'ai', handledNote: '已处理 · 接入接口文档' }), true);
-  const msgs = getThread('r_h', 'cl_h').messages;
+  const a = appendTo('cl_h', { dir: 'in', text: '接口文档', role: 'backend', reqId: 'r_h' });
+  const b = appendTo('cl_h', { dir: 'in', text: '另一条', role: 'backend', reqId: 'r_h' });
+  assert.equal(markHandled('cl_h', a.id, { handledBy: 'ai', handledNote: '已处理 · 接入接口文档' }), true);
+  const msgs = getColleagueThread('cl_h').messages;
   const ma = msgs.find((m) => m.id === a.id);
   const mb = msgs.find((m) => m.id === b.id);
   assert.equal(ma.handledBy, 'ai');
@@ -169,39 +123,122 @@ test('markHandled：只改目标条目的 handledBy/handledNote，不动 status�
 });
 
 test('markHandled：未知 id / 未知会话返回 false，不写盘', () => {
-  assert.equal(markHandled('r_h', 'cl_h', 'cm_nope', { handledBy: 'ai' }), false);
-  assert.equal(markHandled('r_none', 'cl_none', 'cm_x', { handledBy: 'ai' }), false);
-  assert.equal(markHandled('_pending', 'cl_h', 'cm_x', { handledBy: 'ai' }), false, '缓冲节不是会话');
+  assert.equal(markHandled('cl_h', 'cm_nope', { handledBy: 'ai' }), false);
+  assert.equal(markHandled('cl_none', 'cm_x', { handledBy: 'ai' }), false);
 });
 
 test('markHandled：handledBy 非法 / 缺省 → 返回 false 且条目不变（不能把已处理改回未处理还报成功）', () => {
-  const a = appendMessage('r_h2', 'cl_h2', { dir: 'in', text: 'x' });
-  markHandled('r_h2', 'cl_h2', a.id, { handledBy: 'manual', handledNote: '人工' });
-  assert.equal(markHandled('r_h2', 'cl_h2', a.id, { handledBy: 'robot' }), false);
-  assert.equal(markHandled('r_h2', 'cl_h2', a.id), false, '缺省 options 也拒绝');
-  const m = getThread('r_h2', 'cl_h2').messages[0];
+  const a = appendTo('cl_h2', { dir: 'in', text: 'x', reqId: 'r_h2' });
+  markHandled('cl_h2', a.id, { handledBy: 'manual', handledNote: '人工' });
+  assert.equal(markHandled('cl_h2', a.id, { handledBy: 'robot' }), false);
+  assert.equal(markHandled('cl_h2', a.id), false, '缺省 options 也拒绝');
+  const m = getColleagueThread('cl_h2').messages[0];
   assert.equal(m.handledBy, 'manual');
   assert.equal(m.handledNote, '人工');
 });
 
 test('markHandled：handledNote 省略时归空串', () => {
-  const a = appendMessage('r_h3', 'cl_h3', { dir: 'in', text: 'x' });
-  assert.equal(markHandled('r_h3', 'cl_h3', a.id, { handledBy: 'ai' }), true);
-  assert.equal(getThread('r_h3', 'cl_h3').messages[0].handledNote, '');
+  const a = appendTo('cl_h3', { dir: 'in', text: 'x', reqId: 'r_h3' });
+  assert.equal(markHandled('cl_h3', a.id, { handledBy: 'ai' }), true);
+  assert.equal(getColleagueThread('cl_h3').messages[0].handledNote, '');
 });
 
 test('markHandled：同一条二次标记是覆盖而非拒绝（失败重试时要能改写 note）', () => {
-  const a = appendMessage('r_h4', 'cl_h4', { dir: 'in', text: 'x' });
-  markHandled('r_h4', 'cl_h4', a.id, { handledBy: 'ai', handledNote: '处理失败 · T' });
-  assert.equal(markHandled('r_h4', 'cl_h4', a.id, { handledBy: 'ai', handledNote: '已处理 · T' }), true);
-  assert.equal(getThread('r_h4', 'cl_h4').messages[0].handledNote, '已处理 · T');
+  const a = appendTo('cl_h4', { dir: 'in', text: 'x', reqId: 'r_h4' });
+  markHandled('cl_h4', a.id, { handledBy: 'ai', handledNote: '处理失败 · T' });
+  assert.equal(markHandled('cl_h4', a.id, { handledBy: 'ai', handledNote: '已处理 · T' }), true);
+  assert.equal(getColleagueThread('cl_h4').messages[0].handledNote, '已处理 · T');
 });
 
-test('flushPending：返回 {count, ids}，ids 与归入条目一一对应', () => {
-  addPending('ou_ids', { id: 'cm_i1', dir: 'in', text: '一' });
-  addPending('ou_ids', { id: 'cm_i2', dir: 'in', text: '二' });
-  const r = flushPending('ou_ids', 'r_ids', 'cl_ids');
-  assert.equal(r.count, 2);
-  assert.deepEqual(r.ids, ['cm_i1', 'cm_i2']);
-  assert.deepEqual(getThread('r_ids', 'cl_ids').messages.map((m) => m.id), ['cm_i1', 'cm_i2']);
+// ---- 2.0 锚点：按人存，reqId 降为消息标签 ----
+// 新能力走新函数名；四个既有函数签名一个不改（见 Step 1 的纪律），它们的回归用例在本段末尾。
+
+test('appendTo(colleagueId, entry)：按人落盘，reqId 作为标签存在消息上', () => {
+  appendTo('cl_1', { dir: 'in', text: 'hi', role: 'backend', reqId: 'r_a' });
+  const t = getColleagueThread('cl_1');
+  assert.equal(t.messages.length, 1);
+  assert.equal(t.messages[0].reqId, 'r_a');
+  assert.equal(t.messages[0].text, 'hi');
+});
+
+test('同一个人跨需求的消息落在同一条线上（这是换锚点的全部目的）', () => {
+  appendTo('cl_2', { dir: 'in', text: 'a', reqId: 'r_a' });
+  appendTo('cl_2', { dir: 'in', text: 'b', reqId: 'r_b' });
+  assert.equal(getColleagueThread('cl_2').messages.length, 2);
+});
+
+test('reqId 缺省（agent 还没判出归属）也能落盘，标签为 null', () => {
+  appendTo('cl_3', { dir: 'in', text: '不知道属于哪个需求' });
+  assert.equal(getColleagueThread('cl_3').messages[0].reqId, null);
+});
+
+test('getUnreadCounts(reqId)：按消息上的 reqId 标签过滤，对外语义不变', () => {
+  appendTo('cl_4', { dir: 'in', text: 'x', reqId: 'r_x' });
+  appendTo('cl_4', { dir: 'in', text: 'y', reqId: 'r_y' });
+  appendTo('cl_5', { dir: 'in', text: 'z', reqId: 'r_x' });
+  const c = getUnreadCounts('r_x');
+  assert.equal(c.cl_4, 1, '只数带 r_x 标签的那条');
+  assert.equal(c.cl_5, 1);
+});
+
+test('getUnreadCounts：无 reqId 标签的消息不计入任何需求（但仍在整条线里）', () => {
+  appendTo('cl_6', { dir: 'in', text: '无归属' });
+  assert.equal(getUnreadCounts('r_x').cl_6, undefined);
+  assert.equal(getColleagueThread('cl_6').messages.length, 1);
+});
+
+test('markColleagueRead(colleagueId)：不带 reqId 时标记该人全部未读', () => {
+  appendTo('cl_7', { dir: 'in', text: 'a', reqId: 'r_a' });
+  appendTo('cl_7', { dir: 'in', text: 'b', reqId: 'r_b' });
+  markColleagueRead('cl_7');
+  assert.equal(getColleagueThread('cl_7').messages.every((m) => m.status === 'read'), true);
+});
+
+test('markColleagueRead(colleagueId, {reqId})：只标该需求下的，别的需求红点要留着', () => {
+  appendTo('cl_8', { dir: 'in', text: 'a', reqId: 'r_a' });
+  appendTo('cl_8', { dir: 'in', text: 'b', reqId: 'r_b' });
+  markColleagueRead('cl_8', { reqId: 'r_a' });
+  const t = getColleagueThread('cl_8');
+  assert.equal(t.messages.find((m) => m.reqId === 'r_a').status, 'read');
+  assert.equal(t.messages.find((m) => m.reqId === 'r_b').status, 'unread');
+});
+
+test('agentSessionId：读写往返，初始为 null', () => {
+  assert.equal(getAgentSessionId('cl_9'), null);
+  appendTo('cl_9', { dir: 'in', text: 'x' });
+  setAgentSessionId('cl_9', 'sess_abc');
+  assert.equal(getAgentSessionId('cl_9'), 'sess_abc');
+});
+
+test('setAgentSessionId：对没有任何消息的人也能写（agent 可能先起会话后落消息）', () => {
+  setAgentSessionId('cl_10', 'sess_x');
+  assert.equal(getAgentSessionId('cl_10'), 'sess_x');
+});
+
+test('toolTrace：出站消息可带工具轨迹，读回来形状不变', () => {
+  appendTo('cl_11', { dir: 'out', text: '查过了', toolTrace: [{ name: 'get_requirement', input: { reqId: 'r_a' } }] });
+  const m = getColleagueThread('cl_11').messages[0];
+  assert.equal(m.toolTrace.length, 1);
+  assert.equal(m.toolTrace[0].name, 'get_requirement');
+});
+
+test('toolTrace：入站消息没有轨迹，归一成 null 而非空数组（空数组会让前端误渲染出一个空轨迹区）', () => {
+  appendTo('cl_12', { dir: 'in', text: 'x' });
+  assert.equal(getColleagueThread('cl_12').messages[0].toolTrace, null);
+});
+
+test('dropReqThreads(reqId)：只摘掉该需求的消息，同一个人其它需求的对话必须留着', () => {
+  appendTo('cl_13', { dir: 'in', text: 'a', reqId: 'r_del' });
+  appendTo('cl_13', { dir: 'in', text: 'b', reqId: 'r_keep' });
+  dropReqThreads('r_del');
+  const t = getColleagueThread('cl_13');
+  assert.equal(t.messages.length, 1);
+  assert.equal(t.messages[0].reqId, 'r_keep');
+});
+
+test('_pending 全族已删除', async () => {
+  const mod = await import('./colleague-messages.js');
+  for (const name of ['addPending', 'getPending', 'flushPending', 'dropPending', 'applyPendingFlush']) {
+    assert.equal(mod[name], undefined, `${name} 应随选择卡一起下线`);
+  }
 });

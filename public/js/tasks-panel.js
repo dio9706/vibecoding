@@ -270,8 +270,14 @@ export function bindTasksNav(openFn, isActiveFn) { _openTasksView = openFn; _isT
               ? `分支 ${t.branch} 的改动已从 ${t.baseBranch || '基线分支'} 撤销（已放弃）`
               : `分支 ${t.branch} 已删除（已放弃改动）`;
           } else {
-            br.textContent = `分支 ${t.branch} → ${t.baseBranch || '?'}` + (t.mergeError ? ` · 上次合并失败：${t.mergeError}` : '');
+            // 三态：干净（灰）/ 合并成功但有尾巴（琥珀）/ 合并失败（红）。
+            // mergeWarning 绝不能并进 mergeError —— 后者在面板上就是「上次合并失败」，
+            // 而带 warning 的那次合并其实成功了（AI 解了冲突、或你的未提交改动还压在 stash 里），
+            // 混用会让人去排查一次根本不存在的失败。
+            const tail = t.mergeError ? ` · 上次合并失败：${t.mergeError}` : t.mergeWarning ? ` · ${t.mergeWarning}` : '';
+            br.textContent = `分支 ${t.branch} → ${t.baseBranch || '?'}` + tail;
             if (t.mergeError) br.style.color = 'var(--red)';
+            else if (t.mergeWarning) br.style.color = 'var(--amber)';
           }
           card.appendChild(br);
         }

@@ -7,6 +7,7 @@ import toastApi from './toast.js';
         confirmText = '确认',
         cancelText = '取消',
         danger = false,
+        hideCancel = false, // 纯告知型弹窗：只留一个「知道了」，不出现两个同义按钮
       } = {}) {
         return new Promise((resolve) => {
           const mask = document.createElement('div');
@@ -23,6 +24,7 @@ import toastApi from './toast.js';
           const okBtn = mask.querySelector('.ok');
           cancelBtn.textContent = cancelText;
           okBtn.textContent = confirmText;
+          if (hideCancel) cancelBtn.hidden = true;
           okBtn.classList.add(danger ? 'danger' : 'primary');
           const close = (val) => {
             mask.remove();

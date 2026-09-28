@@ -432,13 +432,57 @@ export function setBugStatus(reqId, bugId, status) {
 }
 
 /**
+ * API 文档副本目录。
+ *
+ * **不能放 `.uploads/` 顶层**：那里被 `routes-files.js#pruneUploads` 按 7 天清理（启动 + 每 24h 一次），
+ * 而 API 文档是需求**全生命周期**的引用对象 —— `buildDevelopPrompt` 每轮开发都把 `d.path` 塞进
+ * prompt 让 Claude 先 Read。开发期一旦超过一周，文档会在无人察觉时从盘上消失，表现成
+ * 「右栏还挂着文档名、Claude 却说文件不存在」。这是 2026-09-22 查同事中继时顺带发现的存量 bug：
+ * web 端手动上传走 `/api/upload` 落顶层，一直中这一条。
+ *
+ * 照 `.uploads/feishu/`（见 `integrations/lark.js`）的先例用子目录 —— `pruneUploads` 只扫顶层文件，
+ * 子目录天然跌出清理范围。
+ */
+const API_DOCS_DIR = appDataPath('.uploads', 'apidocs');
+
+/**
+ * 把来源文件复制进 `API_DOCS_DIR` 自持一份，返回副本路径。
+ *
+ * 为什么必须复制而不是直接登记来源路径 —— 两条链路的来源都不可长期依赖：
+ *   - web 手动上传 → `.uploads/` 顶层，7 天后被 `pruneUploads` 删；
+ *   - 飞书同事发来 → `.uploads/feishu/`，虽不被清理，但那是「收信原件」语义，
+ *     跟需求的文档档案不是一回事（同一份原件可能同时被材料池等别的链路引用）。
+ *
+ * 已在副本目录内则幂等返回，不再复制：否则重试 / 重复登记路径会一路堆副本。
+ */
+function storeApiDocFile(srcPath, name) {
+  try {
+    const inDir = path.resolve(API_DOCS_DIR) + path.sep;
+    if (path.resolve(srcPath).startsWith(inDir)) return { ok: true, path: srcPath };
+    fs.mkdirSync(API_DOCS_DIR, { recursive: true });
+    // 文件名清洗与截尾对齐 lark.js 的 downloadMessageResource：扩展名要留住，Claude 按它判能不能读
+    const safe = String(name).replace(/[^\w.一-龥-]+/g, '_').slice(-60);
+    const dest = path.join(
+      API_DOCS_DIR,
+      Date.now().toString(36) + Math.random().toString(36).slice(2, 5) + '-' + safe,
+    );
+    fs.copyFileSync(srcPath, dest);
+    return { ok: true, path: dest };
+  } catch (e) {
+    return { ok: false, error: 'API 文档存档失败：' + (e?.message || e) };
+  }
+}
+
+/**
  * 登记 / 更新一份后端 API 文档（同名即更新，保留原 id）。
  *
  * 路由 handleApidocPost 与四期「同事发来接口文档」自动处理共用 —— 两处各写一份迟早漂移
  *（比如一处校验文件存在、一处不校验，或 history 文案不一致）。
+ * 落盘也收在这里：登记前先 `storeApiDocFile` 复制进不被清理的副本目录，**登记的是副本路径**。
+ * 放在这一层而不是各调用方，正是为了让两条链路天然同源（前端因此零改动）。
  * @param {object|null} req 需求记录；null 映射为 404。phase 与 apiDocs 都现读盘上最新值
  * @param {{name: string, path: string}} doc name 会 trim（飞书原始文件名不经 str()）
- * @returns {{ok:true, action:'新增'|'更新', doc:object} | {ok:false, status:400|404|409, error:string}}
+ * @returns {{ok:true, action:'新增'|'更新', doc:object} | {ok:false, status:400|404|409|500, error:string}}
  */
 export function registerApiDoc(req, { name: rawName, path: p }) {
   if (!req) return { ok: false, status: 404, error: '需求不存在' };
@@ -449,6 +493,14 @@ export function registerApiDoc(req, { name: rawName, path: p }) {
   if (!name || !p) return { ok: false, status: 400, error: 'name/path 均必填' };
   if (!fs.existsSync(p)) return { ok: false, status: 400, error: '文件不存在：' + p };
 
+  // 存档失败一律 fail-closed：降级登记来源路径等于把「保存成功、7 天后静默消失」写进数据，
+  // 比当场报错糟得多 —— 用户看到报错会重试，看不到的只会在两周后发现 Claude 读不到文件
+  const stored = storeApiDocFile(p, name);
+  if (!stored.ok) {
+    logger.warn('req-ops', 'API 文档存档失败', { reqId: fresh.id, name, src: p, error: stored.error });
+    return { ok: false, status: 500, error: stored.error };
+  }
+
   // apiDocs 以盘上最新为准而不用调用方快照：自动处理会在一个循环里对多条消息复用同一个 req，
   // 拿快照整体覆盖会让同一批的第二份文档把第一份静默冲掉（updateRequirement 是浅合并）
   const apiDocs = fresh.apiDocs || [];
@@ -456,11 +508,11 @@ export function registerApiDoc(req, { name: rawName, path: p }) {
   const now = new Date().toISOString();
   let doc, action, next;
   if (idx >= 0) {
-    doc = { ...apiDocs[idx], path: p, updatedAt: now };
+    doc = { ...apiDocs[idx], path: stored.path, updatedAt: now };
     next = apiDocs.map((d, i) => (i === idx ? doc : d));
     action = '更新';
   } else {
-    doc = { id: 'ad_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, path: p, updatedAt: now };
+    doc = { id: 'ad_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, path: stored.path, updatedAt: now };
     next = [...apiDocs, doc];
     action = '新增';
   }

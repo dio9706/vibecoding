@@ -205,3 +205,59 @@ test('会话树点开服务端建的子会话：本地无记录时按既定 id �
     '二次点击不应重复补建（幂等）',
   );
 });
+
+test('测试期需求：只渲当前阶段的会话，开发期会话隐藏', async () => {
+  stubList([
+    {
+      id: 'r_phase1',
+      title: '阶段隔离需求',
+      phase: 'test',
+      updatedAt: new Date().toISOString(),
+      busy: false,
+      sessions: [
+        { convId: 'c_d1', sessionId: 's1', title: '开发主会话', kind: 'main', phase: 'dev', createdAt: '' },
+        { convId: 'c_d2', sessionId: null, title: '开发子会话', kind: 'sub', phase: 'dev', createdAt: '' },
+        { convId: 'c_t1', sessionId: null, title: '测试主会话', kind: 'main', phase: 'test', createdAt: '' },
+      ],
+    },
+  ]);
+  await refreshReqList();
+  const titles = [...doc.querySelectorAll('#reqList .req-session-title')].map((e) => e.textContent);
+  assert.deepEqual(titles, ['测试主会话']);
+});
+
+test('测试期的存量需求：缺 phase 的会话照常显示，不让历史凭空消失', async () => {
+  stubList([
+    {
+      id: 'r_phase2',
+      title: '老数据需求',
+      phase: 'test',
+      updatedAt: new Date().toISOString(),
+      busy: false,
+      sessions: [{ convId: 'c_old', sessionId: 's1', title: '老会话', kind: 'main', createdAt: '' }],
+    },
+  ]);
+  await refreshReqList();
+  const titles = [...doc.querySelectorAll('#reqList .req-session-title')].map((e) => e.textContent);
+  assert.deepEqual(titles, ['老会话']);
+});
+
+test('流转后尚未建测试期主会话：零条会话行，但「＋新会话」入口仍在', async () => {
+  stubList([
+    {
+      id: 'r_phase3',
+      title: '刚流转的需求',
+      phase: 'test',
+      updatedAt: new Date().toISOString(),
+      busy: false,
+      // dev-done 之后、POST /api/req/conv 之前的真实形态
+      sessions: [
+        { convId: 'c_d1', sessionId: 's1', title: '开发主会话', kind: 'main', phase: 'dev', createdAt: '' },
+      ],
+    },
+  ]);
+  await refreshReqList();
+  assert.equal(sessionRows().length, 0);
+  // 会话为空时也必须照常渲染新建入口，否则用户连自救的口子都没有
+  assert.ok(doc.querySelector('#reqList .req-add-session-btn'));
+});

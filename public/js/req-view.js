@@ -267,6 +267,10 @@ function patchListEntry(data) {
     phase: data.phase,
     updatedAt: data.updatedAt,
     busy: !!data.busy,
+    // 必须一起带上：本函数是**整体替换**条目，漏了它侧栏小红点会在每次打开需求/3s busy 轮询后
+    // 被抹掉，等 30s 列表轮询才回来——表现成「红点一闪就没」。详情接口不返回 unreadTotal，
+    // 但 assigneeList 每项带 unreadCount，求和即同一个数（两者同源于 getUnreadCounts）
+    unreadTotal: (data.assigneeList || []).reduce((n, a) => n + (a.unreadCount || 0), 0),
     sessions: data.sessions || [], // 打开需求时补充 sessions 信息
   };
   if (idx >= 0) lastList[idx] = entry;
@@ -403,6 +407,15 @@ function makeReqRow(r) {
     spin.title = '处理中';
     row.appendChild(spin);
   }
+  // 同事未读小红点：排在阶段徽章之前，紧跟标题——它是「要不要点进去」的判据，
+  // 而阶段徽章只是状态描述。数字与右栏「开发人员」那个 badge 同源（都数 in+unread）
+  if (r.unreadTotal > 0) {
+    const dot = document.createElement('span');
+    dot.className = 'req-unread-dot';
+    dot.textContent = r.unreadTotal > 99 ? '99+' : String(r.unreadTotal);
+    dot.title = `${r.unreadTotal} 条未读同事消息`;
+    row.appendChild(dot);
+  }
   const meta = PHASE_META[r.phase] || { label: r.phase, cls: '' };
   const badge = document.createElement('span');
   badge.className = 'req-badge ' + meta.cls;
@@ -422,8 +435,11 @@ function makeReqRow(r) {
   // 旧写法多带了 sessions.length > 0，而 /api/req/list 一度不返回 sessions，
   // 轮询整体替换 lastList 后子行凭空消失，箭头却仍指着「展开」——用户看到的就是「下拉自动收起、点箭头没反应」。
   // 会话为空时也照常渲染「＋新会话」，否则开发期需求会连新建入口都没有。
-  const sessions = r.sessions || [];
   if (isExpandable && isExpanded) {
+    // 按阶段过滤：进入新阶段后，上个阶段的会话沉为历史、从树上隐去（数据仍在，归档期汇总还要用）。
+    // 缺 phase 的存量会话一律显示：那是阶段隔离上线前的数据，该需求没经历过阶段拆分，
+    // 那根会话一路服务到了现在这个阶段，隐掉它等于让用户的历史对话凭空消失。
+    const sessions = (r.sessions || []).filter((s) => !s.phase || s.phase === r.phase);
     for (const session of sessions) {
       result.push(makeSessionRow(session, r.id));
     }
@@ -921,7 +937,20 @@ async function openRequirementChat(id, data, { nav = true } = {}) {
     if (!convId) {
       // cwd 与后端 pickCwdAndDirs 同序：前端优先，无则后端
       const cwd = data.projects?.frontend?.dir || data.projects?.backend?.dir || '';
-      convId = createReqConv({ reqId: id, cwd, session: data.devSession, title: data.title });
+      // kind:'main' 必须显式传（createReqConv 默认 'sub'）；seed 挂着不发——沿用子会话范式，
+      // 用户首次发言时才带出去，不主动烧额度（spec §6.4）。测试期主会话是空白新 session，
+      // 没有 seed 的话 AI 完全不知道这个需求在做什么。
+      // 但有 devSession 可续时不挂 seed：那个 Claude session 的历史里已经有这段背景了，
+      // 再前置一遍纯属重复烧 token（与 buildBugFixPrompt 的 seed 规则同一条口径）。
+      convId = createReqConv({
+        reqId: id,
+        cwd,
+        session: data.devSession,
+        title: data.title,
+        kind: 'main',
+        seedPending: !!data.seed && !data.devSession,
+        seedText: data.seed || '',
+      });
       try {
         const r = await fetch('/api/req/conv', {
           method: 'POST',
@@ -931,6 +960,13 @@ async function openRequirementChat(id, data, { nav = true } = {}) {
         if (!r.ok) {
           const d = await r.json().catch(() => ({}));
           window.toast.error(d.error || 'conv 绑定失败，系统任务进度可能不可见');
+        } else {
+          // 绑定成功才刷：此刻后端才真正登记出当前阶段的 main 行。
+          // 不能交给 phaseAction 在流转后刷——applyFetchedReq 不 await 本函数，
+          // openRequirement 的 Promise 在这次 POST 发出前就 resolve 了，那边刷到的
+          // 还是流转瞬间的旧 sessions（开发期那批已被阶段过滤隐去 → 会话树空白）。
+          // 放在这里，每条铸新 conv 的路径（阶段流转 / 换浏览器 / 清过站点数据）都一并受益。
+          refreshReqList();
         }
       } catch {
         window.toast.error('网络错误，conv 绑定失败');

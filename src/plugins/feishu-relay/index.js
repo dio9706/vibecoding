@@ -117,7 +117,8 @@ async function onConvCardAction(data) {
   return replyToUser(parsed.operatorOpenId, '请直接发送要补充的内容。');
 }
 
-// 模块加载即注册（feishu/web 进程都会加载插件；web 进程无卡片事件，注册无害）
+// 模块加载即注册。**只有走 dispatch 的进程（feishu/console）会加载插件** —— web 入口对 app/
+// 零引用，压根不走装配层（详见 plugins/index.js#loadPluginSideEffects）。web 收不到卡片事件，缺席无害。
 registerCardKindHandler(CONV_CARD_KIND, onConvCardAction);
 
 const feature = {

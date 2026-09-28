@@ -163,7 +163,8 @@ async function onVerdictCardAction(data) {
   return proceedAfterReview(task, { reply }, { overridden: true });
 }
 
-// 模块加载即注册（feishu/web 进程都会加载插件；web 进程无卡片事件，注册无害）。
+// 模块加载即注册。**只有走 dispatch 的进程（feishu/console）会加载插件** —— web 入口对 app/
+// 零引用，压根不走装配层（详见 plugins/index.js#loadPluginSideEffects）。web 收不到卡片事件，缺席无害。
 // team-tools 停用时本模块不加载 → 回调自然落空（入口仅记 warn 日志）。
 registerCardKindHandler('review-verdict', onVerdictCardAction);
 

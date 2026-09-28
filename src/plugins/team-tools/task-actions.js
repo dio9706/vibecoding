@@ -14,6 +14,7 @@ import { getTask, updateTask } from '../../store/tasks.js';
 import { getActiveBot } from '../../store/settings.js';
 import { mergeBranch, deleteBranch } from './auto-dev/git.js';
 import { revertMergeCommit } from './auto-dev/revert.js';
+import { createMergeResolver } from './auto-dev/merge-llm.js';
 
 /** 待合并谓词：自动开发完成、未合并，且分支与基线分支齐全——只有这种任务才谈得上合并 */
 export function isAwaitingMerge(task) {
@@ -41,10 +42,35 @@ function repoOf(task) {
 }
 
 /**
+ * 合并成功但留了尾巴的四种情形 —— 都必须让人看见，但**都不算失败**。
+ *
+ * 刻意不复用 `mergeError` 承载它们：那个字段在面板上渲染成红色的「上次合并失败」
+ * （`public/js/tasks-panel.js`），而这些情形下合并其实已经成功，混用会让维护者
+ * 去排查一次根本不存在的失败。
+ */
+function mergeCaveats(r) {
+  const notes = [];
+  // 钩子被绕过必须让人看见：merge commit 未过目标仓库的 commit-msg/pre-merge-commit 校验
+  if (r.hookBypassed) notes.push('提交钩子拦截，已跳过钩子校验完成合并');
+  if (r.conflictResolvedBy === 'llm') notes.push('合并冲突由 AI 解决，建议复核代码');
+  if (r.stashLlmMerged) notes.push('主工作区未提交改动由 AI 融合后已恢复，建议复核');
+  // 这条最要紧：维护者手上的代码还压在 stash 里没回来，不看见就会以为自己的改动没了
+  if (r.stashStranded) notes.push(`⚠️ 主工作区未提交改动未能自动恢复：${r.stashWarning || '请检查 git stash list'}`);
+  return notes;
+}
+
+/**
  * 合并任务分支到基线分支。
+ *
+ * 注入 LLM resolver 是这里的关键决定：`git.js` 只做确定性的 git 操作（含自动 stash），
+ * 冲突真的解不开时才轮到模型。注入而非内置的理由见 `auto-dev/merge-llm.js` 文件头。
+ *
  * @param {string} id 任务 id
- * @param {{auto?:boolean}} opts auto=true 表示由 auto-dev 管线自动触发（仅影响面板/卡片文案）
- * @returns {Promise<{ok:boolean, code:200|400|404|409, error?:string, task?:object, hookBypassed?:boolean}>}
+ * @param {{auto?:boolean, resolver?:object|null}} opts
+ *   - auto=true 表示由 auto-dev 管线自动触发（仅影响面板/卡片文案）
+ *   - resolver：**测试必须显式传 null 关掉**，否则真冲突用例会起一次真实模型调用
+ *     （实测一条冲突用例跑了 73 秒并真去改了测试仓库的文件）。传对象则替换默认 resolver。
+ * @returns {Promise<{ok:boolean, code:200|400|404|409, error?:string, task?:object, hookBypassed?:boolean, caveats?:string[]}>}
  */
 export async function mergeTaskById(id, opts = {}) {
   const task = getTask(id);
@@ -53,13 +79,18 @@ export async function mergeTaskById(id, opts = {}) {
     return { ok: false, code: 400, error: '任务不满足合并条件（须为自动完成且未合并）' };
   }
   const repo = repoOf(task);
-  const r = await mergeBranch(repo, task.branch, task.baseBranch);
+  // 用 in 判断而非 `||`：null 是「明确关掉 AI 兜底」，不能被默认值顶回来
+  const resolver = 'resolver' in opts ? opts.resolver : createMergeResolver({ task });
+  const r = await mergeBranch(repo, task.branch, task.baseBranch, { resolver });
   if (!r.ok) {
     // r.error 自带「合并冲突：」/「合并失败：」前缀，别再套一层前缀（曾出现「合并失败：合并冲突：…」）
-    const t = updateTask(task.id, { mergeError: r.error }, r.error);
-    logger.warn('task-actions', '任务合并失败', { id: task.id, err: r.error });
-    return { ok: false, code: 409, error: r.error, task: t };
+    // 合并失败但 stash 没能还回来，是两件独立的坏事，必须同时说出来
+    const err = r.stashStranded ? `${r.error}；⚠️ ${r.stashWarning || '主工作区未提交改动未能自动恢复'}` : r.error;
+    const t = updateTask(task.id, { mergeError: err }, err);
+    logger.warn('task-actions', '任务合并失败', { id: task.id, err, stashStranded: !!r.stashStranded });
+    return { ok: false, code: 409, error: err, task: t };
   }
+  const caveats = mergeCaveats(r);
   const t = updateTask(
     task.id,
     {
@@ -70,19 +101,26 @@ export async function mergeTaskById(id, opts = {}) {
       // （基线分支上可能已叠了别的任务的合并提交）。取不到时为空串，不是缺失
       mergeCommit: r.mergeCommit || '',
       autoMerged: opts.auto === true,
+      // 与 mergeError 分开的字段：面板据此出黄字提醒而非红字失败（理由见 mergeCaveats）
+      mergeWarning: caveats.length ? caveats.join('；') : null,
     },
-    `已合并 ${task.branch} → ${task.baseBranch}` +
-      // 钩子被绕过必须让人看见：merge commit 未过目标仓库的 commit-msg/pre-merge-commit 校验
-      (r.hookBypassed ? '（提交钩子拦截，已跳过钩子校验完成合并）' : ''),
+    // 「改动已在基线上」与「刚合并进去」是两件事，文案必须分开：说成「已合并」会让人
+    // 去 git log 里找一个根本不存在的 merge commit
+    (r.alreadyMerged
+      ? `${task.branch} 的改动已在 ${task.baseBranch} 上，无需再合并`
+      : `已合并 ${task.branch} → ${task.baseBranch}`) + (caveats.length ? `（${caveats.join('；')}）` : ''),
   );
   logger.info('task-actions', '任务已合并', {
     id: task.id,
     branch: task.branch,
     base: task.baseBranch,
     hookBypassed: !!r.hookBypassed,
+    conflictResolvedBy: r.conflictResolvedBy || null,
+    stashed: !!r.stashed,
+    stashStranded: !!r.stashStranded,
     auto: opts.auto === true,
   });
-  return { ok: true, code: 200, task: t, hookBypassed: !!r.hookBypassed };
+  return { ok: true, code: 200, task: t, hookBypassed: !!r.hookBypassed, caveats };
 }
 
 /**

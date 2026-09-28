@@ -23,7 +23,7 @@ import { mergeTaskById, discardTaskById, isAwaitingMerge, isDiscardable } from '
 // 必须从 queue.js 引，不能从 auto-dev/index.js 引：后者会 import 本文件去发完成卡片，
 // 两边就成了 import 环（2026-09-04 检出，详见 queue.js 文件头）
 import { requestAutoDevelop } from './auto-dev/queue.js';
-import { buildTaskDoneCard, taskResultCard, parseTaskCardAction, TASK_CARD_KIND } from './task-notify.logic.js';
+import { buildTaskDoneCard, taskResultCard, taskDoneFallbackText, parseTaskCardAction, TASK_CARD_KIND } from './task-notify.logic.js';
 
 /** 当前启用机器人的私聊发送凭证；不全返回 null（调用方据此跳过，不硬发） */
 function creds() {
@@ -51,14 +51,9 @@ export function notifyTaskDone(task, ok) {
     sendCardToUser(c, openId, buildTaskDoneCard(fresh, ok))
       .then((mid) => {
         if (mid) return;
-        // 卡片发送失败（返回 null）→ 降级纯文本。此时用户点不到按钮，
-        // 必须指明后续在哪处理，否则这条通知就是死路一条。
-        const tag = fresh.type === 'bug' ? '[故障]' : '[需求]';
-        return sendTextToUser(
-          c,
-          openId,
-          `${ok ? '✅ 已处理完成' : '❌ 处理失败'}\n${tag}「${fresh.title}」\n请到网页端任务面板处理。`,
-        );
+        // 卡片发送失败（返回 null）→ 降级纯文本。文案与卡片同源（taskDoneFallbackText 走
+        // 同一个 mergeStatusOf），否则两条通道的合并结果口径会分叉。
+        return sendTextToUser(c, openId, taskDoneFallbackText(fresh, ok));
       })
       .catch((e) => logger.warn('task-notify', '任务完成通知异常（已捕获）', { id: task.id, err: e?.message || String(e) }));
   } catch (e) {
@@ -142,9 +137,11 @@ async function onTaskCardAction(data) {
     // task 是权限判定之后、无任何 await 间隔读出来的盘上值，就是最新态。
     if (!isAwaitingMerge(task)) return done(`ℹ️「${task.title}」已不在待合并态。`);
     const r = await mergeTaskById(task.id);
+    // caveats 覆盖了原来单独处理的 hookBypassed，另含「AI 解了冲突」「你的未提交改动还在 stash 里」
+    // 两条更要紧的提醒 —— 合并成功不等于没事要管，卡片是维护者唯一会看的地方
     return done(
       r.ok
-        ? `✅ 已合并 ${task.branch} → ${task.baseBranch}` + (r.hookBypassed ? '（已跳过提交钩子校验）' : '')
+        ? `✅ 已合并 ${task.branch} → ${task.baseBranch}` + (r.caveats?.length ? `\n${r.caveats.join('\n')}` : '')
         : `⚠️ ${r.error}（请到网页端处理）`,
     );
   }
@@ -164,7 +161,8 @@ async function onTaskCardAction(data) {
   return done(text);
 }
 
-// 模块加载即注册（feishu/web 进程都会加载插件；web 进程无卡片事件，注册无害）。
+// 模块加载即注册。**只有走 dispatch 的进程（feishu/console）会加载插件** —— web 入口对 app/
+// 零引用，压根不走装配层（详见 plugins/index.js#loadPluginSideEffects）。web 收不到卡片事件，缺席无害。
 // team-tools 停用时本模块不加载 → 回调自然落空（入口仅记 warn 日志）。
 registerCardKindHandler(TASK_CARD_KIND, onTaskCardAction);
 
