@@ -10,7 +10,7 @@ import { logger } from '../../shared/logger.js';
 import { ensureImport } from '../../shared/claude-md.js';
 import { readBank, updateBank, addSession, patchSession } from '../../store/memory-bank.js';
 import { getMemoryBankSettings } from '../../store/settings.js';
-import { listActiveRuns, isPidAlive } from '../../store/active-runs.js';
+import { listRunIndex, isPidAlive } from '../../store/run-index.js';
 import { getTokens } from '../../capabilities/token-rotation.js';
 import { renderMarkdown } from './render.js';
 import { shouldRun } from './schedule.js';
@@ -232,7 +232,7 @@ export function startMemoryBankTicker({ cwd = process.cwd() } = {}) {
         now,
         settings: getMemoryBankSettings(),
         tokens: getTokens(),
-        activeRunCount: listActiveRuns().filter((e) => isPidAlive(e?.pid)).length,
+        activeRunCount: listRunIndex().filter((e) => isPidAlive(e?.pid)).length,
         lastExtractAt: bank.lastExtractAt,
         // providerId 走默认值 DEFAULT_PROVIDER_ID('claude-agent')：提炼最终经
         // runClassifierOnce → claudeAuthOpts() → getActiveToken() 也是这个默认 provider，两边必须一致。

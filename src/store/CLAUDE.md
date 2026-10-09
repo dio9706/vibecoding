@@ -14,7 +14,7 @@
 
 ## 文件清单
 
-（每个源文件旁均有同名 `*.test.js`，下表从略；另有两个无对应源码的测试：`corruption.test.js` 测 `index.js` 的损坏兜底、`runs-held.test.js` 测 `runs.js` 的插话缓冲。）
+（每个源文件旁均有同名 `*.test.js`，下表从略；另有几个无对应源码的测试：`corruption.test.js` 测 `index.js` 的损坏兜底、`runs-held.test.js` 测 `runs.js` 的插话缓冲、`runs-inbox.test.js` 测 `runs.js` 的 conv 级 follow-up 队列（T2-P4）。）
 
 ### 基座（无业务语义，被下面所有文件依赖）
 - `index.js` — 存储基座，全项目唯一持久化入口。`readJson`/`writeJson`/`updateJson` + `dataPath`；损坏即抛拒写、tmp+fsync+rename 原子落盘；日后换 sqlite 只改这里。
@@ -23,9 +23,11 @@
 - `mask.js` — 落盘前敏感值脱敏纯函数（`maskValue`/`maskDeep`）：字段名 + 值模式双层匹配。
 
 ### 运行任务（内存 + 崩溃续跑）
-- `runs.js` — 进行中的 Claude 生成任务，纯内存注册表；SSE 订阅、看门狗、审批队列、五个终结口 + settle 事件。
-- `active-runs.js` — `runs` 的最小落盘镜像（`active-runs.json`），供进程重启后孤儿续跑；`partitionActiveRuns` 区分孤儿 / 他人所有。
-- `pending-resume.js` — 额度用尽 / 孤儿恢复的待续跑队列（`pending-resume.json`），含 `shouldAbandonResume` 续跑熔断。
+- `runs.js` — 进行中的 Claude 生成任务，纯内存注册表；SSE 订阅、看门狗、审批队列、五个终结口 + settle 事件；run 事件流经注册的 sink 发射（`registerRunJournalSink` / `emitRunEvent`，真实落盘接线在 `entrypoints/web/run-durability.js`）。**T2-P4 busy inbox**：`run.capabilities = {steer, followUp}` 能力位（替代 `steerHold`）＋ conv 级 follow-up 队列（`enqueueFollowUp`/`takeFollowUps`/`cancelFollowUp`）与「最近排空启动」记录（`markFollowUpStarted`/`listFollowUpStarts`，供前端 `/api/run/pending` 发现新 run）；排空编排在 `entrypoints/web/conv-inbox.js`。
+- `run-journal.js` — run 事件流（`run-journal.jsonl`，追加写）：`{ v:1, seq, runId, convId, at, type, data }`；3 天窗 + 5000 条上限；**P2 影子期只写不读**，读取 API 供 P5 对账与排查。
+- `submissions.js` — 提交幂等认领表（`submissions.json`）：`claim(key)`/`bind(key, ref)` 的跨进程持久去重（web 起跑/插话的 requestId、飞书 `feishu:msg:<messageId>`）；命中已绑定认领回放既有 ref，未绑定的死认领超 `RECLAIM_MS` 复占，TTL 过期即失效。key 命名空间化（`<ns>:<id>`），语义详见文件头。
+- `run-index.js` — 运行中 run 的可查询索引（`run-index.json`）：**P5 起崩溃恢复的唯一来源**（active-runs 已退役），字段含 provider / session_id / convId / cwd / requestId / prompt / status / lastSeq。`partitionRunIndex` 多实例守卫（自 active-runs 原样迁移）；`migrateLegacyActiveRuns` 把旧表存量并入后清空（升级首启一次性迁移）。
+- `pending-resume.js` — 待续跑队列（`pending-resume.json`），**P5 定位为纯排程器**：条目来源＝额度/异常重试（settleRun）与孤儿对账（reconcileRuns，reason=`orphan_recovery`）；含 `shouldAbandonResume` 续跑熔断。
 
 ### 日志族（追加写 JSONL）
 - `event-log.js` — 通用事件日志（API 访问 / 错误），3 天窗 + 1000 条上限，最新在前。
@@ -40,7 +42,7 @@
 - `read-first-lines.js` — 只读文件开头若干行，拿够即停。
 
 ### 设置 / 配置迁移
-- `settings.js` — 设置持久化唯一入口（`settings.json`）：飞书凭证 + token 池 + bots + 文案 + UI 偏好；含明文密钥（已 gitignore）。
+- `settings.js` — 设置持久化唯一入口（`settings.json`）：飞书凭证 + token 池 + bots（含 `autonomy` 托管档与 `execPolicy` 无人值守执行档位，T6）+ 文案 + UI 偏好 + `exec`（Bash 执行后端配置，T6）+ `search`（联网搜索 provider/apiKey，A7，仅 openai 路径 WebSearch）；含明文密钥（已 gitignore）。**openai 凭证多模型（OpenCode 式）**：条目可带 `models:[{id,name?,efforts?,defaultEffort?}]`（`/models` 发现结果）+ `modelsUpdatedAt`，legacy 单 `model` 字段仍在；读侧单一事实源 `credentialModels(t)`（models 优先、model 回落）+ `normalizeModelList` 归一（efforts 白名单化），`addTokenEntry` 返回新建条目（添加端点回 id 供接着刷新模型）。
 - `config-transfer.js` — 配置导入导出纯函数（无 I/O）：`buildExport`/`parseImport`，类型 + 版本校验。
 - `bots-migration.js` — bots 迁移编排：旧单凭证 → 机器人实体 + 收养孤儿动作，幂等。
 - `action-configs.js` — 通用动作配置 CRUD（`action-configs.json`），按 bot 归属。另含关键词自学习的两个专用口：`appendAutoKeyword`（**整个合并过程都在 `updateJson` 回调内**完成，去重与配额在锁内重做一次 —— 调用方过闸时读到的是快照，在外面读改写会被另一进程覆盖）与 `reconcileAutoKeywords`（纯函数对账：人工删掉的自动词进 `rejectedKeywords`，否则下次同样的话一来会被原样学回去；已知取舍是分不清「改字」和「删旧词」，详见该函数 JSDoc）。
@@ -50,8 +52,9 @@
 - `requirements.js` — 「新需求」全生命周期，含状态机 `PHASE_FLOW` + `canTransition`。`sessions[]` 每条带 `phase`（会话诞生时的需求阶段），`normalizeSessions` 读侧给存量会话回填 **`req.phase`** 而非字面量 `'dev'`——缺 `phase` 说明该需求从没经历过阶段拆分（老流程 dev-done 只改 phase、`convId` 原样延续），那根会话一路服务到了现在这个阶段；补 `'dev'` 会让已在测试期的存量需求会话树整棵从侧栏消失。
 - `tasks.js` — 需求 / 故障任务存储（feedback / dev-task / doc-driven 共用）。
 - `conv-notify.js` — 会话飞书通知登记表 + 补充内容收件箱（web 写、飞书读）。
-- `conv-messages.js` — 应用自持会话消息（per convId 的 ModelMessage 数组）。
+- `conv-messages.js` — 应用自持会话消息（per convId 的 ModelMessage 数组 + **滚动摘要**）。**T7 v2 形状**：`{v:2, messages, summary:{text, covered, at, model}}`——模型视角 = 摘要 + `messages.slice(covered)`，原文保留；磁盘 backstop `MAX_STORED=1000` 按「新头部非 tool 结果」安全边界裁剪并同锁平移 covered。v1 数组读侧兼容、写入即升级。压缩编排与纯函数在 `entrypoints/web/run-openai.js` + `conv-compact.logic.js`。
 - `feature-index.js` — 功能账本：按功能标签记 git diff 收割的文件频次，开发期优先读。
+- `repo-map-cache.js` — Repo map 的 per-file 解析缓存（`repo-map-cache.json`）：`{ [key]: { repoPath, fingerprint, builtAt, files } }`，key = 仓库绝对路径短哈希。**缓存解析记录、不缓存成品文本**——成品要按当前任务关键词重排序，缓存文本会让下次调用沿用上个任务的加权。LRU ≤5 仓（记录随文件数增长，共用一块盘）。
 - `optimize.js` — 项目优化记录（`optimize.json`），含串行闸 `acquireBusy` + LLM 缓存。
 - `checkup-ignores.js` — 体检豁免清单（`checkup-ignores.json`）：用户点「这不是问题」的记录，键为 `(dim, code, file)` 三元组（**不含行号**，行号会漂移）。独立于 `optimize.json` 的理由见文件头注释（那份是高频读改写的体检产出，这份是低频长寿的人工判断）。
 - `review-log.js` — 评审判例库（`review-log.jsonl`，追加写）。
@@ -78,11 +81,14 @@
 - **读取**：`jsonl.js readJsonl`（文件序旧→新、坏行跳过），日志面板侧 `reverse()` 取最新在前。
 
 ### 流程 C · Run 生命周期与崩溃续跑（内存 ↔ 磁盘配对）
-`runs.js` 是内存态，`active-runs.js` 是它的落盘锚点，两者生命周期严格配对：
-1. provider 起跑 → `createRun`（内存，启看门狗）+ `active-runs.addActiveRun`（落最小续跑锚点：含 pid / startedAt / 续跑代次）。
-2. 运行中 → provider 回调 `runText`/`runActivity`/`runTodos`/`askUser`… 推进内存状态并 `fanout` 广播 SSE；`onInit` 到达后 `active-runs.patchActiveRun` 回填 `session_id`。
-3. 终结 → 五个收口之一（`finishRun`/`failRun`/`blockRun`/`retryRun`/`stopRun`，均先判 `status!=='running'` 早退，保证每个 run 只广播一次）→ `emitSettled` 通知上层监听器（store 不 import 业务模块，监听器由上层 `registerRunSettleListener` 注册）；settle 收尾时由上层调 `active-runs.removeActiveRun`。
-4. 进程崩溃重启 → `active-runs.json` 残留条目即孤儿，web 入口用 `partitionActiveRuns`（按 pid 存活 + `startedAt >= bootTimeMs`）区分「可回收孤儿 / 他人（桌面版）所有」，孤儿转 `pending-resume.addPending`（reason=`orphan_recovery`），每轮续跑代次 +1，`shouldAbandonResume` 到顶熔断。
+`runs.js` 是内存态，`run-index.js` 是它的落盘锚点（P5 起唯一来源，active-runs 已退役），二者生命周期严格配对：
+1. provider 起跑 → `createRun`（内存，启看门狗）+ `run-durability.mirrorRunStart` 写最小续跑锚点（含 provider / pid / startedAt / 续跑代次），并经 sink 发射 `submitted` 事件（journal）。
+2. 运行中 → provider 回调 `runText`/`runActivity`/`runTodos`/`askUser`… 推进内存状态并 `fanout` 广播 SSE；`onInit` 到达后 `mirrorRunPatch` 回填 `session_id`。runs.js 在各状态推进点经 `emitRunEvent` 发射事件（session/ask/decision/steer/result/settled…）。
+3. 终结 → 五个收口之一（`finishRun`/`failRun`/`blockRun`/`retryRun`/`stopRun`，均先判 `status!=='running'` 早退，保证每个 run 只广播一次）→ `emitSettled` 通知上层监听器（store 不 import 业务模块，监听器由上层 `registerRunSettleListener` 注册）；settle 收尾时由上层调 `mirrorRunRemove` 摘除索引。
+4. 进程崩溃重启 → `run-index.json` 残留条目即孤儿，web 入口 `recoverPendingAndOrphans` → `reconcileRuns`：`partitionRunIndex` 区分「可回收孤儿 / 他人（桌面版）所有」（按 pid 存活 + `startedAt >= bootTimeMs`），对每条孤儿读 journal 归类（`classifyInterrupted`，见 `entrypoints/web/run-reconcile.logic.js`）→ **resume**（Claude 转 `pending-resume.addPending`，reason=`orphan_recovery`，每轮代次 +1；openai 直接排程检查点续跑）/ **abandon**（熔断或会话尚未建立的孤儿，落 abandoned 标记供前端提示）/ **discard**（settled 残留、无 convId 可提示）。熔断到顶仍由 `shouldAbandonResume` 裁定。
+
+> P5 口径：`run-journal.jsonl` / `run-index.json` 写失败一律吞掉（尽力而为，绝不影响主链）；
+> 恢复读取只有 run-index 一处，旧 `active-runs.json` 由 `migrateLegacyActiveRuns` 首启并入后清空。
 
 看门狗关键取舍（都在 `runs.js` 常量）：静默 15min、硬超时 2h、等待审批「有人看 15min / 无人值守 6h」（`shouldResolveWaiting`）；审批用 `pending` + `pendingQueue` 串行呈现，**严禁覆盖 `run.pending`**（否则被覆盖者的 resolve 永久丢失、CLI 等权限挂死——已实测事故）。
 
@@ -99,12 +105,14 @@
 ## 常见改动入口
 
 - **要新增一类持久化状态** → 建 `src/store/<name>.js`，读用 `index.js` 的 `readJson(name, fallback)`，写一律走 `updateJson`（禁裸 `readJson`→`writeJson`）；在 `docs/ARCHITECTURE.md` 的 store 清单登记。
+- **要给新的提交口加幂等 / 去重** → 用 `submissions.js` 的 `claim(key)`/`bind(key, ref)`，key 命名空间化（`<ns>:<id>`，如 `start:` / `steer:` / `feishu:msg:`）；未 bind 的认领按 `RECLAIM_MS` 复占，语义见文件头。
 - **要改并发 / 原子性 / 损坏兜底语义** → 只改 `index.js`（`parseFileOrThrow` 的 fallback 条件、`writeFileAtomic` 的 fsync/重试、`updateJson` 的锁复核）。
 - **要调文件锁陈旧阈值 / 等待上限 / 抢占策略** → `lock.js`（`LOCK_STALE_MS` / `LOCK_MAX_WAIT_MS` / 令牌归属）。
 - **要新增一类追加日志** → 底座复用 `jsonl.js`，把「保留窗 / 条数上限 / 压缩频率」等策略写在新日志文件里（参照 `event-log.js`）。
 - **要改脱敏的字段名或值模式规则** → `mask.js`（`SECRET_KEY_RE` 等正则与 `full`/`partial` 策略）。
 - **要改 run 状态机 / 看门狗阈值 / 审批队列 / SSE 事件类型** → `runs.js`。
-- **要改崩溃续跑的锚点字段或孤儿判定** → `active-runs.js`（`partitionActiveRuns`）；改续跑熔断次数 → `pending-resume.js`（`shouldAbandonResume`）。
+- **要改崩溃续跑的锚点字段或孤儿判定** → 锚点写口在 `run-index.js`（经 `entrypoints/web/run-durability.js` 的 mirror* 接线）；孤儿判定 `partitionRunIndex` 在同文件，归类 `classifyInterrupted` 在 `entrypoints/web/run-reconcile.logic.js`；改续跑熔断次数 → `pending-resume.js`（`shouldAbandonResume`）。
+- **要给 run 事件流加事件类型 / 改截断与保留策略** → 发射点 `store/runs.js`（`emitRunEvent`）或 run 编排层（submitted/started/resumed/abandoned）；落盘策略与 schema 见 `store/run-journal.js` 与 T2 spec §4.2。
 - **要改设置结构 / 默认值 / 归一逻辑** → `settings.js`（`DEFAULTS` + `normalizeSettings`，新字段必须在 normalize 里透传，否则整份回写时会被丢掉）。
 - **要改需求阶段流转** → `requirements.js`（`PHASE_FLOW` + `canTransition`）；涉及会话按阶段隔离的还要看 `sessions[].phase` 与 `normalizeSessions` 的回填口径。**改 `normalizeSessions` 前先读它的 JSDoc**：它的返回值对**调用时序**敏感（phase 缺省取 `req.phase`），`routes-requirements.js` 的 `handleDevDone` 必须在改写 phase **之前**读未更新的 `req` 求值；写反了开发期会话会被全部钉成 `'test'`、此后永不被隐藏——功能静默退化成空操作，不报错也不红测。唯一护栏是 `routes-requirements.test.js` 里「会话缺 phase 时按流转前的阶段物化成 dev」那条用例，别删。
 - **要改同事对话的存储形状 / 未读口径** → `colleague-messages.js`；新能力一律走按人读写的 `getColleagueThread`/`appendTo`/`markColleagueRead`（`getUnreadCounts`/`getUnreadTotals` 对外语义不变，内部已改按消息 `reqId` 标签过滤）。

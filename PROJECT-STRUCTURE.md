@@ -49,7 +49,7 @@ claude-p-web-demo/
 │
 ├─ 【数据存储文件】（JSON）
 ├── tasks.json                    # 任务列表数据
-├── active-runs.json              # 当前活跃运行
+├── run-index.json                # 执行中 run 的落盘锚点（崩溃续跑来源）
 ├── event-log.json                # 事件日志（JSON 格式）
 ├── event-log.jsonl               # 事件日志（JSONL 流式格式）
 ├── feishu-status.json            # 飞书连接状态
@@ -112,7 +112,7 @@ claude-p-web-demo/
 │   │
 │   └─ 📂 store/                  # 数据持久化层（JSON 文件存储）
 │      ├── index.js               # 存储基础工具（读写锁）
-│      ├── active-runs.js         # 当前活跃运行管理
+│      ├── run-index.js           # 执行中 run 落盘索引（崩溃续跑锚点；旧 active-runs 迁移并入）
 │      ├── bindings.js            # Token / 账户绑定管理
 │      ├── cleanup-log.js         # 清理日志记录
 │      ├── event-log.js           # 事件日志记录
@@ -295,9 +295,9 @@ updateJson('tasks.json', [], (current) => {
 });
 ```
 
-#### 📌 **active-runs.js** - 活跃运行管理
-- 记录当前执行中的任务
-- 支持暂停/恢复/取消
+#### 📌 **run-index.js** - 执行中 run 落盘索引
+- 持久化运行中 run 的最小锚点（provider / session / convId / cwd / resumeAttempt / pid）
+- 崩溃重启后由启动对账（`reconcileRuns`）归类：续跑 / 熔断 / 摘除；`partitionRunIndex` 守卫多实例
 
 #### 📌 **runs.js** - 运行状态管理（核心）
 ```javascript
@@ -445,7 +445,7 @@ settings: {
 ```
 project-root/
 ├── tasks.json              # 任务列表
-├── active-runs.json        # 活跃运行
+├── run-index.json          # 执行中 run 的落盘锚点
 ├── event-log.jsonl         # 事件流
 ├── bindings.json           # Token 绑定
 ├── pending-resume.json     # 恢复队列

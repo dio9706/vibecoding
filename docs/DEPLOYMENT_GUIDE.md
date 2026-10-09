@@ -60,7 +60,7 @@
 |------|:--:|---------|
 | `.env` | 飞书凭证 | 手动复制 `.env.example` 后填写 |
 | `settings.json` | Anthropic token 池 + 飞书凭证 | Web 设置页配置后自动写入 |
-| `active-runs.json` | 当前执行的任务 ID | 任务起跑时自动生成 |
+| `run-index.json` | 当前执行的任务 ID | 任务起跑时自动生成 |
 | `pending-resume.json` | 待续跑的任务信息 | 额度耗尽时自动生成 |
 | `logs/` | 应用日志（含执行细节） | 启动时自动创建 |
 | `scripts/` | 你的自定义脚本（可能含密钥） | 手动放入，该目录已忽略 |
@@ -264,7 +264,7 @@ tail -f event-log.jsonl
 
 5. **关窗后任务消失**
    - 检查 PM2：`pm2 list`，`principal-web` 是否还在线
-   - 检查 `active-runs.json` 是否存在且非空
+   - 检查 `run-index.json` 是否存在且非空
    - 重开页面后 GET `/api/run/pending` 是否返回任务列表
 
 详细排查方案见 **[docs/ARCHITECTURE.md](ARCHITECTURE.md)** 末尾的「故障排查速查表」。
@@ -294,7 +294,7 @@ pm2 logs
 
 **不会丢失的**：
 - `settings.json`（已 .gitignore）
-- `active-runs.json` / `pending-resume.json`（运行时状态）
+- `run-index.json` / `pending-resume.json`（运行时状态）
 - `scripts/`（自定义脚本）
 - `.env`（已 .gitignore）
 

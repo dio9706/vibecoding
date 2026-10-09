@@ -7,12 +7,14 @@ import { updateTask, getTasks } from '../../store/tasks.js';
 import { systemNotify } from '../../integrations/notify.js';
 import { runClaude } from '../../integrations/claude.js';
 import { claudeAuthOpts } from '../../capabilities/token-rotation.js';
+import { buildUnattendedClaudeOpts } from '../../capabilities/tool-policy.js';
 import { config } from '../../shared/config.js';
 import { logger } from '../../shared/logger.js';
 import { botScopePrompt } from '../../shared/bot-scope.js';
-import { getActiveBot } from '../../store/settings.js';
+import { getActiveBot, getUiPrefs } from '../../store/settings.js';
 import { materialDetailLine } from './material-pool.js';
 import { notifyTaskDone } from './task-notify.js';
+import { buildDevelopPrompt } from './auto-dev/prompt.logic.js';
 
 /** 任务处理的机器人上下文：一次读盘取 cwd 与边界提示（两次分别读会有中途换 bot 的错配窗口） */
 function botTaskContext() {
@@ -102,26 +104,45 @@ export async function develop(task, opts = {}) {
     ? `\n【工作区说明】本次开发在独立任务工作区进行（当前目录 ${opts.cwd}），所有文件修改必须在当前目录内完成；` +
       `绝对不要按绝对路径修改 ${mainDir} 下的文件（那是主工作区，由管理员另行合并）。\n`
     : '';
+  // 验证门的 prompt 段：首次给「完成标准」，重试给「上次失败现场」。
+  // 命令只来自 owner 配置（opts.verifyCommand 由 auto-dev 从 bot.verifyScript 取出），绝不接受模型输入。
+  const verifyCommand = typeof opts.verifyCommand === 'string' ? opts.verifyCommand.trim() : '';
+  // 模板住在 prompt.logic.js（benchmark 与生产共用同一份，见其文件头）
+  const prompt = buildDevelopPrompt({
+    type: task.type,
+    detail: task.detail,
+    analysis: task.analysis?.suggestion,
+    scopeSection: botCtx.scopeSection,
+    scopeFix,
+    verifyCommand,
+    verifyFeedback: opts.verifyFeedback,
+  });
   let out = '';
   let ok = true;
+  // 无人值守工具策略（T6）：execPolicy 默认 bypass（与改动前一致）；standard/trusted 档下
+  // 策略拒绝计次熔断 → 中断本轮（abortController）+ 系统通知。规则表在 capabilities/tool-policy。
+  const abort = new AbortController();
+  const { disabledTools: rawDisabledTools } = getUiPrefs();
+  const policyOpts = buildUnattendedClaudeOpts({
+    execPolicy: getActiveBot()?.execPolicy,
+    workspace: cwd,
+    disabledTools: new Set(Array.isArray(rawDisabledTools) ? rawDisabledTools : []),
+    abortController: abort,
+    label: task.title || task.id,
+  });
   try {
-    await runClaude(
-      `请在当前项目实际实现这个${isBug ? '修复' : '需求'}：\n` +
-        `原始反馈：「${task.detail}」\n` +
-        `分析建议：\n${task.analysis?.suggestion || '(无)'}\n\n` +
-        `反馈中若含本地文件/图片路径（截图、附件、参考文档），请先用 Read 查看再动手。\n` +
-        botCtx.scopeSection + scopeFix +
-        `请修改代码完成它；完成后用一段话说明你改了哪些文件、做了什么。`,
-      {
-        ...claudeAuthOpts(), // 跟随备用账号轮换（与 web run 同一 token 池）
-        cwd,
-        permissionMode: 'bypassPermissions',
-        onText: (t) => (out += t),
-        onResult: (i) => {
-          if (!out && i.result) out = i.result;
-        },
+    await runClaude(prompt, {
+      ...claudeAuthOpts(), // 跟随备用账号轮换（与 web run 同一 token 池）
+      cwd,
+      permissionMode: policyOpts.permissionMode,
+      canUseTool: policyOpts.canUseTool,
+      hooks: policyOpts.hooks,
+      abortController: abort,
+      onText: (t) => (out += t),
+      onResult: (i) => {
+        if (!out && i.result) out = i.result;
       },
-    );
+    });
   } catch (e) {
     ok = false;
     out = `开发出错：${e?.message || String(e)}`;

@@ -1,0 +1,16 @@
+{
+  "id": "a8609a2-implement-analyze-llm-phase1-per-session",
+  "title": "implement analyze - LLM phase1 per-session findings extraction",
+  "type": "feature",
+  "input": "记忆库提炼的第一步：把单个会话的转录整理成给模型的分析提示——解析 user/assistant 消息、跳过无关行和坏行、超长截断；然后调用模型提取结构化的「发现」，并做清洗（类型白名单、摘要与详情长度截断、空内容过滤）。",
+  "analysis": "",
+  "fixRef": "a8609a2",
+  "baseRef": null,
+  "testFiles": [
+    "src/features/memory-bank/analyze.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "memory-bank"
+  ]
+}

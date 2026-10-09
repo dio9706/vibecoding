@@ -3,7 +3,7 @@
 本目录混装**两类性质不同**的东西，读代码前先分清，否则会找错编排入口：
 
 1. **对话 feature（走 dispatch）**：只有 `claude-exec/` 一个。它是标准 feature 对象（`match`/`handle`），由 `index.js` 装配进 `features` 数组，交给 `src/app/dispatch.js` 路由。
-2. **后台 / 库子系统（不走 dispatch）**：`memory-bank/`、`project-checkup/`、`project-optimize/`。它们没有 feature 对象，主循环 / 编排入口在**模块之外**——记忆库由 `src/entrypoints/web/server.js` 的 ticker 拉起，体检 / 优化由 `src/entrypoints/web/optimize-ops.js` 调度。放在 `features/` 是因为它们属于「内核能力」，但别在本目录里找它们的主循环。
+2. **后台 / 库子系统（不走 dispatch）**：`memory-bank/`、`project-checkup/`、`project-optimize/`、`repo-map/`。它们没有 feature 对象，主循环 / 编排入口在**模块之外**——记忆库由 `src/entrypoints/web/server.js` 的 ticker 拉起，体检 / 优化由 `src/entrypoints/web/optimize-ops.js` 调度，代码地图由 `src/entrypoints/web/run-openai.js` 在起 run 时调用。放在 `features/` 是因为它们属于「内核能力」，但别在本目录里找它们的主循环。
 
 `project-checkup` / `project-optimize` 贯穿一条铁律：**每个检测器 / 修复器都拆成 `X.js`（fs / LLM / 子进程 IO 层）+ `X.logic.js`（纯函数判定层，带 `*.test.js`）**。纯逻辑单独可测、IO 层极薄——这是本目录文件成对出现的原因。
 
@@ -59,6 +59,12 @@
 - `project-checkup/fingerprint.logic.js` — LLM 维度的缓存指纹与失效判定。
 - `project-checkup/frontmatter.logic.js` — 极简 YAML frontmatter 解析。
 - `project-checkup/git-tracked.js` — `git ls-files`，「什么是真实源码」的权威来源。
+
+### repo-map/（给 agent 的代码地图，不走 dispatch）
+- `repo-map/index.js` — 编排：git 清单 → stat → 按**文件级** mtime/size 增量重解析 → 排序 → 预算内输出。仅 git 仓库（.gitignore 挡构建产物/密钥；拍板不做目录遍历降级）；4s 解析预算，超时用已解析部分；缓存记录带 `version`（抽取器口径升级即整体作废）；`refresh=true` 跳过缓存全量重建（RepoMap 工具用）；对外 `getRepoMap` fail-open（任何异常返回空串）。消费方：`entrypoints/web/run-openai.js`（system prompt 注入 + `RepoMap` 工具，同受 `settings.repoMap.enabled` 开关，默认开）。
+- `repo-map/repo-map.logic.js` — 纯函数：查询词提取（ASCII 词 + camel/snake 拆词，中文任务自然退化为全局排序）、标识符集合、引用/入度聚合、排序（引用度 + import 入度 + 任务关键词加权）、预算裁剪与格式化（Aider 风格）。
+- `repo-map/extra-symbols.logic.js` — Phase 2 附加抽取器（类方法）：JS/TS 类体轻量词法扫描（字符串/注释/模板里的花括号不参与深度）+ Python 缩进法；结果只进地图，**不碰 checkup 共享件**。
+- 与 `project-map/`（LLM 功能地图）的分工：那是按需生成给人看的文档；这是每次运行注入给模型的**确定性符号索引**。复用 checkup 的 `extractExports`/`extractImports`/`git-tracked`/`fingerprint`——**不改共享件**（全量测试即回归门）；`RepoMap` 工具本体在 `providers/builtin-tools.js`，由 run-openai **注入** `loadRepoMap` 才装配（providers 不向上依赖 features）。
 
 ### project-optimize/（修复器 / 生成器库，无 index.js，编排在 optimize-ops）
 

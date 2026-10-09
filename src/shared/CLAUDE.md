@@ -23,6 +23,7 @@
 | `card-actions.js` | 卡片回调 `kind`→handler 注册表（**只给机制，实现由插件注册**） | 无 |
 | `card-confirm.js` | 确认/信息卡片构造 + 回调解析（`parseCardAction`）+ 确认/取消态更新 | 无 |
 | `bot-scope.js` | Claude 调用注入工程边界/persona 的 system prompt 追加段（纯函数） | 无 |
+| `workspace-paths.js` | 工作目录路径工具（T6）：`resolveWorkspace` / `isInsideWorkspace`（区内/越界判定——审批策略与内置工具共用的分界线）/ `resolveToolPath` / `displayPath`。零依赖纯函数。 | 无 |
 | `mention.js` | 群聊 @ 前缀（纯函数，仅群聊生效，open_id 白名单校验） | 无 |
 | `pending-supplement.js` | 「等待补充内容」内存瞬态（arm/peek/take）+ 文本前缀兜底 | 无（内存 Map） |
 | `trusted-ids.js` | 可信提交人/操作人名单判定（`resolveTrustedOpenIds`/`isTrustedSubmitter`/`canOperateRelay`，纯函数） | 无 |

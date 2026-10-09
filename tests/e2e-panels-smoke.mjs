@@ -87,13 +87,16 @@ try {
   await page.waitForTimeout(200);
   assertNoErrors('JSON 工具');
 
-  // 模型 fab 弹层
-  await page.click('#modelFabBtn');
-  if (!(await page.isVisible('#modelPop'))) fail('模型弹层未打开');
+  // 输入框底栏：模型下拉（Claude pills 在场）+ 悬浮工具弹层
+  await page.click('#modelBarBtn');
+  if (!(await page.isVisible('#modelPop'))) fail('模型下拉未打开');
   const pills = await page.$$('#modelPills button');
   if (pills.length < 4) fail('模型 pills 数量异常: ' + pills.length);
-  await page.click('#modelFabBtn'); // 收起
-  assertNoErrors('模型弹层');
+  await page.click('#modelBarBtn'); // 收起
+  await page.click('#toolsFabBtn');
+  if (!(await page.isVisible('#toolsPop'))) fail('工具弹层未打开');
+  await page.click('#toolsFabBtn'); // 收起
+  assertNoErrors('模型/工具弹层');
 
   // 工作目录弹层：开 → 等目录列表 → 关
   await page.click('#dirBtn');

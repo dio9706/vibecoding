@@ -103,7 +103,7 @@ clone 后**不存在是正常的**，跑起来会自动生成。
 | `user-vars.json` | 用户变量缓存（手机号 / 邮箱等 PII） | 交互中缓存 |
 | `feishu-status.json` | 飞书长连接状态 | 飞书入口运行时 |
 | `saved-dirs.json` | 常用工作目录历史（绝对路径） | Web 端使用时 |
-| `tasks.json` / `event-log.json(l)` / `active-runs.json` / `pending-resume.json` / `learned-keywords.json` / `action-log.jsonl` | 会话 / 事件 / 任务运行时数据 | 运行时 |
+| `tasks.json` / `event-log.json(l)` / `run-index.json` / `pending-resume.json` / `learned-keywords.json` / `action-log.jsonl` | 会话 / 事件 / 任务运行时数据 | 运行时 |
 
 > **Anthropic token** 在 Web 设置页添加（`sk-ant-oat01-…` 订阅 token），仅存于本地
 > `settings.json`，永不入库。
@@ -160,7 +160,7 @@ git status --short
 | 依赖 | `node_modules/` |
 | 环境变量 | `.env`、`.env.*`（保留 `.env.example`） |
 | 敏感状态 | `settings.json`、`bindings.json`、`cleanup-log.json`、`user-vars.json`、`feishu-status.json`、`saved-dirs.json` |
-| 运行时数据 | `tasks.json`、`event-log.json(l)`、`active-runs.json`、`pending-resume.json`、`learned-keywords.json` |
+| 运行时数据 | `tasks.json`、`event-log.json(l)`、`run-index.json`、`pending-resume.json`、`learned-keywords.json` |
 | 动作配置/脚本 | `action-configs.json`、`action-log.jsonl`、`scripts/` |
 | 日志/临时 | `logs/`、`*.log`、`*.json.lock`、`*.tmp` |
 | 上传 | `.uploads/` |

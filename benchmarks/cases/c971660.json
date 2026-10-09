@@ -1,0 +1,16 @@
+{
+  "id": "c971660",
+  "title": "修复选择器完全不可用的四个缺陷",
+  "type": "bug",
+  "input": "分支选择器现在是完全不可用的状态，点开是空的或显示很乱。已知几个毛病：符号引用（origin/HEAD 这类）被当成分支列出来了、同名的本地和远程分支互相混淆、tag 之类非分支引用也被列进来、还有一些脏数据没被过滤。修到列表正确、当前分支的标记也对。",
+  "analysis": "",
+  "fixRef": "c971660",
+  "baseRef": null,
+  "testFiles": [
+    "src/entrypoints/web/routes-git.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "git-selector"
+  ]
+}

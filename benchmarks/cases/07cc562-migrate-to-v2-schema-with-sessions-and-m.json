@@ -1,0 +1,16 @@
+{
+  "id": "07cc562-migrate-to-v2-schema-with-sessions-and-m",
+  "title": "migrate to v2 schema with sessions and memories",
+  "type": "feature",
+  "input": "记忆库的数据结构升级到第二版：会话和记忆条目分开管理。数据文件不存在时要有完整的新结构骨架；读到旧格式（v1）时兜底成空的新结构而不是报错；写入能往返读回；更新要原子，且没有实际变化时不写盘。",
+  "analysis": "",
+  "fixRef": "07cc562",
+  "baseRef": null,
+  "testFiles": [
+    "src/store/memory-bank.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "memory-bank"
+  ]
+}

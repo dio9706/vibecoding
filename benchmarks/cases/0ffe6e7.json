@@ -1,0 +1,14 @@
+{
+  "id": "0ffe6e7",
+  "title": "飞书机器人支持发送文件",
+  "type": "feature",
+  "input": "机器人现在只能发文字和图片，遇到要发文件（导出的报告、压缩包之类）就没辙。希望支持：把文件内容上传拿到 file_key 再发文件消息；空文件、超过 30MB、参数传错（比如把本地路径字符串当文件内容传）都要明确报错，不能静默失败；另外提供一个按本地路径直接发送的入口；上传的文件名等细节按飞书接口要求来。",
+  "analysis": "",
+  "fixRef": "0ffe6e7",
+  "baseRef": null,
+  "testFiles": [
+    "src/integrations/lark.file.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": []
+}

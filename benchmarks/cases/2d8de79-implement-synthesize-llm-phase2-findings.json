@@ -1,0 +1,16 @@
+{
+  "id": "2d8de79-implement-synthesize-llm-phase2-findings",
+  "title": "implement synthesize - LLM phase2 findings to memories",
+  "type": "feature",
+  "input": "记忆库提炼的第二步：第一阶段从会话里提取出的零散发现，要汇总成结构化的记忆条目。需要构造汇总用的提示词、对模型输出做清洗（类型白名单、长度截断、空内容过滤），以及一个可以注入模型的汇总入口（方便离线测试）。",
+  "analysis": "",
+  "fixRef": "2d8de79",
+  "baseRef": null,
+  "testFiles": [
+    "src/features/memory-bank/synthesize.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "memory-bank"
+  ]
+}

@@ -9,6 +9,7 @@
  * 不依赖任何内存注册 —— 机器人重启后躺在聊天记录里的旧卡片按钮照样有效。
  */
 import { isAwaitingMerge, isDiscardable } from './task-actions.js';
+import { buildVerifyLine } from './auto-dev/verify.logic.js';
 
 export const TASK_CARD_KIND = 'task-done';
 
@@ -77,7 +78,7 @@ export function taskDoneFallbackText(task, ok) {
       : s.kind === 'warned'
         ? `\n⚠️ ${summarize(s.detail, 200)}`
         : '';
-  return `${ok ? '✅ 已处理完成' : '❌ 处理失败'}\n${tag}「${task?.title || ''}」${note}\n请到网页端任务面板处理。`;
+  return `${ok ? '✅ 已处理完成' : '❌ 处理失败'}\n${tag}「${task?.title || ''}」${note}${buildVerifyLine(task?.verify, { markdown: false })}\n请到网页端任务面板处理。`;
 }
 
 /**
@@ -105,7 +106,7 @@ export function buildTaskDoneCard(task, ok) {
         tag: 'div',
         text: {
           tag: 'lark_md',
-          content: `${head}\n${tag}「${task.title}」${branchLine}${mergedLine}\n\n${summarize(task.devLog)}`,
+          content: `${head}\n${tag}「${task.title}」${branchLine}${mergedLine}${buildVerifyLine(task?.verify)}\n\n${summarize(task.devLog)}`,
         },
       },
       { tag: 'action', actions },

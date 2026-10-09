@@ -1,14 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
+import { tool } from 'ai';
+import { z } from 'zod';
 import { createOpenAiCompatProvider, OPENAI_COMPAT_CAPABILITIES } from './openai-compat.js';
 import { streamTextToModelRun } from './openai-compat-model.js';
 
-test('capabilities：stream + agentic/tools/fileIO/permissions=true；resume/rateLimitAware/compaction=false', () => {
-  for (const k of ['stream', 'agentic', 'tools', 'fileIO', 'permissions']) {
+test('capabilities：stream + agentic/tools/fileIO/permissions/resume/compaction=true；rateLimitAware=false', () => {
+  // resume 自 T2-P3 起、compaction 自 T7 起为 true（conv-messages 检查点/滚动摘要 + run-index 对账续跑）
+  for (const k of ['stream', 'agentic', 'tools', 'fileIO', 'permissions', 'resume', 'compaction']) {
     assert.equal(OPENAI_COMPAT_CAPABILITIES[k], true, `${k} 应为 true`);
   }
-  for (const k of ['resume', 'rateLimitAware', 'compaction']) {
+  for (const k of ['rateLimitAware']) {
     assert.equal(OPENAI_COMPAT_CAPABILITIES[k], false, `${k} 应为 false`);
   }
 });
@@ -88,4 +91,68 @@ test('run：把 input.abortController 透传给 buildModelRun', () => {
   const ac = new AbortController();
   provider.run({ messages: [], abortController: ac }, {});
   assert.equal(seenInput.abortController, ac);
+});
+
+test('strength：reasoningEffort 经 providerOptions["openaiCompat"] 透传；none 也透传、缺省不带', async () => {
+  const seen = [];
+  const makeModel = () =>
+    new MockLanguageModelV4({
+      doStream: async (opts) => {
+        seen.push(opts?.providerOptions ? JSON.parse(JSON.stringify(opts.providerOptions)) : null);
+        return {
+          stream: simulateReadableStream({
+            chunks: [
+              { type: 'text-start', id: '1' },
+              { type: 'text-delta', id: '1', delta: 'ok' },
+              { type: 'text-end', id: '1' },
+              { type: 'finish', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } },
+            ],
+          }),
+        };
+      },
+    });
+  const drain = async (effort) => {
+    const run = streamTextToModelRun(makeModel(), undefined, undefined, effort);
+    // eslint-disable-next-line no-unused-vars
+    for await (const _ of run([{ role: 'user', content: 'hi' }]).stream) {
+      /* 只消费流 */
+    }
+  };
+  await drain('high');
+  assert.equal(seen[0]?.openaiCompat?.reasoningEffort, 'high', '新键（非弃用形式）');
+  await drain('none'); // 关闭思考：唯一合法的「假值」档位，必须透传
+  assert.equal(seen[1]?.openaiCompat?.reasoningEffort, 'none');
+  await drain(undefined);
+  assert.equal(seen[2]?.openaiCompat, undefined, '无档位模型不带 providerOptions');
+});
+
+test('disableTools：强制收尾轮不向模型暴露工具（正常轮仍在）', async () => {
+  const seen = [];
+  const model = new MockLanguageModelV4({
+    doStream: async (opts) => {
+      seen.push(Array.isArray(opts.tools) ? opts.tools.length : opts.tools === undefined ? -1 : -2);
+      return {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'text-start', id: '1' },
+            { type: 'text-delta', id: '1', delta: 'ok' },
+            { type: 'text-end', id: '1' },
+            { type: 'finish', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } },
+          ],
+        }),
+      };
+    },
+  });
+  const tools = { ping: tool({ description: 'test', inputSchema: z.object({}) }) };
+  const run = streamTextToModelRun(model, tools, undefined);
+  const drain = async (messages, opts) => {
+    // eslint-disable-next-line no-unused-vars
+    for await (const _ of run(messages, opts).stream) {
+      /* 只消费流 */
+    }
+  };
+  await drain([{ role: 'user', content: 'hi' }]);
+  await drain([{ role: 'user', content: 'hi' }], { disableTools: true });
+  assert.equal(seen[0], 1, '正常轮带 1 个工具');
+  assert.equal(seen[1], -1, '收尾轮 tools=undefined（工具已禁用）');
 });

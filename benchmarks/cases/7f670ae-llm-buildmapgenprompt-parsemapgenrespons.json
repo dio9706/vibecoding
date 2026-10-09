@@ -1,0 +1,16 @@
+{
+  "id": "7f670ae-llm-buildmapgenprompt-parsemapgenrespons",
+  "title": "LLM 补语义 — buildMapGenPrompt + parseMapGenResponse",
+  "type": "feature",
+  "input": "代码地图的补语义环节：把确定性扫描出来的模块信息整理成提示词交给模型，让模型补齐模块的职责描述；模型的输出要做解析（兼容它偶尔裹一层代码围栏的情况）并合并回地图；地图数据要有完整性校验（缺字段要能识别出来）。",
+  "analysis": "",
+  "fixRef": "7f670ae",
+  "baseRef": null,
+  "testFiles": [
+    "tests/project-map/gen-map.logic.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "project-map"
+  ]
+}

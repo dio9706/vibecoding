@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeSettings, makeTokenEntry, makeMcpServerEntry, makeBotEntry, pickActiveBot } from './settings.js';
+import { normalizeSettings, makeTokenEntry, credentialModels, normalizeModelList, makeMcpServerEntry, makeBotEntry, pickActiveBot, normalizeExec, normalizeSearch } from './settings.js';
 
 test('normalizeSettings：缺 providerId 的 token 回填 claude-agent', () => {
   const out = normalizeSettings({ tokens: [{ id: 'a', token: 'x', status: 'healthy' }] });
@@ -15,6 +15,35 @@ test('normalizeSettings：已有 providerId 不被覆盖（幂等）', () => {
 
 test('normalizeSettings：非数组 tokens 归一为空数组', () => {
   assert.deepEqual(normalizeSettings({ tokens: 'nope' }).tokens, []);
+});
+
+test('normalizeSettings：builtinMcp/builtinSkills 白名单过滤与形状归一', () => {  const out = normalizeSettings({
+    builtinMcp: {
+      context7: { enabled: false, apiKey: ' k ' },
+      'figma-framelink': { enabled: 'yes' }, // 非布尔 → 丢弃该字段（条目保留为 {}）
+      unknown: { enabled: true }, // 未知 id → 整条剔除（防僵尸键）
+    },
+    builtinSkills: {
+      superpowers: { enabled: true, disabledSkills: ['brainstorming', 'nope', 'brainstorming', 42] },
+      nope: { enabled: true },
+    },
+  });
+  assert.deepEqual(out.builtinMcp, { context7: { enabled: false, apiKey: 'k' }, 'figma-framelink': {} });
+  assert.deepEqual(out.builtinSkills, { superpowers: { enabled: true, disabledSkills: ['brainstorming'] } });
+  assert.deepEqual(normalizeSettings({ builtinMcp: 'x' }).builtinMcp, {});
+  assert.deepEqual(normalizeSettings({}).builtinSkills, {});
+  // 全恢复启用后不留空数组
+  assert.deepEqual(
+    normalizeSettings({ builtinSkills: { superpowers: { disabledSkills: [] } } }).builtinSkills,
+    { superpowers: {} },
+  );
+});
+
+test('normalizeSettings：repoMap 默认开启、只认布尔', () => {
+  assert.equal(normalizeSettings({}).repoMap.enabled, true);
+  assert.equal(normalizeSettings({ repoMap: { enabled: false } }).repoMap.enabled, false);
+  assert.equal(normalizeSettings({ repoMap: { enabled: 'no' } }).repoMap.enabled, true, '非布尔回落默认');
+  assert.equal(normalizeSettings({ repoMap: null }).repoMap.enabled, true);
 });
 
 test('normalizeSettings：保留 token 其余字段', () => {
@@ -43,6 +72,75 @@ test('makeTokenEntry：openai 条目携带 baseURL/model/vendor 与自定义 lab
   assert.equal(e.vendor, 'deepseek');
   assert.equal(e.baseURL, 'https://api.deepseek.com');
   assert.equal(e.model, 'deepseek-chat');
+});
+
+// 多模型（OpenCode 式）：models 归一后条件展开；空列表不落字段
+test('makeTokenEntry：models 归一携带、modelsUpdatedAt 原样；空列表/缺省不带字段', () => {
+  const e = makeTokenEntry({
+    id: 'o9', token: 'sk', providerId: 'openai-compat', baseURL: 'https://api.deepseek.com/v1',
+    models: [{ id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash' }, 'deepseek-v4-pro', { id: 'deepseek-flash' }, { id: '  ' }],
+    modelsUpdatedAt: '2026-10-08T00:00:00.000Z', now: 'T',
+  });
+  assert.deepEqual(e.models, [
+    { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash' },
+    { id: 'deepseek-v4-pro' },
+  ]);
+  assert.equal(e.modelsUpdatedAt, '2026-10-08T00:00:00.000Z');
+  const empty = makeTokenEntry({ id: 'o10', token: 'sk', providerId: 'openai-compat', models: [], now: 'T' });
+  assert.equal('models' in empty, false);
+  assert.equal('modelsUpdatedAt' in empty, false);
+});
+
+test('normalizeModelList：字符串/对象混用、去重保序、name===id 省略', () => {
+  assert.deepEqual(normalizeModelList([' a ', { id: 'b', name: ' B ' }, 'a', { id: 'c', name: 'c' }, null]), [
+    { id: 'a' },
+    { id: 'b', name: 'B' },
+    { id: 'c' },
+  ]);
+  assert.deepEqual(normalizeModelList(null), []);
+});
+
+test('normalizeModelList：efforts/defaultEffort 归一（坏值丢弃）；credentialModels 原样带出', () => {
+  const out = normalizeModelList([
+    { id: 'm1', efforts: [' low ', 'high', 'low', 42], defaultEffort: ' high ' },
+    { id: 'm2', efforts: [], defaultEffort: 'x' },
+    { id: 'm3', efforts: ['a'], defaultEffort: 'b' }, // default 不在档位 → 丢
+  ]);
+  assert.deepEqual(out, [
+    { id: 'm1', efforts: ['low', 'high'], defaultEffort: 'high' },
+    { id: 'm2' },
+    { id: 'm3', efforts: ['a'] },
+  ]);
+  assert.deepEqual(
+    credentialModels({ models: [{ id: 'm1', efforts: ['low'], defaultEffort: 'low' }] }),
+    [{ id: 'm1', efforts: ['low'], defaultEffort: 'low' }],
+  );
+});
+
+test('normalizeSettings：uiPrefs 含 openaiMaxSteps（默认 0=无上限，显式值透传）', () => {
+  assert.equal(normalizeSettings({}).uiPrefs.openaiMaxSteps, 0);
+  assert.equal(normalizeSettings({ uiPrefs: { openaiMaxSteps: 50 } }).uiPrefs.openaiMaxSteps, 50);
+});
+
+test('normalizeSearch：provider 白名单 + key trim；非法回空（未配置）', () => {
+  assert.deepEqual(normalizeSearch({}), { provider: '', apiKey: '' });
+  assert.deepEqual(normalizeSearch({ provider: 'tavily', apiKey: ' k ' }), { provider: 'tavily', apiKey: 'k' });
+  assert.deepEqual(normalizeSearch({ provider: 'nope', apiKey: 42 }), { provider: '', apiKey: '' });
+  assert.deepEqual(normalizeSettings({ search: { provider: 'bocha', apiKey: 'bk' } }).search, { provider: 'bocha', apiKey: 'bk' });
+  assert.deepEqual(normalizeSettings({}).search, { provider: '', apiKey: '' });
+});
+
+test('credentialModels：models 优先；legacy model 回落单模型；空凭证 → []', () => {
+  assert.deepEqual(
+    credentialModels({ models: [{ id: 'deepseek-flash' }], model: 'legacy-ignored' }),
+    [{ id: 'deepseek-flash' }],
+    '有发现列表时忽略 legacy',
+  );
+  assert.deepEqual(credentialModels({ model: 'deepseek-chat' }), [{ id: 'deepseek-chat' }], '老凭证回落');
+  assert.deepEqual(credentialModels({ model: '  ' }), []);
+  assert.deepEqual(credentialModels({}), []);
+  assert.deepEqual(credentialModels(null), []);
+  assert.deepEqual(credentialModels({ models: 'x', model: 'm' }), [{ id: 'm' }], '坏 models 形状回落 legacy');
 });
 
 // vendor 是纯展示元数据，允许缺省：手写 API 调用 / 存量数据都可能没有它，
@@ -130,6 +228,36 @@ test('makeBotEntry：autonomy 枚举透传、非法值归 light', () => {
   assert.equal(makeBotEntry({ id: 'b', autonomy: 'hacker', now: 'T' }).autonomy, 'light');
 });
 
+test('makeBotEntry：execPolicy 枚举透传、缺省/非法值归 bypass（T6：默认与改动前一致）', () => {
+  assert.equal(makeBotEntry({ id: 'b', now: 'T' }).execPolicy, 'bypass');
+  assert.equal(makeBotEntry({ id: 'b', execPolicy: 'standard', now: 'T' }).execPolicy, 'standard');
+  assert.equal(makeBotEntry({ id: 'b', execPolicy: 'trusted', now: 'T' }).execPolicy, 'trusted');
+  assert.equal(makeBotEntry({ id: 'b', execPolicy: 'yolo', now: 'T' }).execPolicy, 'bypass');
+});
+
+test('normalizeExec：后端白名单 + 镜像名 + 网络布尔；非法值 fail-closed 回默认', () => {
+  assert.deepEqual(normalizeExec(undefined), { backend: 'local', image: 'node:22-bookworm', network: false });
+  assert.deepEqual(normalizeExec({ backend: 'container', image: ' img ', network: true }), {
+    backend: 'container',
+    image: 'img',
+    network: true,
+  });
+  assert.deepEqual(normalizeExec({ backend: 'hacker', image: '  ', network: 'x' }), {
+    backend: 'local',
+    image: 'node:22-bookworm',
+    network: false,
+  });
+});
+
+test('normalizeSettings：exec 分区归一透传（缺省 local）', () => {
+  assert.deepEqual(normalizeSettings({}).exec, { backend: 'local', image: 'node:22-bookworm', network: false });
+  assert.deepEqual(normalizeSettings({ exec: { backend: 'container' } }).exec, {
+    backend: 'container',
+    image: 'node:22-bookworm',
+    network: false,
+  });
+});
+
 test('makeBotEntry：显式字段透传，name 缺省按 index 生成', () => {
   const e = makeBotEntry({
     id: 'b2', name: ' 客服 ', platform: 'feishu', appId: 'cli_2', appSecret: 's',
@@ -148,6 +276,14 @@ test('makeBotEntry：setupScript 字符串收录，非字符串归空', () => {
   assert.equal(a.setupScript, 'npm install');
   const b = makeBotEntry({ id: 'b2', setupScript: 123, index: 0, now });
   assert.equal(b.setupScript, '');
+});
+
+test('makeBotEntry：verifyScript 字符串收录并 trim，非字符串/缺省归空串', () => {
+  const now = 'T';
+  const a = makeBotEntry({ id: 'b1', verifyScript: '  npm test && npm run lint  ', index: 0, now });
+  assert.equal(a.verifyScript, 'npm test && npm run lint');
+  assert.equal(makeBotEntry({ id: 'b2', verifyScript: 42, index: 0, now }).verifyScript, '');
+  assert.equal(makeBotEntry({ id: 'b3', index: 0, now }).verifyScript, '');
 });
 
 // per-bot 可信提交人白名单（trustedOpenIds）已删除：从未接通 API/UI，也无人读取。

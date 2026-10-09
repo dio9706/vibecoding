@@ -129,44 +129,29 @@ function bindCollapse() {
   }
 }
 
-/** 选厂商时带入预设的 baseURL 与模型建议。
- *  模型框恒为自由输入：预设列表天然滞后于厂商上新，锁成只读下拉会逼用户
- *  改走「其他（自定义）」并重填 baseURL，白丢预设最有价值的那部分。 */
+/** 选厂商时带入预设的 baseURL。OpenCode 式：不再选模型——模型列表在添加后自动发现，
+ *  到聊天的模型弹层里按凭证分组选择。 */
 function bindVendorChange() {
   const sel = el('obCredVendor');
   const baseURL = el('obCredBaseURL');
-  const model = el('obCredModel');
-  const list = el('obCredModelList');
-  if (!sel || !baseURL || !model || !list) return;
+  if (!sel || !baseURL) return;
 
   sel.addEventListener('change', () => {
     const preset = VENDOR_PRESETS[sel.value];
-    list.innerHTML = '';
-    model.value = '';
 
     if (!sel.value || !preset) {
-      model.placeholder = '先选厂商';
       baseURL.disabled = false;
       baseURL.value = '';
       syncSubmitState();
       return;
     }
 
-    preset.models.forEach((m) => {
-      const opt = document.createElement('option');
-      opt.value = m;
-      list.appendChild(opt);
-    });
-
     if (sel.value === 'custom') {
-      // 其他（自定义）：无预设可依，baseURL 与模型都由用户填
-      model.placeholder = '模型名，如 my-model';
+      // 其他（自定义）：无预设可依，baseURL 由用户填
       baseURL.disabled = false;
       baseURL.placeholder = 'https://api.xxx.com/v1';
       baseURL.value = '';
     } else {
-      model.placeholder = preset.models[0] || '模型名';
-      model.value = preset.models[0] || '';
       baseURL.disabled = true;
       baseURL.value = preset.baseURL;
     }
@@ -176,7 +161,7 @@ function bindVendorChange() {
 
 /** 逐键同步「完成」按钮可用性：模型段一填齐就解锁，用户不用先点一次才知道缺什么 */
 function bindLiveValidate() {
-  const ids = ['obTokenValue', 'obCredApiKey', 'obCredBaseURL', 'obCredModel'];
+  const ids = ['obTokenValue', 'obCredApiKey', 'obCredBaseURL'];
   for (const id of ids) el(id)?.addEventListener('input', syncSubmitState);
 }
 
@@ -230,7 +215,6 @@ function readForm() {
       vendor: val('obCredVendor'),
       apiKey: val('obCredApiKey'),
       baseURL: val('obCredBaseURL'),
-      model: val('obCredModel'),
     },
     openId: val('obOpenId'),
     bot: { name: val('obBotName'), appId: val('obBotAppId'), appSecret: val('obBotSecret') },
@@ -319,12 +303,27 @@ async function submit() {
 async function saveModel(state) {
   if (state.modelTab === 'custom') {
     const c = state.custom;
-    return await post('/api/credentials', {
-      apiKey: c.apiKey,
-      baseURL: c.baseURL,
-      model: c.model,
-      vendor: c.vendor,
-    });
+    try {
+      const r = await fetch('/api/credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: c.apiKey, baseURL: c.baseURL, vendor: c.vendor }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.error || d.ok === false) return d.error || 'HTTP ' + r.status;
+      // 添加即发现模型（OpenCode 式）。软性：失败不挡引导——进应用后设置页/弹层都能刷新。
+      const id = d.credential?.id;
+      if (id) {
+        try {
+          await fetch('/api/credentials/' + encodeURIComponent(id) + '/refresh-models', { method: 'POST' });
+        } catch {
+          /* 软性：失败忽略 */
+        }
+      }
+      return null;
+    } catch (e) {
+      return (e && e.message) || String(e);
+    }
   }
   return await post('/api/settings', {
     section: 'tokens',

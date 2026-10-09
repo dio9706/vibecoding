@@ -15,6 +15,7 @@ import { installProcessGuards } from '../../shared/process-guard.js';
 installProcessGuards();
 import { scheduleAllSwitchBacks } from '../../capabilities/token-rotation.js';
 import { recoverPendingAndOrphans } from './run-claude.js';
+import { startRunDurability } from './run-durability.js';
 import { startRequirementPump } from './requirement-ops.js';
 import { startAutoDevPump } from '../../plugins/team-tools/auto-dev/index.js';
 import { startMemoryBankTicker } from '../../features/memory-bank/index.js';
@@ -46,12 +47,15 @@ import {
   handleTokensSwitch,
   handleCredentialsList,
   handleCredentialsAdd,
+  handleCredentialsRefreshModels,
   handleCredentialsUpdate,
   handleCredentialsDelete,
   handleMcpServersList,
   handleMcpServersAdd,
   handleMcpServersUpdate,
   handleMcpServersDelete,
+  handleBuiltinsList,
+  handleBuiltinsUpdate,
   handlePluginsList,
   handlePluginsUpdate,
 } from './routes-settings.js';
@@ -77,6 +81,7 @@ import { healAllBusyOnStartup } from './optimize-ops.js';
 import { handleProjectMapRoutes } from './routes-project-map.js';
 import { handleConvNotifyRoutes } from './routes-conv-notify.js';
 import { startConvNotify } from './conv-notify.js';
+import { startConvInbox } from './conv-inbox.js';
 import { handlePatrolRoutes } from './routes-patrol.js';
 import { startPatrolLoopPump } from '../../plugins/team-tools/bug-patrol/loop.js';
 import { loadPluginSideEffects } from '../../plugins/index.js';
@@ -181,6 +186,8 @@ const ROUTES = [
   { path: '/api/tokens/dismiss', h: (req, res) => handleTokensDismiss(req, res) },
   { path: '/api/credentials', method: 'GET', h: (req, res) => handleCredentialsList(res) },
   { path: '/api/credentials', method: 'POST', h: (req, res) => handleCredentialsAdd(req, res) },
+  // 精确 POST 必须排在下面这条前缀 POST 之前（route-match 自检会喊）
+  { prefix: '/api/credentials/', method: 'POST', h: (req, res, url) => handleCredentialsRefreshModels(req, res, url) },
   { prefix: '/api/credentials/', method: 'PUT', h: (req, res, url) => handleCredentialsUpdate(req, res, url) },
   { prefix: '/api/credentials/', method: 'DELETE', h: (req, res, url) => handleCredentialsDelete(req, res, url) },
   { path: '/api/plugins', method: 'GET', h: (req, res) => handlePluginsList(res) },
@@ -189,6 +196,8 @@ const ROUTES = [
   { path: '/api/mcp-servers', method: 'POST', h: (req, res) => handleMcpServersAdd(req, res) },
   { prefix: '/api/mcp-servers/', method: 'PUT', h: (req, res, url) => handleMcpServersUpdate(req, res, url) },
   { prefix: '/api/mcp-servers/', method: 'DELETE', h: (req, res, url) => handleMcpServersDelete(req, res, url) },
+  { path: '/api/builtins', method: 'GET', h: (req, res) => handleBuiltinsList(res) },
+  { path: '/api/builtins', method: 'PUT', h: (req, res) => handleBuiltinsUpdate(req, res) },
   { path: '/api/bots', method: 'GET', h: (req, res) => handleBotsList(res) },
   { path: '/api/bots', method: 'POST', h: (req, res) => handleBotsAdd(req, res) },
   { prefix: '/api/bots/', method: 'PUT', h: (req, res, url) => handleBotsUpdate(req, res, url) },
@@ -287,7 +296,7 @@ export const ready = new Promise((resolve) => {
     );
     pruneUploads(); // 清理旧上传副本
     setInterval(pruneUploads, 24 * 60 * 60 * 1000); // pm2 常驻数周不重启，仅启动清一次会积压
-    recoverPendingAndOrphans(); // 孤儿恢复 + 待续跑重排（逻辑见 run-claude.js）
+    recoverPendingAndOrphans(); // 启动对账（P5）：run-index 孤儿（Claude/openai 统一）→ 归类 → 续跑/熔断 + 待续跑重排
     // 体检/优化的占用记录落盘、job 注册表在内存：新进程必然没有在跑的任务，
     // 盘上残留的都是上次进程的尸体。不清的话用户点体检只会反复看到
     // 「该项目正在体检或优化中」，要等一小时才自然解开（见 optimize-ops.js 的详细说明）
@@ -296,6 +305,8 @@ export const ready = new Promise((resolve) => {
     startAutoDevPump(); // 自动开发泵：仅 web 进程执行（feishu 只标记状态），含中断任务恢复
     startRequirementPump(); // 需求工作流串行闸泵：docgen/系统任务出队 + busy 崩溃恢复
     startConvNotify(); // 会话飞书通知：注册 run 终结监听器
+    startRunDurability(); // run 事件流 sink + run-index 影子双写（P2；写失败吞掉，不影响主链）
+    startConvInbox(); // busy inbox 排空：run 终结后起该 conv 排队的 follow-up 下一轮（P4，永不并发）
     startPatrolLoopPump(); // BUG 巡检循环泵：仅 web 进程（需读 auto-dev 任务终态判「本轮全修完」）
     // 同事 agent 的业务工具靠**模块加载时的副作用**自注册，而 web 进程不走插件装配层
     // （loadEnabledPluginFeatures 只被 app/dispatch.js 那条链调用，web 入口对 app/ 零引用）。

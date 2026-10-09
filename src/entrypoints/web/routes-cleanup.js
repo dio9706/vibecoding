@@ -4,7 +4,7 @@
  *
  * 三个端点全部按 ?cwd= 定位对应 project 的历史目录（与 /api/history 一致），
  * 空 cwd = 服务自身目录。删除是**物理删除**（不可恢复），故 execute 要求 confirmed=true，
- * 并排除 active-runs 中正在运行的 session（安全兜底）。
+ * 并排除 run-index 中正在运行的 session（安全兜底）。
  */
 import { sendJson } from './http-util.js';
 import { withJsonBody } from './body.js';
@@ -16,7 +16,7 @@ import {
   previewCleanup,
   deleteHistorySessions,
 } from '../../store/history.js';
-import { listActiveRuns } from '../../store/active-runs.js';
+import { listRunIndex } from '../../store/run-index.js';
 import { appendEvent } from '../../store/event-log.js';
 
 /** 从 query / body 归一出清理时间窗参数（range 优先，其次自定义日期） */
@@ -34,7 +34,7 @@ function pickWindow(src) {
 
 /** 正在运行的 run 对应的 session_id 集合——这些会话可能正被写入，清理时必须跳过 */
 function runningSessionIds() {
-  return listActiveRuns()
+  return listRunIndex()
     .map((e) => e.session_id)
     .filter((id) => typeof id === 'string' && id);
 }

@@ -8,6 +8,9 @@
 # ---- 依赖 ----
 node_modules/
 
+# ---- 安装时拉取的内置技能包（scripts/superpowers-fetch.mjs；MIT，不入库）----
+assets/builtin/
+
 # ---- 环境变量与密钥（含飞书 appSecret 等，务必忽略）----
 .env
 .env.*
@@ -39,9 +42,15 @@ review-log.jsonl
 user-log.jsonl
 active-runs.json
 pending-resume.json
+submissions.json
+# run-journal.jsonl / run-index.json : run 事件流与运行索引（T2 P2 影子期；本机运行数据）
+run-journal.jsonl
+run-index.json
 conv-notify.json
 learned-keywords.json
 optimize.json
+# repo-map-cache.json : 代码地图的 per-file 解析缓存（随仓库/文件数增长，纯本机派生数据）
+repo-map-cache.json
 
 # ---- 动作配置（本地运维配置 + 执行脚本）----
 # scripts/ 内含 reset_onboarding.py 等，可能硬编码后台账密，切勿入库
@@ -96,3 +105,7 @@ tmp-*
 
 # memory-bank.json : 提炼出的个人偏好条目 + 对话原话摘录，属个人数据
 memory-bank.json
+
+# 内部 benchmark 的运行产物（工作树 + 报告；题集 cases/ 入库）
+.bench-ws/
+benchmarks/results/

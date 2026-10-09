@@ -1,10 +1,10 @@
 /**
  * feature: 当前任务清单（\10002，可信提交人专属）。
- * 触发文案严格匹配（零 LLM）→ 纯本地读盘汇总：运行中对话（active-runs.json，pid 存活过滤孤儿）
+ * 触发文案严格匹配（零 LLM）→ 纯本地读盘汇总：运行中对话（run-index.json，pid 存活过滤孤儿）
  * + 需求/故障活跃任务 + 待确认合并，仅列标题和进度。一次性无状态查询。
  */
 import path from 'node:path';
-import { listActiveRuns, isPidAlive } from '../../../store/active-runs.js';
+import { listRunIndex, isPidAlive } from '../../../store/run-index.js';
 import { listHistorySessions } from '../../../store/history.js';
 import { getTasks } from '../../../store/tasks.js';
 import { getMyFeishuOpenId } from '../../../store/settings.js';
@@ -54,7 +54,7 @@ export default {
     isTrustedSubmitter(ctx, resolveTrustedOpenIds(getMyFeishuOpenId())),
   handle: async (ctx) => {
     // pid 存活过滤：崩溃残留的孤儿条目不算「正在进行」（缺 pid 的旧条目同样排除）
-    const runs = listActiveRuns().filter((e) => isPidAlive(e?.pid));
+    const runs = listRunIndex().filter((e) => isPidAlive(e?.pid));
     const titled = await resolveRunTitles(runs);
     const { active, merge } = groupTasks(getTasks());
     logger.info('status-report', '任务清单', { runs: titled.length, active: active.length, merge: merge.length });

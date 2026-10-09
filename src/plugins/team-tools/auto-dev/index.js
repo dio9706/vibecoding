@@ -7,7 +7,8 @@
  *
  * 执行流：确保 auto 工作区（首建运行 setupScript）→ commitResidue 自愈残留
  *        → checkout -B <taskBranch> <baseBranch> → develop（在 auto 工作区改码，deferStatus）
- *        → commitAll 校验（无改动视为失败）→ 写 done → detach HEAD
+ *        → 自检门（verify.js：未通过带输出重试一次，再败退回 analyzed）
+ *        → commitAll 校验（无改动视为失败；验证失败也提交留痕）→ 写 done → detach HEAD
  *        → 编译二维码（可选）→ 回复来源会话。
  * 主工作区自始至终不被切分支；失败任务退回 analyzed（不进合并队列，可人工重试）。
  */
@@ -17,7 +18,7 @@ import { getTask, getTasks, updateTask } from '../../../store/tasks.js';
 // 详细理由见 queue.js 文件头。**刻意不在这里 re-export**——留一条通往本文件的旧路径，
 // 只会让下一个人重新把重依赖链拖回去，环也会随之复活
 import { requestAutoDevelop } from './queue.js';
-import { develop } from '../task-ops.js';
+import { developWithVerify } from './verify.js';
 import { currentBranch, commitAll, ensureAutoWorktree, commitResidue, checkoutNewFromBaseArgs } from './git.js';
 import { taskBranchName, buildCommitMessage } from './logic.js';
 import { notifyTaskDone } from '../task-notify.js';
@@ -129,26 +130,42 @@ async function runOne(task) {
   updateTask(task.id, { status: 'developing', auto: true, repo, branch, baseBranch, merged: false },
     `自动开发（auto 工作区，分支 ${branch}，基线 ${baseBranch}）`);
 
-  // deferStatus=true：develop 只写 devLog，不改 status——developing→done 转移由 runOne 在 commitAll 后推进，
+  // deferStatus=true：developWithVerify 只写 devLog，不改 status——developing→done 转移由 runOne 在 commitAll 后推进，
   // 确保「developing=执行中」不变量：仅提交成功后才写 done，recoverOnBoot 识别 developing=中断语义正确。
   // mainDir=repo：固定传入快照时的主工作区路径，消除 develop 内读 botCtx.cwd 时中途切 bot 的错配窗口。
-  const r = await develop(task, { cwd: autoDir, deferStatus: true, mainDir: repo });
-  const c = await commitAll(autoDir, buildCommitMessage(task, r.ok));
+  // 验证门：显式配置优先；未配置时自动发现（npm 工程有 test 脚本 → npm test）；都没有则按「未配置」跳过。
+  // 失败会带输出自动重试一次（上限 2 次尝试）。
+  const verifyCommand = (getActiveBot()?.verifyScript || '').trim();
+  const vr = await developWithVerify({ task, repo, autoDir, verifyCommand });
+  const verifyPassed = !vr.verify || vr.verify.skipped || vr.verify.ok;
+  const c = await commitAll(autoDir, buildCommitMessage(task, vr.developOk && verifyPassed));
 
-  if (!r.ok) {
-    updateTask(task.id, { status: 'analyzed' }, '自动开发失败，退回待开发（可人工重试）');
-    await replySource(task, false, null, null);
+  if (!vr.developOk) {
+    updateTask(task.id, { status: 'analyzed', ...(vr.verify ? { verify: vr.verify, verifyLog: vr.verifyOutput } : {}) },
+      '自动开发失败，退回待开发（可人工重试）');
+    await replySource(task, false, null, vr.verify && !vr.verify.ok && !vr.verify.skipped ? '自检未通过且修复未成功' : null);
     return;
   }
   // 开发成功但 agent 未实际改码（无提交）→ 视为失败，不进合并队列
   if (!c.committed) {
-    updateTask(task.id, { status: 'analyzed' }, '自动开发失败：开发过程无代码改动（agent 未实际改码）');
+    updateTask(task.id, { status: 'analyzed', ...(vr.verify ? { verify: vr.verify, verifyLog: vr.verifyOutput } : {}) },
+      '自动开发失败：开发过程无代码改动（agent 未实际改码）');
     await replySource(task, false, null, '开发未产生代码改动');
+    return;
+  }
+  // 验证最终不通过：现场已随 commitAll 提交留痕，退回待开发并通知（无人值守必须有人知情）
+  if (vr.verify && !vr.verify.skipped && !vr.verify.ok) {
+    const t = updateTask(task.id, { status: 'analyzed', verify: vr.verify, verifyLog: vr.verifyOutput },
+      `自检未通过（共 ${vr.verify.attempts} 次尝试），退回待开发`);
+    notifyTaskDone(t, false);
+    await replySource(task, false, null, '自检未通过');
     return;
   }
 
   // developing → done：仅在改码已提交后推进，保证重启恢复不变量
-  updateTask(task.id, { status: 'done' }, '自动开发完成');
+  updateTask(task.id,
+    { status: 'done', ...(vr.verify ? { verify: vr.verify, verifyLog: vr.verifyOutput } : {}) },
+    vr.verify && !vr.verify.skipped && vr.verify.ok ? '自检通过' : '自动开发完成');
 
   // 自动合并回基线分支（用户拍板：全部自动任务统一自动合并）。
   // 必须在 status='done' 之后调 —— mergeTaskById 的 isAwaitingMerge 谓词要求这个状态。

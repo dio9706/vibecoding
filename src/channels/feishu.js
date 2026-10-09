@@ -32,6 +32,7 @@ import {
 } from './feishu-normalize.js';
 import { logger } from '../shared/logger.js';
 import { writeJson } from '../store/index.js';
+import { claimSubmission } from '../store/submissions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..', '..'); // 项目根（开发态）
@@ -80,17 +81,14 @@ export function createFeishuChannel() {
     }
   }
 
-  // 消息去重（飞书失败会重推，窗口很短）；带 TTL 清理，防常驻进程内存无限增长
-  const seen = new Map(); // messageId -> 首见时间
+  // 消息去重（飞书失败会重推，窗口很短）。落盘到 submissions 认领表而非内存 Map：
+  // 进程重启窗口内的重投照样拦得住（认领跨进程持久）。只 claim 不 bind——未绑定的认领
+  // 在 RECLAIM_MS 内按重复拒绝、超时按死认领复占（崩溃后迟到的重投仍会被处理，不吞消息）；
+  // 语义细节见 store/submissions.js 文件头。
   const SEEN_TTL_MS = 10 * 60 * 1000;
   function seenBefore(messageId) {
-    const now = Date.now();
-    if (seen.size > 1000) {
-      for (const [k, t] of seen) if (now - t > SEEN_TTL_MS) seen.delete(k);
-    }
-    if (seen.has(messageId)) return true;
-    seen.set(messageId, now);
-    return false;
+    if (!messageId) return false;
+    return claimSubmission('feishu:msg:' + messageId, { ttlMs: SEEN_TTL_MS }).duplicate;
   }
 
   /** 渠道原始事件 → InboundMessage；去重/无效返回 null（静默）。图片下载在此完成。 */

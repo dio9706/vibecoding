@@ -15,7 +15,7 @@ import { runScript } from '../../integrations/shell.js';
 import { appDataPath } from '../../shared/app-paths.js';
 import { logger } from '../../shared/logger.js';
 import { sendTextToUser } from '../../integrations/lark.js';
-import { getMyFeishuOpenId, getBots } from '../../store/settings.js';
+import { getMyFeishuOpenId, getBots, getActiveBot } from '../../store/settings.js';
 import { currentBranch, ensureBranch, isClean, localBranches } from '../../plugins/team-tools/auto-dev/git.js';
 // 分支名校验复用 routes-git 的那一份（同层纯函数，且已有单测钉住注入类用例）。
 // 在这里另写一条正则就是第二份真相：两处一旦松紧不一，宽的那处就是漏洞
@@ -419,7 +419,10 @@ function dispatchSystemTask(req, kind, payload) {
     cwd,
     addDirs,
     session: req.devSession || undefined,
-    mode: 'bypassPermissions',
+    // 无人值守策略（T6）：按 bot.execPolicy 解析（默认 bypass = 与改动前一致）；
+    // standard/trusted 档下策略拒绝会计次熔断并升级 owner
+    execPolicy: getActiveBot()?.execPolicy,
+    unattended: true,
     convId: req.convId || undefined,
   });
 }

@@ -1,0 +1,14 @@
+{
+  "id": "cc6e4f3-findentrybyshortid",
+  "title": "新增 findEntryByShortId() 按前缀查询会话",
+  "type": "feature",
+  "input": "飞书里用户经常拿着会话 ID 的前 8 位短码来找会话。需要按短码前缀查找：多个会话同前缀时返回最近创建的那个；非字符串或空输入返回空。",
+  "analysis": "",
+  "fixRef": "cc6e4f3",
+  "baseRef": null,
+  "testFiles": [
+    "src/store/conv-notify.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": []
+}

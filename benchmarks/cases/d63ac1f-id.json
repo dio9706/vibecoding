@@ -1,0 +1,16 @@
+{
+  "id": "d63ac1f-id",
+  "title": "删除卡片按钮，添加会话 ID 提示行",
+  "type": "feature",
+  "input": "会话通知卡片上那些按钮去掉吧（用户实际不会点），改成在卡片里直接显示会话 ID，并提示用文本指令来操作；同时确认通知规则不变：正常完成和异常失败要通知，手动停止和额度阻塞不通知，还在跑的不要重复通知。",
+  "analysis": "",
+  "fixRef": "d63ac1f",
+  "baseRef": null,
+  "testFiles": [
+    "src/entrypoints/web/conv-notify.logic.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "conv-notify"
+  ]
+}

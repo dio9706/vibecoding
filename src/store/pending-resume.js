@@ -1,6 +1,8 @@
 /**
- * 额度用尽待续跑任务 —— 落盘（跨 node 重启可恢复）。
- * 额度耗尽且任务未完成时登记；token 重置后自动向该 session 发送「继续」。
+ * 待续跑队列 —— 落盘（跨 node 重启可恢复）。**P5 定位：纯排程器**：
+ *   waiting → resuming → done（消费即删）| abandoned（熔断，前端消费一次提示后 dismiss）；
+ * 条目来源两类（语义与定时器不变）：额度耗尽/异常重试（run-claude.js#settleRun 写入）、
+ * 进程重启孤儿（run-claude.js#reconcileRuns 写入，reason=`orphan_recovery`）。
  * 每个对话（convId）只保留最新一条。
  */
 import { readJson, updateJson } from './index.js';

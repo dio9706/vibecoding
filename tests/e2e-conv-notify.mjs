@@ -19,8 +19,8 @@
  * 需要固定端口时用 E2E_PORT 覆盖。
  *
  * 三阶段共用一个服务端进程，各开独立 browser context 拿干净的 localStorage：
- *  ① 未配飞书 —— 结构断言（开关行 #notifyRow 位于模型选择器弹层的 #convPrefsSection 内）+
- *                点击只弹 toast，不勾选、不写 meta
+ *  ① 未配飞书 —— 结构断言（#notifyBtn 在输入框底栏 .composer-bar 内）+
+ *                点击只弹 toast，不点亮、不写 meta
  *  ② 配好飞书 —— 勾选 + 写 meta + 服务端登记表收到完整快照；切走取消勾选、切回仍勾选；
  *                桩掉 /inbox 投一条 → 用户气泡上屏 + /claim 被调用；空 items 轮次不调 claim
  *  ③ 真链路   —— 全程不打桩：直接往服务端 conv-notify.json 的收件箱塞一条，断言它上屏、
@@ -157,7 +157,7 @@ try {
   }
 
   const isOn = (page) =>
-    page.evaluate(() => document.querySelector('#notifyToggle')?.checked === true);
+    page.evaluate(() => document.querySelector('#notifyBtn')?.getAttribute('aria-pressed') === 'true');
   const toastText = (page) =>
     page.evaluate(() =>
       [...document.querySelectorAll('#toast-container .toast-msg')].map((e) => e.textContent).join(' | '),
@@ -170,14 +170,9 @@ try {
       id,
     );
   const clickConv = (page, id) => page.click(`#convList .conv-item[data-conv-id="${id}"]`);
-  /** 开关现收在默认 hidden 的 #modelPop 弹层里：先探测是否已开，未开则点 #modelFabBtn 打开
-   *（点弹层内部不会把它带关——#modelPop 嵌在 #modelFab 内，外部点击才触发那份收起逻辑）。
-   *  #notifyToggle 本体是 opacity:0/0×0（纯语义承载，视觉由同 label 内的 .toggle-slider 顶替），
-   *  Playwright 拒绝点 0×0 元素，故点同一行里可见的 .tool-toggle。 */
+  /** 通知开关现为输入框底栏的 🔔 按钮（#notifyBtn），直达点击即可（不再藏在弹层里） */
   async function clickNotifyToggle(page) {
-    const hidden = await page.evaluate(() => document.querySelector('#modelPop')?.hidden);
-    if (hidden) await page.click('#modelFabBtn');
-    await page.click('#notifyRow .tool-toggle');
+    await page.click('#notifyBtn');
   }
   /** 轮询等待某段文字出现在**用户气泡**里（注入项必须是 user 角色，画进助手气泡即为 bug） */
   async function waitUserBubble(page, text, timeoutMs) {
@@ -199,10 +194,10 @@ try {
     const { ctx, page } = await openPage();
     page.assertNoErrors('启动');
 
-    if (!(await page.evaluate(() => !!document.querySelector('#modelPop #convPrefsSection #notifyRow')))) {
-      fail('#notifyRow 不在 #modelPop 的 #convPrefsSection 内');
+    if (!(await page.evaluate(() => !!document.querySelector('.composer-bar #notifyBtn')))) {
+      fail('#notifyBtn 不在输入框底栏 .composer-bar 内');
     } else {
-      step('#notifyRow 位于 #modelPop 的 #convPrefsSection 内');
+      step('#notifyBtn 位于输入框底栏 .composer-bar 内');
     }
     if (!(await page.evaluate(() => !!window.__convNotify))) fail('window.__convNotify 桥未挂载');
     else step('window.__convNotify 桥已挂载');
@@ -215,8 +210,8 @@ try {
     if (!t) fail('未配飞书时点开关没有弹 toast');
     else if (!t.includes('open_id') && !t.includes('机器人')) fail('toast 未指出配置缺失原因：' + t);
     else step('弹出指路 toast：' + t);
-    if (await isOn(page)) fail('【不变量②破坏】ok:false 时开关被勾选');
-    else step('开关未被勾选（checked=false）');
+    if (await isOn(page)) fail('【不变量②破坏】ok:false 时开关被点亮');
+    else step('开关未被点亮（aria-pressed=false）');
     const meta = await convMeta(page, 'cA');
     if (meta?.notifyFeishu) fail('【不变量②破坏】ok:false 时误写了 meta.notifyFeishu');
     else step('未写 meta.notifyFeishu：' + JSON.stringify(meta));

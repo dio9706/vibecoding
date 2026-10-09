@@ -1,0 +1,16 @@
+{
+  "id": "53009a2-dispatch",
+  "title": "dispatch 无匹配意图时发送卡片而非文本",
+  "type": "bug",
+  "input": "机器人遇到完全匹配不上意图的消息时，现在是回一段文字，改成发引导卡片（和欢迎卡片同源）。另外注意入口层没有兜错逻辑：dispatch 抛错必须被兜住并回告用户，不能静默丢失，也不能在正常路径上多回复。",
+  "analysis": "",
+  "fixRef": "53009a2",
+  "baseRef": null,
+  "testFiles": [
+    "src/app/dispatch.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "dispatch"
+  ]
+}

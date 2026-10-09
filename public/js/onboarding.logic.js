@@ -24,7 +24,7 @@ export function isNewUser(settings) {
  * @param {{
  *   modelTab?: 'claude' | 'custom',
  *   claude?: { label?: string, token?: string },
- *   custom?: { vendor?: string, apiKey?: string, baseURL?: string, model?: string },
+ *   custom?: { vendor?: string, apiKey?: string, baseURL?: string },
  *   openId?: string,
  *   bot?: { name?: string, appId?: string, appSecret?: string },
  * }} state
@@ -35,12 +35,12 @@ export function validateOnboardForm(state) {
   const errors = {};
 
   // ① 模型段：必填。modelTab 非 'custom' 一律按 claude 分支走 ——
-  //    脏枚举值不能让整段校验被跳过，那会放一个空模型进去
+  //    脏枚举值不能让整段校验被跳过，那会放一个空模型进去。
+  //    custom 自多模型改版起不再要求模型名（添加后自动发现）。
   if (s.modelTab === 'custom') {
     const c = s.custom || {};
     if (!str(c.apiKey)) errors.model = '请填写 API Key';
     else if (!str(c.baseURL)) errors.model = '请填写 Base URL';
-    else if (!str(c.model)) errors.model = '请填写模型名';
   } else {
     if (!str((s.claude || {}).token)) errors.model = '请填写 Token';
   }

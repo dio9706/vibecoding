@@ -4,7 +4,7 @@
  * 不发任何 LLM 调用，纯文件系统：在假 cwd 对应的 project 目录里造若干带时间戳的会话，
  * 打 preview/execute 验证「按窗筛选 + confirmed 闸门 + 物理删除 + 审计日志」。
  *
- * 隔离：store/index.js 在模块求值时定死数据目录（event-log/active-runs 落这里），
+ * 隔离：store/index.js 在模块求值时定死数据目录（event-log/run-index 落这里），
  * 必须先设 APP_DATA_DIR 再动态 import。历史会话目录另在 ~/.claude/projects 下，用带 pid 的假 cwd 隔离。
  */
 import { test } from 'node:test';
@@ -17,7 +17,7 @@ import { createServer } from 'node:http';
 process.env.APP_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'cleanup-routes-'));
 const { handleCleanupRoutes } = await import('./routes-cleanup.js');
 const { getHistoryDir } = await import('../../store/history.js');
-const { addActiveRun, clearActiveRuns } = await import('../../store/active-runs.js');
+const { upsertRun, clearRunIndex } = await import('../../store/run-index.js');
 const { getEvents } = await import('../../store/event-log.js');
 
 const FAKE_CWD = 'C:\\__cleanup-routes-' + process.pid;
@@ -34,11 +34,11 @@ test.after(() => {
   fs.rmSync(HIST_DIR, { recursive: true, force: true });
 });
 
-// 每个用例前重建历史目录与 active-runs，避免相互污染
+// 每个用例前重建历史目录与 run-index，避免相互污染
 test.beforeEach(() => {
   fs.rmSync(HIST_DIR, { recursive: true, force: true });
   fs.mkdirSync(HIST_DIR, { recursive: true });
-  clearActiveRuns();
+  clearRunIndex();
 });
 
 /** 造一个 mtime 为 daysAgo 天前的会话文件 */
@@ -118,7 +118,7 @@ test('POST /api/cleanup/execute：确认后物理删除并回报剩余数 + 记�
 test('POST /api/cleanup/execute：正在运行的 session 受保护不被删', async () => {
   writeAged('running', 30);
   writeAged('idle', 30);
-  addActiveRun({ runId: 'r1', session_id: 'running', pid: process.pid, startedAt: Date.now() });
+  upsertRun({ runId: 'r1', session_id: 'running', pid: process.pid, startedAt: Date.now() });
   const r = await call('/api/cleanup/execute', 'POST', { cwd: FAKE_CWD, range: 7, confirmed: true });
   assert.equal(r.json.deletedCount, 1);
   assert.ok(fs.existsSync(path.join(HIST_DIR, 'running.jsonl')), '运行中会话被误删');

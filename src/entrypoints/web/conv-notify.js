@@ -8,7 +8,7 @@
  * 全链路 fire-and-forget + 三层兜底（同步 try/catch + Promise catch + lark 内部不抛）：
  * 通知失败绝不能影响 run 收尾与 SSE 广播。
  */
-import { createRun, registerRunSettleListener, findRunningRunByConv, holdMsg, runPulse, failRun } from '../../store/runs.js';
+import { createRun, registerRunSettleListener, findRunningRunByConv, holdMsg, runPulse, failRun, enqueueFollowUp, buildFollowUpItem } from '../../store/runs.js';
 import { getEntry, patchConv, pushInjection } from '../../store/conv-notify.js';
 import { getMyFeishuOpenId, getActiveBot } from '../../store/settings.js';
 import { sendCardToUser, sendTextToUser } from '../../integrations/lark.js';
@@ -114,10 +114,11 @@ function onRunSettled(run) {
 }
 
 /**
- * 把一段文本注入某会话：有运行中的 run 走插话持有，否则 resume 原 session 新起一轮。
+ * 把一段文本注入某会话：有运行中的 run 时按 busy inbox 能力路由（steer 持有 / follow-up 排队，
+ * 同会话永不并发）；没有运行中的 run 则 resume 原 session 新起一轮。
  * @param {string} convId
  * @param {string} text
- * @returns {{ok:true, runId:string, mode:'steer'|'run'} | {ok:false, code:number, error:string}}
+ * @returns {{ok:true, runId:string, mode:'steer'|'follow_up'|'run'} | {ok:false, code:number, error:string}}
  */
 export function injectToConv(convId, text) {
   const entry = getEntry(convId);
@@ -125,15 +126,29 @@ export function injectToConv(convId, text) {
   const body = typeof text === 'string' ? text.trim() : '';
   if (!body) return { ok: false, code: 400, error: '补充内容为空' };
 
-  // 复用既有插话通道：run.steerHold 为真时消息进持有区，本轮 result 时统一 flush 进 SDK。
-  // steerHold 为假（openai-compat 等不支持持有的 provider）则落到下面新起一轮。
+  // busy inbox 路由（T2-P4）：同 conv 有 run 在跑时一律不并发起第二个 run——
+  // steer（Claude）走持有区、本轮 result 时 flush 进 SDK；follow-up（openai）排队，
+  // 等当前 run 终结后由 conv-inbox 排空起下一轮。原实现在 steerHold 为假时直接起并发 run，
+  // 两个 run 同写一个工作目录/会话历史，是本设计要根除的事故形态。
   const running = findRunningRunByConv(convId);
-  if (running && running.steerHold) {
-    const msgId = holdMsg(running, body);
-    runPulse(running); // 与 /api/run/send 保持同一范式；holdMsg 内部已 touch，这里是幂等重复调用
-    pushInjection(convId, { id: msgId, text: body, runId: running.id, mode: 'steer', at: Date.now() });
-    logger.info('conv-notify', '补充内容已插话', { convId, runId: running.id });
-    return { ok: true, runId: running.id, mode: 'steer' };
+  if (running) {
+    const caps = running.capabilities || {};
+    if (caps.steer) {
+      const msgId = holdMsg(running, body);
+      runPulse(running); // 与 /api/run/send 保持同一范式；holdMsg 内部已 touch，这里是幂等重复调用
+      pushInjection(convId, { id: msgId, text: body, runId: running.id, mode: 'steer', at: Date.now() });
+      logger.info('conv-notify', '补充内容已插话', { convId, runId: running.id });
+      return { ok: true, runId: running.id, mode: 'steer' };
+    }
+    if (caps.followUp) {
+      const msgId = enqueueFollowUp(convId, buildFollowUpItem(running, { text: body, source: 'feishu' }));
+      runPulse(running);
+      pushInjection(convId, { id: msgId, text: body, runId: running.id, mode: 'follow_up', at: Date.now() });
+      logger.info('conv-notify', '补充内容已排队（follow-up）', { convId, runId: running.id });
+      return { ok: true, runId: running.id, mode: 'follow_up' };
+    }
+    // 两个能力都没有（异常/老 provider）：拒绝而不是并发
+    return { ok: false, code: 409, error: '当前任务不支持中途追加内容，请等任务结束后再发送' };
   }
 
   const run = createRun();
@@ -154,7 +169,7 @@ export function injectToConv(convId, text) {
     });
   } catch (e) {
     // startClaudeRun 内部会读盘（getUiPrefs），settings.json 损坏/EBUSY 时会同步抛。
-    // 此时 run 已创建且 steerHold=true、status='running'，不显式终结的话，
+    // 此时 run 已创建且 capabilities.steer=true、status='running'，不显式终结的话，
     // 到看门狗静默上限（15min）之前所有注入都会被塞进这个死 run 的 heldMsgs 里静默丢失。
     const msg = e?.message || String(e);
     logger.warn('conv-notify', '注入起跑失败', { convId, runId: run.id, err: msg });

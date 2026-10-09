@@ -1,0 +1,14 @@
+{
+  "id": "02cff75-post-api-conv-notify-new",
+  "title": "新增 POST /api/conv-notify/new 创建会话路由",
+  "type": "feature",
+  "input": "想让飞书侧能直接开一个新的网页会话：机器人推一条指令就在网页端把会话建好，之后网页打开能直接接着聊。创建时可以指定标题、工作目录、模型和思考强度；权限模式填了不合法的值要按最保守的询问模式兜底，不能把提权开关透传进来。",
+  "analysis": "",
+  "fixRef": "02cff75",
+  "baseRef": null,
+  "testFiles": [
+    "src/entrypoints/web/routes-conv-notify.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": []
+}

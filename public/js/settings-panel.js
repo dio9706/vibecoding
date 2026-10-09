@@ -7,7 +7,7 @@ import { toast, confirmDialog, promptDialog } from './ui.js';
 import { VENDOR_PRESETS, BASEURL_TO_VENDOR } from './vendor-presets.js';
 // 导入流程同样抽出：新用户引导也要一键导入，只是不需要那句覆盖确认
 import { importConfigFile } from './config-import.js';
-import { iconHtml, DELETE_ICON_SVG, EDIT_ICON_SVG } from './icons.js';
+import { iconHtml, DELETE_ICON_SVG, EDIT_ICON_SVG, REFRESH_ICON_SVG } from './icons.js';
 
 // 订阅类型配置：扩展时同步更新 index.html #tokenSubscription 的 options
 const SUBSCRIPTION_TYPES = [
@@ -39,6 +39,7 @@ const SUBSCRIPTION_TYPES = [
         renderTokenList(d.tokens || []);
         loadCredentials(); // 自定义模型凭证走独立端点，随设置面板一起加载
         loadMcpServers(); // MCP 服务器同上
+        loadBuiltins(); // 内置 MCP / Skills 开关同上
         loadPlugins(); // 插件启停同上
         setupVendorListener(); // 仅绑定表单事件，不依赖异步数据，可同步调用
         // 填充基础 tab
@@ -49,8 +50,17 @@ const SUBSCRIPTION_TYPES = [
         if (basicDefaultEffort) basicDefaultEffort.value = prefs.defaultEffort || '';
         const basicDefaultMode = document.getElementById('basicDefaultMode');
         if (basicDefaultMode) basicDefaultMode.value = prefs.defaultMode || '';
+        const basicOpenaiMaxSteps = document.getElementById('basicOpenaiMaxSteps');
+        if (basicOpenaiMaxSteps) basicOpenaiMaxSteps.value = prefs.openaiMaxSteps ? String(prefs.openaiMaxSteps) : '';
+        // 联网搜索（自定义模型 WebSearch）：{ provider, apiKey }
+        const basicSearchProvider = document.getElementById('basicSearchProvider');
+        if (basicSearchProvider) basicSearchProvider.value = d.search?.provider || '';
+        const basicSearchKey = document.getElementById('basicSearchKey');
+        if (basicSearchKey) basicSearchKey.value = d.search?.apiKey || '';
         const basicMyFeishuOpenId = document.getElementById('basicMyFeishuOpenId');
         if (basicMyFeishuOpenId) basicMyFeishuOpenId.value = d.myFeishuOpenId || '';
+        const repoMapToggle = document.getElementById('repoMapToggleInput');
+        if (repoMapToggle) repoMapToggle.checked = d.repoMap?.enabled !== false;
       }
 
       // 导入 / 导出配置：导出走 Blob 下载；导入选文件→前端校验→确认→POST→reload
@@ -244,8 +254,6 @@ const SUBSCRIPTION_TYPES = [
       // ---- 厂商选择联动 ----
       function setupVendorListener() {
         const vendorSelect = $('#credVendor');
-        const modelInput = $('#credModel');
-        const modelList = $('#credModelList');
         const baseURLInput = $('#credBaseURL');
 
         if (!vendorSelect) return; // DOM 未挂载时忽略
@@ -254,43 +262,25 @@ const SUBSCRIPTION_TYPES = [
         if (vendorSelect._vendorBound) return;
         vendorSelect._vendorBound = true;
 
+        // OpenCode 式：添加表单不再选模型——切厂商只联动 baseURL，模型列表由添加后自动发现
         vendorSelect.addEventListener('change', (e) => {
           const vendor = e.target.value;
           const preset = VENDOR_PRESETS[vendor];
 
-          // 模型框恒为自由输入，切厂商只换「建议列表」与预填值。
-          // 预设列表天然滞后于厂商上新（deepseek-v4-flash 这类新模型），
-          // 锁成只读下拉会逼用户改走「其他（自定义）」并重填 baseURL——
-          // 白丢了预设最有价值的那部分。
-          modelList.innerHTML = '';
-          modelInput.value = '';
-
           if (!vendor) {
-            modelInput.disabled = true;
-            modelInput.placeholder = '先选厂商';
             baseURLInput.disabled = false;
             baseURLInput.value = '';
             return;
           }
           if (!preset) return; // 未知 vendor 值，跳过，不崩溃
 
-          modelInput.disabled = false;
-          preset.models.forEach((m) => {
-            const opt = document.createElement('option');
-            opt.value = m;
-            modelList.appendChild(opt);
-          });
-
           if (vendor === 'custom') {
-            // 其他（自定义）：无预设可依，baseURL 与模型都由用户填
-            modelInput.placeholder = '模型名，如 my-model';
+            // 其他（自定义）：无预设可依，baseURL 由用户填
             baseURLInput.disabled = false;
             baseURLInput.placeholder = 'https://api.xxx.com/v1';
             baseURLInput.value = '';
           } else {
-            // 预设厂商：baseURL 锁定，模型预填第一个（仍可改写成任意值）
-            modelInput.placeholder = preset.models[0] || '模型名';
-            modelInput.value = preset.models[0] || '';
+            // 预设厂商：baseURL 锁定
             baseURLInput.disabled = true;
             baseURLInput.value = preset.baseURL;
           }
@@ -308,6 +298,25 @@ const SUBSCRIPTION_TYPES = [
         }
       }
 
+      /** 调刷新端点（设置页/弹层共用语义）：归一 {ok, models} / {ok:false, error} */
+      async function postRefreshCredModels(id) {
+        try {
+          const r = await fetch('/api/credentials/' + encodeURIComponent(id) + '/refresh-models', { method: 'POST' });
+          const d = await r.json();
+          if (!r.ok || d.error) return { ok: false, error: d.error || 'HTTP ' + r.status };
+          return { ok: true, models: d.models || [] };
+        } catch {
+          return { ok: false, error: '网络错误' };
+        }
+      }
+
+      async function refreshCredentialModels(id) {
+        const m = await postRefreshCredModels(id);
+        if (m.ok) toast(`已获取 ${m.models.length} 个模型`);
+        else toast('获取失败：' + m.error);
+        await loadCredentials();
+      }
+
       function renderCredList(creds) {
         const box = $('#credList');
         if (!box) return;
@@ -323,7 +332,7 @@ const SUBSCRIPTION_TYPES = [
           // 存量凭证无 vendor → 按 baseURL 反查；未知厂商 key 原样显示（不吞信息）
           const vendorKey = c.vendor || BASEURL_TO_VENDOR[c.baseURL] || '';
           const vendorLabel = vendorKey ? (VENDOR_PRESETS[vendorKey]?.label || vendorKey) : '—';
-          const displayName = c.label || ('(未命名) - ' + vendorLabel + '/' + (c.model || '?'));
+          const displayName = c.label || ('(未命名) - ' + vendorLabel);
           row.innerHTML =
             '<span class="t-label"></span>' +
             '<span class="t-vendor"></span>' +
@@ -331,13 +340,19 @@ const SUBSCRIPTION_TYPES = [
             '<span class="t-base"></span>' +
             '<span class="t-mask"></span>' +
             '<span class="spacer"></span>' +
+            '<button class="t-act refresh" title="从服务商重新拉取模型列表">' + iconHtml(REFRESH_ICON_SVG) + '</button>' +
             '<button class="t-act del" title="删除">' + iconHtml(DELETE_ICON_SVG) + '</button>';
           row.querySelector('.t-label').textContent = displayName;
           row.querySelector('.t-vendor').textContent = vendorLabel;
-          row.querySelector('.t-model').textContent = c.model || '';
+          // 模型列表（OpenCode 式）：显示数量，完整列表进 title；未获取给可操作提示
+          const models = Array.isArray(c.models) ? c.models : [];
+          const modelCell = row.querySelector('.t-model');
+          modelCell.textContent = models.length ? `${models.length} 个模型` : '未获取模型';
+          modelCell.title = models.length ? models.map((m) => m.name || m.id).join('\n') : '添加后自动获取；也可点右侧刷新按钮重试';
           row.querySelector('.t-base').textContent = c.baseURL || '';
           row.querySelector('.t-mask').textContent = c.masked || '';
-          row.querySelector('.del').onclick = () => deleteCredential(c.id, c.label || c.model);
+          row.querySelector('.refresh').onclick = () => refreshCredentialModels(c.id);
+          row.querySelector('.del').onclick = () => deleteCredential(c.id, displayName);
           box.appendChild(row);
         });
       }
@@ -345,12 +360,10 @@ const SUBSCRIPTION_TYPES = [
       async function addCredentialUI() {
         const label = $('#credLabel').value.trim();
         const vendor = $('#credVendor').value.trim();
-        const model = $('#credModel').value.trim(); // 恒为自由输入框（预设仅作 datalist 建议）
         const baseURL = $('#credBaseURL').value.trim();
         const apiKey = $('#credApiKey').value.trim();
 
         if (!vendor) return toast('请选择厂商');
-        if (!model) return toast('请选择或填写模型');
         if (!baseURL) return toast('请填写或确认 baseURL');
         if (!apiKey) return toast('请填写 apiKey');
 
@@ -358,7 +371,7 @@ const SUBSCRIPTION_TYPES = [
           const r = await fetch('/api/credentials', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ label, vendor, baseURL, model, apiKey }),
+            body: JSON.stringify({ label, vendor, baseURL, apiKey }),
           });
           const d = await r.json();
           if (!r.ok || d.error) return toast(d.error || '添加失败');
@@ -368,15 +381,19 @@ const SUBSCRIPTION_TYPES = [
           const vs = $('#credVendor');
           vs.value = '';
           vs.dispatchEvent(new Event('change'));
-          $('#credModel').value = '';
-          $('#credModel').disabled = true;
-          $('#credModel').placeholder = '先选厂商';
-          $('#credModelList').innerHTML = '';
           $('#credBaseURL').value = '';
           $('#credBaseURL').disabled = false;
           $('#credApiKey').value = '';
 
-          toast('自定义模型已添加');
+          // 添加即自动发现模型（OpenCode 式）；失败不阻塞——凭证已存，可稍后点「刷新模型」
+          const id = d.credential?.id;
+          if (!id) {
+            toast('自定义模型凭证已添加');
+          } else {
+            toast('已添加，正在获取模型列表…');
+            const m = await postRefreshCredModels(id);
+            toast(m.ok ? `已添加，发现 ${m.models.length} 个模型` : `已添加（模型列表获取失败：${m.error}，可在列表中刷新）`);
+          }
           await loadCredentials();
         } catch {
           toast('网络错误');
@@ -562,6 +579,209 @@ const SUBSCRIPTION_TYPES = [
         }
       }
 
+      // —— 内置能力（内置 MCP / Skills）：清单与默认值来自后端注册表，前端只渲染与切开关 ——
+      const P_PATH = { claude: 'Claude', openai: '自定义模型' };
+
+      async function loadBuiltins() {
+        try {
+          const r = await fetch('/api/builtins');
+          const d = await r.json();
+          renderBuiltinList(d.mcp || [], d.skills || []);
+        } catch {
+          /* 设置未打开 / 网络问题：忽略 */
+        }
+      }
+
+      async function putBuiltin(payload, failMsg) {
+        try {
+          const r = await fetch('/api/builtins', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const d = await r.json();
+          if (!r.ok || d.error) {
+            toast(d.error || failMsg);
+            return false;
+          }
+          return true;
+        } catch {
+          toast('网络错误');
+          return false;
+        }
+      }
+
+      /** 开关组件：复用模型弹层的 .tool-toggle 视觉语言（两处同一套滑块，不另起炉灶） */
+      function makeSwitch(checked, onChange, { disabled = false, title = '启用 / 停用' } = {}) {
+        const lbl = document.createElement('label');
+        lbl.className = 'tool-toggle' + (disabled ? ' disabled' : '');
+        lbl.title = title;
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = !!checked;
+        input.disabled = disabled;
+        input.onchange = () => onChange(input);
+        const slider = document.createElement('span');
+        slider.className = 'toggle-slider';
+        lbl.appendChild(input);
+        lbl.appendChild(slider);
+        return lbl;
+      }
+
+      function renderBuiltinList(mcp, skills) {
+        const box = $('#builtinList');
+        if (!box) return;
+        box.innerHTML = '';
+        if (!mcp.length && !skills.length) {
+          box.innerHTML = '<div class="cred-empty">暂无内置能力</div>';
+          return;
+        }
+
+        /**
+         * 通用卡片：信息区（名称 + 徽标 + 描述）/ 右侧开关 / 可选底部扩展行（密钥）。
+         * 两列 grid + 描述单行省略，保证长文案不撑行拖乱开关对位。
+         */
+        function makeRow({ name, desc, badges = [], enabled, disabled = false, installHint, onToggle, extra = null, sub = false }) {
+          const row = document.createElement('div');
+          row.className = 'builtin-row' + (enabled ? '' : ' off') + (sub ? ' sub' : '');
+
+          const main = document.createElement('div');
+          main.className = 'b-main';
+          const title = document.createElement('div');
+          title.className = 'b-title';
+          const nameEl = document.createElement('span');
+          nameEl.className = 'b-name';
+          nameEl.textContent = name;
+          title.appendChild(nameEl);
+          for (const b of badges) {
+            const badge = document.createElement('span');
+            badge.className = 'b-badge' + (b.warn ? ' warn' : '');
+            badge.textContent = b.text;
+            if (b.title) badge.title = b.title;
+            title.appendChild(badge);
+          }
+          const descEl = document.createElement('div');
+          descEl.className = 'b-desc';
+          descEl.textContent = desc || '';
+          if (desc) descEl.title = desc; // 单行省略后，悬停可看全文
+          main.appendChild(title);
+          main.appendChild(descEl);
+          row.appendChild(main);
+
+          row.appendChild(
+            makeSwitch(enabled, async (input) => {
+              if (!(await onToggle(input.checked))) input.checked = !input.checked; // 失败回滚 UI
+            }, {
+              disabled,
+              title: disabled
+                ? `未安装（${installHint || 'npm run setup:superpowers'}）`
+                : enabled
+                  ? '点击停用'
+                  : '点击启用',
+            }),
+          );
+
+          if (extra) {
+            const wrap = document.createElement('div');
+            wrap.className = 'b-extra';
+            wrap.appendChild(extra);
+            row.appendChild(wrap);
+          }
+          return row;
+        }
+
+        mcp.forEach((m) => {
+          const badges = [{ text: (m.paths || []).map((p) => P_PATH[p] || p).join(' / '), title: '可用路径' }];
+          if (m.available === false) {
+            badges.push({ text: '未连接', warn: true, title: '未检测到本地服务（如 Figma 桌面端未运行）' });
+          }
+          if (m.needsKey && m.needsKey.required && !m.hasKey) {
+            badges.push({ text: '缺密钥', warn: true, title: `需要配置 ${m.needsKey.env}` });
+          }
+
+          let extra = null;
+          if (m.needsKey) {
+            const frag = document.createDocumentFragment();
+            const input = document.createElement('input');
+            input.type = 'password';
+            input.className = 'b-key-input';
+            input.placeholder = m.hasKey ? '已配置，输入新值可覆盖' : `粘贴 ${m.needsKey.env}`;
+            input.title = '密钥只存本机 settings.json，读取接口不回显';
+            const save = document.createElement('button');
+            save.className = 'b-key-save';
+            save.textContent = m.hasKey ? '更新' : '保存';
+            save.onclick = async () => {
+              if (!input.value.trim()) return toast('请输入密钥');
+              if (await putBuiltin({ kind: 'mcp', id: m.id, apiKey: input.value }, '保存失败')) toast('密钥已保存');
+              await loadBuiltins();
+            };
+            frag.appendChild(input);
+            frag.appendChild(save);
+            extra = frag;
+          }
+
+          box.appendChild(
+            makeRow({
+              name: m.label || m.id,
+              desc: m.desc,
+              badges,
+              enabled: !!m.enabled,
+              onToggle: (checked) => putBuiltin({ kind: 'mcp', id: m.id, enabled: checked }, '切换失败'),
+              extra,
+            }),
+          );
+        });
+
+        skills.forEach((s) => {
+          const items = Array.isArray(s.skills) ? s.skills : [];
+          const offCount = items.filter((i) => !i.enabled).length;
+          const badges = [];
+          if (s.installed === false) {
+            badges.push({ text: '未安装', warn: true, title: `运行 ${s.installHint || 'npm run setup:superpowers'} 后可用` });
+          } else if (offCount) {
+            badges.push({ text: `已停用 ${offCount} 项`, title: '展开技能明细可逐项恢复' });
+          }
+          box.appendChild(
+            makeRow({
+              name: s.label || s.id,
+              desc: s.desc,
+              badges,
+              enabled: !!s.enabled,
+              disabled: s.installed === false, // 未安装 → 开关禁用（fail-open 状态的 UI 表达）
+              installHint: s.installHint,
+              onToggle: (checked) => putBuiltin({ kind: 'skill', id: s.id, enabled: checked }, '切换失败'),
+            }),
+          );
+          // per-skill 明细：默认折叠（12 行全展开会淹没其他内置项），包级开关开启时才值得逐个调
+          if (s.installed && items.length) {
+            const toggleBtn = document.createElement('button');
+            toggleBtn.type = 'button';
+            toggleBtn.className = 'builtin-subtoggle';
+            toggleBtn.textContent = `技能明细（${items.length} 项）`;
+            const details = document.createElement('div');
+            details.className = 'builtin-sublist';
+            details.hidden = true;
+            toggleBtn.onclick = () => {
+              details.hidden = !details.hidden;
+              toggleBtn.classList.toggle('open', !details.hidden);
+            };
+            for (const it of items) {
+              details.appendChild(
+                makeRow({
+                  name: it.label || it.id,
+                  desc: it.desc,
+                  enabled: !!it.enabled,
+                  sub: true,
+                  onToggle: (checked) => putBuiltin({ kind: 'skill', id: s.id, skillId: it.id, enabled: checked }, '切换失败'),
+                }),
+              );
+            }
+            box.appendChild(toggleBtn);
+            box.appendChild(details);
+          }
+        });
+      }
+
       // ==== 会话清理 tab ====
       // 当前工作目录：与 chat.js 一致，优先 window.__PROJECT_CWD__（打包版），否则读 localStorage。
       function cleanupCwd() {
@@ -712,13 +932,29 @@ const SUBSCRIPTION_TYPES = [
         const model = document.getElementById('basicDefaultModel').value;
         const effort = document.getElementById('basicDefaultEffort').value;
         const mode = document.getElementById('basicDefaultMode').value;
-        if (await postSettings({ section: 'ui-prefs', defaultModel: model, defaultEffort: effort, defaultMode: mode })) {
+        const maxStepsRaw = document.getElementById('basicOpenaiMaxSteps')?.value ?? '';
+        const maxSteps = Math.max(0, Math.floor(Number(maxStepsRaw) || 0)); // 空/非法/负数一律归 0=无上限
+        if (await postSettings({ section: 'ui-prefs', defaultModel: model, defaultEffort: effort, defaultMode: mode, openaiMaxSteps: maxSteps })) {
           toast('新会话默认值已保存');
         }
+      });
+      document.getElementById('basicSearchSaveBtn')?.addEventListener('click', async () => {
+        const provider = document.getElementById('basicSearchProvider').value;
+        const apiKey = document.getElementById('basicSearchKey').value.trim();
+        if (await postSettings({ section: 'search', provider, apiKey })) toast('搜索配置已保存');
       });
       document.getElementById('basicMyFeishuOpenIdSaveBtn')?.addEventListener('click', async () => {
         const myFeishuOpenId = document.getElementById('basicMyFeishuOpenId').value;
         if (await postSettings({ section: 'profile', myFeishuOpenId })) {
           toast('我的飞书 open_id 已保存');
+        }
+      });
+      // 仓库地图开关：即时保存（与面板其它 switch 同交互），失败回滚
+      document.getElementById('repoMapToggleInput')?.addEventListener('change', async (e) => {
+        const input = e.target;
+        if (await postSettings({ section: 'repo-map', enabled: input.checked })) {
+          toast(input.checked ? '仓库地图已开启' : '仓库地图已关闭');
+        } else {
+          input.checked = !input.checked;
         }
       });

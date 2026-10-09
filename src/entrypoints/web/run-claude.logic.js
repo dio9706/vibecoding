@@ -1,6 +1,14 @@
 /** web 入口 run 编排的纯函数层（无 I/O，可单测）。run-claude.js 本体全是 SDK 调用与落盘，无法直测。 */
 
 /**
+ * 自动续跑上限：允许极少数合理的意外重启自动续跑，同时对病态循环快速熔断
+ * （Claude 自重启 / 持续崩溃后重启）。计次跨进程持久化：
+ * Claude 走 `run-index.resumeAttempt` → `pending.attempts`；openai 走 `run-index.resumeAttempt`（P5 起共表）。
+ * 两条路径**共规则不共存储**（T2 spec §4.3），所以常量收在这里而不是各自文件。
+ */
+export const MAX_RESUME_ATTEMPTS = 3;
+
+/**
  * 这次异常终结「有没有资格」自动重试（不含代次判断，代次由 shouldAbandonResume 单独裁定）。
  *
  * 拆成两段而不是一个大判定：settleRun 需要区分「够格但超了上限」（要落 abandoned 让前端

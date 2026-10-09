@@ -21,6 +21,12 @@ import { ContextProgress } from './context-progress.js';
 import { AnimeAnimations } from './anim.js';
 import { registerDropZone } from './drag-bus.js';
 import { setIconText, PIN_ICON_SVG, REFRESH_ICON_SVG, WAITING_ICON_SVG, FIGMA_RESTORE_ICON_SVG } from './icons.js';
+import { VENDOR_PRESETS } from './vendor-presets.js';
+import { builtinToolsFor } from './tool-list.logic.js';
+import {
+  CLAUDE_EFFORTS, EFFORT_OFF, ULTRACODE,
+  effortLabel, effortDesc, effortTickLabel, effortOptions, pickEffort, applyEffortChoice, rehomeCustomCred,
+} from './effort.logic.js';
 bindDirPopover({ getCwd: () => cwd, selectDir }); // 惰性读 cwd 无 TDZ；selectDir 已提升
 bindGitSelector({ getCwd: () => cwd }); // 仅注入读取器；首探在 initChat（后端就绪闸门之后）发起
 bindOptimizeCwd({ getCwd: () => cwd }); // 项目优化恒作用于当前项目，不再自带目录选择
@@ -129,6 +135,11 @@ export function openMarkdownFile(path) {
       let cwd = _urlCwd != null ? _urlCwd : (localStorage.getItem('claude_cwd') || ''); // 空=服务目录
       let currentSession = null;
       const runningJobs = {}; // convId -> { es, asstIndex, text }：并行运行中的会话
+      // convId -> true：该会话有 follow-up 消息在服务端排队（openai 运行中追加的消息）。
+      // 用途：① run 终结（done）后触发提前轮询，尽快接上排空起的新 run；② 期间用户再发消息时
+      // 先尝试发现新 run 再决定走插话/新起。由 /send 的 mode:'follow_up' 响应与飞书注入项标记，
+      // 在 refreshPending 接上新 run 时清除。
+      const convFollowUpPending = {};
       // 磁盘历史会话缓存（合并进左侧栏统一列表；读的是磁盘上所有 Claude Code 会话）
       let historyCache = null; // 缓存历史列表，避免频繁请求
       let historyCacheExpire = 0;
@@ -989,7 +1000,7 @@ export function renderConvListNow() {
         restorePrompt(localStorage.getItem(NEW_DRAFT_KEY)); // 回填上次「新对话」里没发出去的内容
         currentSession = null;
         chatUltracode = false; // 新会话从关开始（见变量声明处）
-        syncUltracodeRow();
+        syncModelUI();
         chatFigmaRestore = false; // 新会话从关开始（同 chatUltracode，见变量声明处）
         syncFigmaRestoreBtn();
         // 🔔 飞书通知是会话级偏好，新对话没有登记：同步复位勾选态并停掉旧会话的收件箱轮询
@@ -1855,7 +1866,13 @@ export function renderConvListNow() {
           } catch {
             d = { ok: false };
           }
-          if (!d.ok) toast('暂无法立即生效：任务未在运行或正在启动');
+          if (!d.ok) {
+            toast(
+              d.mode === 'follow_up'
+                ? '排队消息将在当前任务结束后自动开始'
+                : '暂无法立即生效：任务未在运行或正在启动',
+            );
+          }
         } finally {
           delete msgEl.dataset.qBusy;
         }
@@ -2141,17 +2158,43 @@ export function renderConvListNow() {
           promptEl.classList.add('limit-warn');
       }
 
+      // 防连点/连按 Enter 的同步闸：clearPrompt 在首个 await 之后，第二个 send() 会读到同一段文字。
+      // 释放点在下面两处 clearPrompt 之后（输入框已空，重复事件会因 text 为空自然早退），
+      // finally 只是异常/提前 return 的兜底——防止闸永久卡死把发送功能锁掉。
+      let _sendGate = false;
+
+      // 提交幂等键（见 src/store/submissions.js）：同一条消息的网络重试/降级重启复用它，服务端据此去重
+      function newRequestId() {
+        try {
+          return crypto.randomUUID();
+        } catch {
+          /* 老引擎无 randomUUID：退化为时间戳 + 随机尾 */
+        }
+        return 'rq_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+      }
+
       // ---- 发送（按会话隔离，支持多任务并行）----
       async function send() {
         const text = getPromptText();
         if (!text) return;
+        if (_sendGate) return; // 重复提交：首个 send 尚在 await 中（clearPrompt 之前）
+        _sendGate = true;
+        const requestId = newRequestId();
+        try {
+          return await sendInner(text, requestId);
+        } finally {
+          _sendGate = false;
+        }
+      }
+
+      async function sendInner(text, requestId) {
         // 当前会话正在运行 → 插话：注入正在运行的任务（steering）
         const running = currentConvId && runningJobs[currentConvId];
         if (running) {
           _goChat(); // 面板视图下插话 → 同样切回对话看流式输出
           // userTyped：本文件唯一「字是用户在输入框敲的」的入口，服务端据此决定要不要记原始日志
           //（记忆库数据采集层，见 src/store/user-log.js）。程序化发送不带这个标记，天然不入库。
-          return steer(running, text, { userTyped: true });
+          return await steer(running, text, { userTyped: true, requestId });
         }
         _goChat(); // 面板视图下发送 → 回到对话看流式输出
 
@@ -2164,6 +2207,7 @@ export function renderConvListNow() {
         await addMessage('user', text);
         recordMessage('user', text);
         clearPrompt();
+        _sendGate = false; // 输入框已清空：防连点闸放行（此后的重复事件会因 text 为空自然早退）
         dropDraftAfterSend(convId); // 已发出：草稿作废，否则切走再回来会把这句话灌回输入框
 
         // 助手占位：记一条空消息（标记进行中 + 待填 runId），并显示可见气泡
@@ -2213,7 +2257,7 @@ export function renderConvListNow() {
         ensureTyping();
 
         // 原有的 launchRun 调用，传 finalText 而非 text；typedText 另给用户原文（见 launchRun）
-        launchRun(job, finalText, sessionId, runCwd, null, { userTyped: true, typedText: text });
+        launchRun(job, finalText, sessionId, runCwd, null, { userTyped: true, typedText: text, requestId });
       }
 
       // 启动一次服务端 run 并接流（send 与插话竞态兜底共用）。
@@ -2224,13 +2268,15 @@ export function renderConvListNow() {
       function launchRun(job, text, sessionId, runCwd, modeOverride, opts = {}) {
         const convId = job.convId;
         const effectiveMode = modeOverride || chatMode;
+        // 程序化调用（sendMessageProgrammatically 等）没带 requestId 时兜底生成，保证每个提交都有幂等键
+        const requestId = opts.requestId || newRequestId();
         const userMark = opts.userTyped
           ? { userTyped: true, ...(opts.typedText && opts.typedText !== text ? { typedText: opts.typedText } : {}) }
           : {};
         const startBody =
           chatProvider === 'openai-compat'
-            ? { prompt: text, cwd: runCwd, session: sessionId, provider: 'openai-compat', model: chatCustomModel, credId: chatCustomCredId, convId, ...userMark }
-            : { prompt: text, cwd: runCwd, session: sessionId, model: chatModel, effort: chatEffort, mode: effectiveMode, convId, ...userMark };
+            ? { prompt: text, cwd: runCwd, session: sessionId, provider: 'openai-compat', model: chatCustomModel, credId: chatCustomCredId, convId, requestId, mode: effectiveMode, effort: runEffortForCurrent(), ...userMark }
+            : { prompt: text, cwd: runCwd, session: sessionId, model: chatModel, effort: chatEffort, mode: effectiveMode, convId, requestId, ...userMark };
         fetch('/api/run/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2238,6 +2284,9 @@ export function renderConvListNow() {
         })
           .then((r) => r.json())
           .then((d) => {
+            // 同会话已有 run 在跑（服务端 busy inbox 路由）：本条消息被排队（steer/follow-up），
+            // 没有新起 run——把 send 流程预建的占位气泡按排队语义收编（见 adoptQueuedLaunch）。
+            if (d.queued) return adoptQueuedLaunch(job, d);
             if (!d.runId) throw new Error(d.error || '启动失败');
             job.runId = d.runId;
             if (d.model) {
@@ -2261,6 +2310,29 @@ export function renderConvListNow() {
             convSetMsgFields(convId, job.asstIndex, { pending: false });
             endJob(convId, true);
           });
+      }
+
+      /**
+       * /start 撞上同会话运行中任务（服务端 busy inbox 收编，响应 queued:true）：没有新起 run。
+       * 把 send 流程预建的用户气泡补上排队装饰与 msgId（可撤回/等消费）；runId 指向消息将进入
+       *（steer）或跟随（follow-up）的 run，照常 attach 看实时进度。
+       * follow-up 另记 convFollowUpPending：当前 run 的 done 到达后提前轮询，尽快接上排空起的新 run。
+       */
+      function adoptQueuedLaunch(job, d) {
+        const convId = job.convId;
+        if (!d.runId) throw new Error(d.error || '排队消息缺少关联任务，请重发');
+        job.runId = d.runId;
+        const conv = loadConvs().find((x) => x.id === convId);
+        const ui = job.asstIndex - 1;
+        if (conv && conv.messages[ui] && conv.messages[ui].role === 'user') {
+          convSetMsgFields(convId, ui, { msgId: d.msgId, runId: d.runId });
+          setMsgQueuedState(convId, ui, 'queued'); // 存储 + DOM 同步标排队
+        }
+        if (d.mode === 'follow_up') convFollowUpPending[convId] = true;
+        convSetMsgFields(convId, job.asstIndex, { runId: d.runId });
+        attachStream(convId, job.asstIndex, d.runId, job);
+        updateComposerRunning();
+        if (job.stopping) abortRun(d.runId); // 期间点了停止 → 拿到 runId 后补发
       }
 
       // 切段：当前助手气泡定稿，新开占位气泡接后续输出（排队消息进入任务时调用）。
@@ -2314,6 +2386,7 @@ export function renderConvListNow() {
       // 助手气泡此间继续在排队消息上方流式输出；切段推迟到 consumed 事件。
       async function steer(job, text, opts = {}) {
         if (!job.runId) return toast('任务正在启动，稍候再发'); // Enter 不受按钮禁用约束，需给感知；文本留在输入框
+        const requestId = opts.requestId || newRequestId(); // 幂等键：本次插话的重试/降级重启复用
         const convId = job.convId;
         const msgEl = await addMessage('user', text, { queued: true });
         recordMessage('user', text);
@@ -2324,6 +2397,7 @@ export function renderConvListNow() {
         // 按对象身份重定位（_convsCache 是活对象，splice/搬移不改变元素身份，与 withdrawQueuedMsg 范式一致）
         const msgRef = conv0.messages[idx];
         clearPrompt();
+        _sendGate = false; // 输入框已清空：防连点闸放行（同 sendInner 的释放点）
         dropDraftAfterSend(convId); // 插话同样是「已发出」，草稿作废
         const degrade = () => {
           // run 恰好结束 → 降级为新一轮：清排队态 + 补切段（与旧流程一致）后重启
@@ -2331,17 +2405,20 @@ export function renderConvListNow() {
           const i2 = conv1 ? conv1.messages.indexOf(msgRef) : -1;
           if (i2 >= 0) setMsgQueuedState(convId, i2, null); // 找不到（已撤回/会话已删）则跳过清态
           splitSegment(job);
-          restartAsNewRun(job, text, opts); // userTyped 必须跟着降级路径走，否则用户这句话就不入库了
+          restartAsNewRun(job, text, { ...opts, requestId }); // userTyped 必须跟着降级路径走，否则用户这句话就不入库了
         };
         fetch('/api/run/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           // userTyped 见 send()；服务端只在消息真被持有（ok:true）时才记，与降级路径不会重复计一条
-          body: JSON.stringify({ runId: job.runId, text, ...(opts.userTyped ? { userTyped: true } : {}) }),
+          body: JSON.stringify({ runId: job.runId, text, requestId, ...(opts.userTyped ? { userTyped: true } : {}) }),
         })
           .then((r) => r.json())
           .then((d) => {
             if (!d.ok) return degrade();
+            // 排队语义（openai 等不支持 steer 的 provider）：消息在服务端 inbox 等当前 run 终结后
+            // 排空起下一轮。done 后要提前轮询才能及时接上新 run；气泡保持「排队」态直到那一刻。
+            if (d.mode === 'follow_up') convFollowUpPending[convId] = true;
             const conv1 = loadConvs().find((x) => x.id === convId);
             const i2 = conv1 ? conv1.messages.indexOf(msgRef) : -1;
             // 存储与 DOM 两侧同进同退：只写一侧会产生「DOM 有 msgId、存储没有」的幽灵排队气泡——
@@ -2491,7 +2568,7 @@ export function renderConvListNow() {
       // job 可复用 send() 预建的占位；openConv 重连时不传，由本函数新建。
       function attachStream(convId, asstIndex, runId, job) {
         // 带上 convId：run 已从内存注册表消失时（进程重启/已 GC），服务端无从反查它属于哪个会话
-        //（settleRun 也已把它从 active-runs.json 删掉），拿不到 convId 就查不了有没有续跑计划。
+        //（settleRun 也已把它从 run-index.json 删掉），拿不到 convId 就查不了有没有续跑计划。
         const es = new EventSource(
           '/api/run?runId=' + encodeURIComponent(runId) + '&convId=' + encodeURIComponent(convId || ''),
         );
@@ -2702,6 +2779,8 @@ export function renderConvListNow() {
           job.shown = job.text.length; // 收尾补完剩余字符
           convSetMessage(convId, job.asstIndex, job.text.slice(job.base));
           convSetMsgFields(convId, job.asstIndex, { pending: false });
+          // 有排队 follow-up（busy inbox）：排空起的新 run 已在服务端诞生，提前轮询尽快接上（15s 周期兜底）
+          if (convFollowUpPending[convId]) pollPendingSoon();
           endJob(convId, job.err);
           refreshDiskHistory(); // 会话完成后刷新磁盘历史，保证 sessionId 去重及时生效
         });
@@ -2808,6 +2887,9 @@ export function renderConvListNow() {
           // 会话时它早已随进程消失。接死 run 会落进 SSE 的「run 不存在 → 静默等待续跑」分支，
           // 而这条路径不会有续跑条目，气泡就永久停在「运行中…」——用户看到的「没有响应」。
           if (it.alive && it.runId) ensureConvRunAttached(convId, it.runId);
+          // P4 排队语义（openai 运行中注入）：消息要等当前 run 终结后才排空起下一轮，
+          // 标记后由 done 提前轮询接上排空 run；气泡保持「等待进入任务」。
+          if (it.mode === 'follow_up') convFollowUpPending[convId] = true;
           applied.push(it.id);
         }
         return applied;
@@ -2940,24 +3022,15 @@ export function renderConvListNow() {
       stopBtn.addEventListener('click', stopCurrentRun);
 
       // 模型 / 强度悬浮控件（右下角，极简）
-      const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+      // 强度档位 = Claude SDK EffortLevel（与设置页选单对齐；原先前端只有 4 档、设置页的 max 会被白名单丢掉）
+      const EFFORTS = CLAUDE_EFFORTS;
 
-      // 内置工具列表（与 run-claude.js TOOL_DISABLE_ALIASES 保持一致）
-      const BUILTIN_TOOLS = [
-        { id: 'Bash',      label: 'Bash',    desc: '执行终端命令' },
-        { id: 'Write',     label: '写入',    desc: '创建/覆盖文件' },
-        { id: 'Edit',      label: '编辑',    desc: '修改文件内容（含 MultiEdit）' },
-        { id: 'Read',      label: '读取',    desc: '读取文件内容（含 NotebookRead）' },
-        { id: 'Grep',      label: '搜索',    desc: '搜索文件（含 Glob / LS）' },
-        { id: 'WebSearch', label: '网页搜索', desc: '搜索互联网' },
-        { id: 'WebFetch',  label: '网页抓取', desc: '获取网页内容' },
-        { id: 'Task',      label: '子代理',  desc: '启动子任务代理（含 Agent）' },
-        { id: 'Workflow',  label: '工作流',  desc: '多智能体编排（ultracode 触发，可拉起多个子代理）' },
-        { id: 'TodoWrite', label: '任务清单', desc: '管理待办清单' },
-      ];
+      // 内置工具清单按 provider 分叉（Claude 走 SDK 工具、自定义模型走本仓自研工具集），
+      // 数据与分叉逻辑在 tool-list.logic.js（含单测）。
+      // 与 run-claude.js TOOL_DISABLE_ALIASES 的逻辑名保持一致。
 
-      /** 创建一个工具行 DOM（含 toggle switch） */
-      function makeToolRow(labelText, descText, enabled, onChange) {
+      /** 创建一个工具行 DOM（含 toggle switch）；disabled 用于「未安装/不可用」的置灰态 */
+      function makeToolRow(labelText, descText, enabled, onChange, { disabled = false } = {}) {
         const row = document.createElement('div');
         row.className = 'tool-row';
         const nameEl = document.createElement('span');
@@ -2965,11 +3038,12 @@ export function renderConvListNow() {
         nameEl.textContent = labelText;
         nameEl.title = descText;
         const lbl = document.createElement('label');
-        lbl.className = 'tool-toggle';
-        lbl.title = enabled ? '点击禁用' : '点击启用';
+        lbl.className = 'tool-toggle' + (disabled ? ' disabled' : '');
+        lbl.title = disabled ? descText : enabled ? '点击禁用' : '点击启用';
         const inp = document.createElement('input');
         inp.type = 'checkbox';
         inp.checked = enabled;
+        inp.disabled = disabled;
         inp.addEventListener('change', () => {
           nameEl.className = 'tool-row-name' + (inp.checked ? '' : ' off');
           lbl.title = inp.checked ? '点击禁用' : '点击启用';
@@ -2991,20 +3065,20 @@ export function renderConvListNow() {
         const mcpDivider = document.getElementById('mcpToolsDivider');
         if (!builtinList) return;
 
-        // 内置工具
+        // 内置工具（按 provider 分叉：自定义模型展示 openai 路径真实装配的工具集）
         builtinList.innerHTML = '';
-        BUILTIN_TOOLS.forEach(({ id, label, desc }) => {
+        builtinToolsFor(chatProvider).forEach(({ id, label, desc }) => {
           const enabled = !chatDisabledTools.includes(id);
           const row = makeToolRow(label, desc, enabled, (checked) => {
             if (checked) {
               chatDisabledTools = chatDisabledTools.filter((t) => t !== id);
             } else {
               if (!chatDisabledTools.includes(id)) chatDisabledTools.push(id);
-              // 关掉工作流工具时同步熄掉 ✨ Ultracode：两行并排在同一弹层，不允许「开关亮着但工具已禁」的矛盾
+              // 关掉工作流工具时同步熄掉 ✨ Ultracode：Ultracode 是强度下拉的最高一档，不允许「开关亮着但工具已禁」的矛盾
               if (id === 'Workflow' && chatUltracode) {
                 chatUltracode = false;
                 persistPrefsToConv();
-                syncUltracodeRow();
+                syncModelUI();
               }
             }
             lsSet('claude_disabled_tools', JSON.stringify(chatDisabledTools));
@@ -3013,14 +3087,55 @@ export function renderConvListNow() {
           builtinList.appendChild(row);
         });
 
-        // MCP 服务器
+        // MCP 服务器（用户自定义 + 内置）与内置 Skills：同一份全局开关（与设置页同源，写入对新会话生效）
         if (mcpList) {
+          /** 回滚开关 UI（写入失败时把 checkbox 拨回去，change 事件会同步名称样式与 title） */
+          const rollback = (row, checked) => {
+            const inp = row.querySelector('input');
+            if (inp) { inp.checked = !checked; inp.dispatchEvent(new Event('change')); }
+          };
+          /** 写内置能力开关（PUT /api/builtins），失败弹 toast 并回滚 */
+          const putBuiltinRow = async (row, payload, checked, failMsg) => {
+            try {
+              const res = await fetch('/api/builtins', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+              });
+              if (!res.ok) throw new Error('server error');
+            } catch {
+              rollback(row, checked);
+              toast(failMsg);
+            }
+          };
+
+          let builtins = { mcp: [], skills: [] };
           try {
-            const r = await fetch('/api/mcp-servers');
-            const d = await r.json();
-            const servers = (d.servers || []).filter((s) => s && s.id);
+            const [userRes, builtinRes] = await Promise.all([fetch('/api/mcp-servers'), fetch('/api/builtins')]);
+            const dUser = await userRes.json();
+            const dBuiltin = await builtinRes.json().catch(() => ({}));
+            if (dBuiltin && typeof dBuiltin === 'object') builtins = { mcp: dBuiltin.mcp || [], skills: dBuiltin.skills || [] };
+            const servers = (dUser.servers || []).filter((s) => s && s.id);
+            const builtinMcp = Array.isArray(builtins.mcp) ? builtins.mcp : [];
             mcpList.innerHTML = '';
-            if (mcpDivider) mcpDivider.hidden = servers.length === 0;
+            if (mcpDivider) mcpDivider.hidden = servers.length + builtinMcp.length === 0;
+
+            // 内置 MCP（context7 / Figma 等）：标注「内置」与可用性提示，避免与用户自订项混淆
+            builtinMcp.forEach((m) => {
+              const hints = [];
+              if ((m.paths || []).length) hints.push((m.paths || []).join('/'));
+              if (m.available === false) hints.push('未检测到本地服务');
+              if (m.needsKey?.required && !m.hasKey) hints.push('缺密钥（设置页配置）');
+              const row = makeToolRow(
+                m.label || m.id,
+                '内置 MCP' + (hints.length ? ' · ' + hints.join(' · ') : ''),
+                !!m.enabled,
+                (checked) => putBuiltinRow(row, { kind: 'mcp', id: m.id, enabled: checked }, checked, '内置 MCP 状态更新失败'),
+              );
+              mcpList.appendChild(row);
+            });
+
+            // 用户自定义 MCP（既有行为不变）
             servers.forEach((srv) => {
               const row = makeToolRow(
                 srv.label || srv.command || srv.id,
@@ -3036,9 +3151,7 @@ export function renderConvListNow() {
                     if (!res.ok) throw new Error('server error');
                     srv.enabled = checked;
                   } catch {
-                    // 回滚 UI
-                    const inp = row.querySelector('input');
-                    if (inp) { inp.checked = !checked; inp.dispatchEvent(new Event('change')); }
+                    rollback(row, checked);
                     toast('MCP 服务器状态更新失败');
                   }
                 },
@@ -3047,6 +3160,33 @@ export function renderConvListNow() {
             });
           } catch {
             if (mcpDivider) mcpDivider.hidden = true;
+          }
+
+          // 内置 Skills：包级开关（技能明细在设置页；未安装时置灰并给出安装提示）
+          // 技能机制仅 Claude 路径装配（openai 路径无 Skills）——自定义模型下整段隐藏，与工具列表同原则
+          const skillList = document.getElementById('skillToolsList');
+          const skillDivider = document.getElementById('skillToolsDivider');
+          if (skillList) {
+            const skills = Array.isArray(builtins.skills) ? builtins.skills : [];
+            skillList.innerHTML = '';
+            const skillsApply = chatProvider !== 'openai-compat';
+            if (skillDivider) skillDivider.hidden = !skillsApply || skills.length === 0;
+            if (skillsApply) {
+              skills.forEach((s) => {
+                const offCount = Array.isArray(s.skills) ? s.skills.filter((i) => !i.enabled).length : 0;
+                const hint = s.installed === false
+                  ? `未安装（${s.installHint || 'npm run setup:superpowers'}）`
+                  : offCount ? `已停用 ${offCount} 项` : '全部启用';
+                const row = makeToolRow(
+                  s.label || s.id,
+                  '内置技能包 · ' + hint,
+                  !!s.enabled,
+                  (checked) => putBuiltinRow(row, { kind: 'skill', id: s.id, enabled: checked }, checked, '内置技能状态更新失败'),
+                  { disabled: s.installed === false },
+                );
+                skillList.appendChild(row);
+              });
+            }
           }
         }
       }
@@ -3064,107 +3204,416 @@ export function renderConvListNow() {
         bypassPermissions: '自动',
       };
       const MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
-      const modelFab = $('#modelFab');
-      const modelFabBtn = $('#modelFabBtn');
-      const modelFabLabel = $('#modelFabLabel');
+      const toolsFab = $('#toolsFab');
+      const toolsFabBtn = $('#toolsFabBtn');
+      const toolsPop = $('#toolsPop');
+      const modelBarBtn = $('#modelBarBtn');
+      const modelBarLabel = $('#modelBarLabel');
       const modelPop = $('#modelPop');
       const modelPills = $('#modelPills');
-      const modePills = $('#modePills');
       const customModelPills = $('#customModelPills');
-      const effortRow = $('#effortRow');
+      const effortMenu = $('#effortMenu');
+      const effortBarBtn = $('#effortBarBtn');
+      const effortBarLabel = $('#effortBarLabel');
+      const effortPop = $('#effortPop');
       const effortSlider = $('#effortSlider');
-      const ultracodeToggle = $('#ultracodeToggle');
-      const ultracodeRow = $('#ultracodeRow');
-      /** ✨ Ultracode 行：勾选态跟会话级状态；openai-compat 下整行灰掉（别家模型没有 Workflow 工具） */
-      function syncUltracodeRow() {
-        if (!ultracodeToggle || !ultracodeRow) return;
-        ultracodeToggle.checked = chatUltracode;
-        ultracodeRow.classList.toggle('disabled', chatProvider !== 'claude-agent');
-        ultracodeToggle.disabled = chatProvider !== 'claude-agent'; // pointer-events 挡不住键盘，禁用控件本体
-        ultracodeRow.querySelector('.tool-row-name')?.classList.toggle('off', !chatUltracode);
-      }
-      if (!MODEL_LABELS[chatModel]) chatModel = 'auto';
-      if (!EFFORTS.includes(chatEffort)) chatEffort = 'medium';
-      if (!MODES.includes(chatMode)) chatMode = 'default';
-      function syncModelUI() {
-        syncUltracodeRow(); // 放在 provider 分支之前：openai-compat 分支会提前 return
-        if (chatProvider === 'openai-compat') {
-          modelFabLabel.textContent = chatCustomLabel || chatCustomModel || '自定义模型';
-          [...modelPills.children].forEach((b) => b.classList.remove('active'));
-          // 按 cid 高亮：同 model 多条凭证时，按 model 匹配会同时点亮好几个 pill
-          [...customModelPills.children].forEach((b) => b.classList.toggle('active', b.dataset.cid === chatCustomCredId));
-          effortRow.classList.add('disabled'); // openai v1 无 effort
-          modePills.classList.add('disabled'); // openai v1 无权限模式
-          return;
+      const effortValue = $('#effortValue');
+      const effortDescText = $('#effortDesc');
+      const effortTicks = $('#effortTicks');
+      /** Ultracode 的 meteors 特效层：随机参数照抄 inspira-ui 参考实现（延迟 0.2~1s、时长 2~10s），
+       *  方向 = 斜 35° 坠落（参考实现的 rotate(215deg) = 180° + 35°：向右下方飞、拖尾留在左上方）
+       *  ——角度与拖尾/圆头样式见 app.css 的 @keyframes meteor-h 与 .effort-meteors。 */
+      function buildEffortMeteors() {
+        const box = document.getElementById('effortMeteors');
+        if (!box || box.childElementCount) return;
+        for (let i = 0; i < 14; i++) {
+          const s = document.createElement('i');
+          // 起点铺在面板左上**外侧**：35° 斜落要横穿整块面板，从左上角进才看得见全程
+          s.style.top = Math.floor(Math.random() * 40) - 40 + '%'; // -40% ~ 0%：面板上沿之上
+          s.style.left = Math.floor(Math.random() * 120) - 140 + 'px'; // -140 ~ -20px：面板左沿之外
+          s.style.setProperty('--delay', (Math.random() * 0.8 + 0.2).toFixed(2) + 's');
+          s.style.setProperty('--dur', (Math.random() * 8 + 2).toFixed(2) + 's');
+          s.style.setProperty('--travel', Math.floor(Math.random() * 180) + 380 + 'px'); // 斜向：行程要比面板宽
+          box.appendChild(s);
         }
-        modelFabLabel.textContent = MODEL_LABELS[chatModel];
-        [...modelPills.children].forEach((b) => b.classList.toggle('active', b.dataset.m === chatModel));
-        [...customModelPills.children].forEach((b) => b.classList.remove('active'));
-        [...modePills.children].forEach((b) => b.classList.toggle('active', b.dataset.mode === chatMode));
-        modePills.classList.remove('disabled');
-        effortRow.classList.toggle('disabled', chatModel === 'auto'); // Auto 时强度由分类器决定
-        effortSlider.value = String(Math.max(0, EFFORTS.indexOf(chatEffort)));
+      }
+      buildEffortMeteors(); // 一次铺好，之后只靠 .ultra 切 display，不重造 DOM
+      const modeBarBtn = $('#modeBarBtn');
+      const modeBarLabel = $('#modeBarLabel');
+      const modePop = $('#modePop');
+      /** 自定义凭证列表缓存（启动 / 模型弹层打开 / 还原自定义会话时刷新）；null = 未知（没取过或取失败） */
+      let customCredsCache = null;
+      /** 档位元数据未知时的自动补拉次数（每秒级抖动不该让强度控件一直空着；见 scheduleCredsRetry） */
+      const CREDS_RETRY_MAX = 3;
+      let credsRetryLeft = CREDS_RETRY_MAX;
+      let credsRetryTimer = null;
+
+      if (!MODEL_LABELS[chatModel]) chatModel = 'auto';
+      // 初始归一：Claude 档位白名单；自定义模型的档位等凭证缓存回来后由 normalizeEffortForCurrent 再校
+      if (chatProvider !== 'openai-compat' && !EFFORTS.includes(chatEffort)) chatEffort = 'medium';
+      if (!MODES.includes(chatMode)) chatMode = 'default';
+
+      /** 取缓存里的当前自定义凭证（无缓存/未选 → null） */
+      function currentCustomEntry() {
+        if (chatProvider !== 'openai-compat' || !Array.isArray(customCredsCache)) return null;
+        return customCredsCache.find((c) => c.id === chatCustomCredId) || null;
       }
 
-      // 打开弹层时拉取已配置的自定义模型，动态填充 pills
-      async function refreshCustomModelPills() {
+      /** 当前自定义模型的 effort 元数据；null = 未知（缓存未回/凭证不在），[] = 明确无档位 */
+      function currentModelEfforts() {
+        const entry = currentCustomEntry();
+        if (!entry) return null;
+        const m = Array.isArray(entry.models) ? entry.models.find((x) => x.id === chatCustomModel) : null;
+        return m && Array.isArray(m.efforts) ? m.efforts : [];
+      }
+
+      /** 自定义模型档位归一：当前值非法 → defaultEffort/第一档；无档位模型不动（发送时也不带） */
+      function normalizeEffortForCurrent() {
+        if (chatProvider !== 'openai-compat') return;
+        const entry = currentCustomEntry();
+        const m = entry && Array.isArray(entry.models) ? entry.models.find((x) => x.id === chatCustomModel) : null;
+        const next = pickEffort({
+          provider: 'openai-compat',
+          efforts: m && Array.isArray(m.efforts) ? m.efforts : [],
+          defaultEffort: m && typeof m.defaultEffort === 'string' ? m.defaultEffort : '',
+          current: chatEffort,
+        });
+        if (next && next !== chatEffort) {
+          chatEffort = next;
+          lsSet('claude_effort', chatEffort);
+        }
+      }
+
+      /** 拉自定义凭证列表（缓存）；force=true 强制重取（模型弹层打开时）。
+       *  失败**不写缓存**：写空数组等于把「没取到」当成「没有凭证」，之后所有调用都命中这个假结果，
+       *  强度控件就永远停在「—」直到用户手动打开一次模型弹层（用户报的「默认是空的，开一次模型选择才有值」）。 */
+      async function ensureCustomCreds(force = false) {
+        if (!force && Array.isArray(customCredsCache)) return customCredsCache;
         try {
           const r = await fetch('/api/credentials');
+          if (!r.ok) throw new Error('HTTP ' + r.status); // 5xx/401 不是「没有凭证」，不能污染缓存
           const d = await r.json();
-          const creds = d.credentials || [];
-          customModelPills.innerHTML = '';
-          creds.forEach((c) => {
-            const b = document.createElement('button');
-            b.dataset.m = c.model;
-            b.dataset.cid = c.id; // 高亮与发送都认 id：同 model 的多条凭证（不同 key/厂商）才区分得开
-            b.textContent = c.label || c.model;
-            b.title = (c.label ? c.label + ' · ' : '') + c.model;
-            b.addEventListener('click', () => {
-              chatProvider = 'openai-compat';
-              chatCustomModel = c.model;
-              chatCustomLabel = c.label || c.model;
-              chatCustomCredId = c.id;
-              lsSet('claude_provider', chatProvider);
-              lsSet('claude_custom_model', chatCustomModel);
-              lsSet('claude_custom_label', chatCustomLabel);
-              lsSet('claude_custom_cred_id', chatCustomCredId);
-              syncModelUI();
-              persistPrefsToConv();
-              modelPop.hidden = true;
-              if (currentConvId && runningJobs[currentConvId]) toast('模型将从下一条消息生效');
-            });
-            customModelPills.appendChild(b);
-          });
-          // 在用的凭证若已被删除 → 回退 Claude，避免继续发送指向已删凭证的请求。
+          if (Array.isArray(d.credentials)) {
+            customCredsCache = d.credentials;
+            credsRetryLeft = CREDS_RETRY_MAX;
+          }
+        } catch {
+          /* 保持上一次的结果（可能是 null = 未知）：留给下一次调用重试 */
+        }
+        return customCredsCache;
+      }
+
+      /** 校准当前自定义凭证归属：命中 / 唯一认领 → 落回 chatCustomCredId；认不到 → 回落 Claude。
+       *  判据在 effort.logic.js#rehomeCustomCred（纯函数 + 单测）。
+       *  **必须与「打开模型弹层」同源共用**：只在弹层里认领的话，启动后强度控件会一直显示「—」，
+       *  用户得先点开一次模型选择才看到档位（默认空、开一次才有值的根因）。 */
+      function reconcileCustomCred() {
+        if (chatProvider !== 'openai-compat') return;
+        // 凭证列表没取到（null）时什么都不做：「不知道」不等于「没有」，
+        // 否则一次网络抖动就会把好好的自定义会话踢回 Claude。
+        if (!Array.isArray(customCredsCache)) return;
+        const home = rehomeCustomCred({ creds: customCredsCache, credId: chatCustomCredId, model: chatCustomModel });
+        if (!home) {
+          // 在用的凭证已被删除（或模型已不在任何凭证里）→ 回退 Claude，避免继续发送指向已删凭证的请求。
           // 按 id 判定：同名 model 的另一条凭证还在，不代表**这一条**还在，
           // 按 model 匹配会让删除后的选择静默漂移到另一个账号上。
-          // 升级路径：老用户没有 credId（此前不存），按 model 兜底认一次，
-          // 认到就把 id 补上，不至于一升级就被踢回 Claude。
-          if (chatProvider === 'openai-compat') {
-            let cur = chatCustomCredId ? creds.find((c) => c.id === chatCustomCredId) : null;
-            if (!cur && !chatCustomCredId) cur = creds.find((c) => c.model === chatCustomModel);
-            if (cur) {
-              if (cur.id !== chatCustomCredId) {
-                chatCustomCredId = cur.id;
-                lsSet('claude_custom_cred_id', chatCustomCredId);
-                persistPrefsToConv();
-              }
-            } else {
-              chatProvider = 'claude-agent';
-              chatCustomCredId = '';
-              lsSet('claude_provider', chatProvider);
-              lsSet('claude_custom_cred_id', '');
-              persistPrefsToConv();
-            }
+          chatProvider = 'claude-agent';
+          chatCustomCredId = '';
+          lsSet('claude_provider', chatProvider);
+          lsSet('claude_custom_cred_id', '');
+          persistPrefsToConv();
+          return;
+        }
+        if (home.id !== chatCustomCredId) {
+          chatCustomCredId = home.id;
+          lsSet('claude_custom_cred_id', chatCustomCredId);
+          persistPrefsToConv();
+        }
+      }
+
+      /** 启动 / 还原自定义会话后拉一次凭证：认领归属 → 归一强度档位 → 刷 UI。
+       *  认领这一步不能省：老会话的 credId 会被 applySessionPrefs 清空（缺字段视为没选过），
+       *  不在这里按 model 认回来，档位元数据就查不到，强度控件只能是空的。 */
+      async function refreshCredsForEffort() {
+        await ensureCustomCreds();
+        reconcileCustomCred();
+        normalizeEffortForCurrent();
+        syncModelUI();
+      }
+
+      /** 发送时实际带的 effort：自定义模型只有确认有档位才带值（无元数据模型不带，避免别家端点困惑） */
+      function runEffortForCurrent() {
+        if (chatProvider !== 'openai-compat') return chatEffort;
+        const list = currentModelEfforts();
+        return list && list.length ? chatEffort : '';
+      }
+
+      /** 强度档位兜底归一（发送前防线）：自定义模型值必须 ∈ none+efforts；Claude 非白名单回落 medium；
+       *  自定义模型强制关编排（没有 Workflow 工具）。老 UI 遗留的 xhigh 等非法值从这里被纠正。 */
+      function ensureEffortValid() {
+        if (chatProvider === 'openai-compat') {
+          if (chatUltracode) chatUltracode = false;
+          const list = currentModelEfforts();
+          if (list && list.length && ![EFFORT_OFF, ...list].includes(chatEffort)) {
+            normalizeEffortForCurrent();
           }
+        } else if (!EFFORTS.includes(chatEffort)) {
+          chatEffort = 'medium';
+          lsSet('claude_effort', chatEffort);
+        }
+      }
+
+      /** 档位元数据未知（自定义模型 + 凭证还没回来）：自动补拉几次。
+       *  没有它的话，启动那一次请求抖一下，强度控件就永远是空的「—」，非得用户去点开模型选择才回填。 */
+      function scheduleCredsRetry() {
+        if (credsRetryLeft <= 0 || credsRetryTimer) return;
+        credsRetryLeft--;
+        credsRetryTimer = setTimeout(() => {
+          credsRetryTimer = null;
+          refreshCredsForEffort();
+        }, 1500);
+      }
+
+      /** 强度控件刷新：chip 标签 + 面板里的滑块/刻度（档位 = 当前模型 options：
+       *  自定义 none→…→max；Claude low→…→max→Ultracode） */
+      function syncEffortUI() {
+        const isAuto = chatProvider !== 'openai-compat' && chatModel === 'auto';
+        const isCustom = chatProvider === 'openai-compat';
+        const opts = effortOptions({ provider: chatProvider, efforts: currentModelEfforts() || [] });
+        const enabled = !isAuto && opts.length > 0;
+        // 自定义模型的档位元数据要等凭证列表回来才知道：null = 还不知道（不是「不支持」）
+        const metaKnown = !isCustom || currentModelEfforts() !== null;
+        if (!metaKnown) scheduleCredsRetry();
+        const active = chatUltracode && !isCustom ? ULTRACODE : chatEffort;
+        const idx = Math.max(0, opts.indexOf(active));
+        if (enabled) {
+          effortSlider.min = '0';
+          effortSlider.max = String(Math.max(0, opts.length - 1));
+          effortSlider.value = String(idx);
+        }
+        effortSlider.disabled = !enabled;
+        effortBarBtn.disabled = !enabled;
+        // Ultracode 档：chip 发光 + 面板落流星（CSS 动画，见 app.css）
+        const ultra = enabled && chatUltracode && !isCustom;
+        effortMenu.classList.toggle('ultra', ultra);
+        effortPop.classList.toggle('ultra', ultra);
+        effortBarLabel.textContent = isAuto
+          ? '强度 · Auto'
+          : enabled
+            ? '强度 · ' + effortLabel(active)
+            : metaKnown
+              ? '强度 · —'
+              : '强度 · …'; // 档位还在路上（一两秒内自愈），别显示成「不支持」
+        effortValue.textContent = effortLabel(active);
+        effortDescText.textContent = enabled ? effortDesc(active) : '';
+        renderEffortTicks(opts, idx);
+        // 可用时不挂原生 title（自绘面板已经说明一切，原生气泡只会打架）；只有置灰态才用 title 解释原因
+        effortBarBtn.title = isAuto
+          ? 'Auto 模式下强度由分类器决定'
+          : enabled
+            ? ''
+            : metaKnown
+              ? '该模型不支持强度选择'
+              : '正在读取该模型的强度档位…';
+        effortBarBtn.setAttribute('aria-expanded', String(!effortPop.hidden));
+      }
+
+      /** 刻度条：逐个档位名（点一下跳档；守卫与滑块共用 onEffortSliderInput） */
+      function renderEffortTicks(opts, activeIdx) {
+        const sig = opts.join('|');
+        if (effortTicks.dataset.sig !== sig) {
+          effortTicks.dataset.sig = sig;
+          effortTicks.innerHTML = '';
+          const n = opts.length;
+          opts.forEach((v, i) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'effort-tick';
+            b.dataset.effort = v;
+            b.textContent = effortTickLabel(v);
+            b.title = v === ULTRACODE ? 'Ultracode · 多智能体编排' : effortLabel(v) + (effortDesc(v) ? '：' + effortDesc(v) : '');
+            // 首尾贴边、中间居中到滑块行程上（拇指 14px → 行程两端各内缩 7px）
+            if (i === 0) b.style.left = '7px';
+            else if (i === n - 1) b.style.right = '7px';
+            else {
+              b.style.left = `calc(7px + (100% - 14px) * ${i / (n - 1)})`;
+              b.style.transform = 'translateX(-50%)';
+            }
+            b.addEventListener('click', (e) => {
+              e.stopPropagation();
+              effortSlider.value = String(i);
+              if (onEffortSliderInput()) commitEffort();
+            });
+            effortTicks.appendChild(b);
+          });
+        }
+        [...effortTicks.children].forEach((b, i) => {
+          b.classList.toggle('active', i === activeIdx);
+          // 选不到的档（「工作流」工具被禁）留着但褪色：点了会 toast 解释
+          b.classList.toggle('blocked', b.dataset.effort === ULTRACODE && !canEnableUltracode(chatDisabledTools));
+        });
+      }
+
+      /** 滑块位置 → 档位值（每次现算：档位随模型/provider 变化） */
+      function effortStopAt(i) {
+        const opts = effortOptions({ provider: chatProvider, efforts: currentModelEfforts() || [] });
+        return opts[i] || '';
+      }
+
+      /** 滑到某档：非法（Ultracode 不可达）回弹并解释；@returns 是否落档成功 */
+      function onEffortSliderInput() {
+        const v = effortStopAt(Number(effortSlider.value));
+        if (!v) return false;
+        if (v === ULTRACODE && !canEnableUltracode(chatDisabledTools)) {
+          toast('「工作流」工具已禁用，先在「🔧 工具」里开启');
+          syncEffortUI(); // 回弹到合法档位
+          return false;
+        }
+        const applied = applyEffortChoice(v);
+        chatUltracode = applied.ultracode;
+        chatEffort = applied.effort;
+        lsSet('claude_effort', chatEffort);
+        persistPrefsToConv();
+        syncEffortUI(); // 立即反映 chip 标签与流光
+        return true;
+      }
+
+      /** 落档收尾：持久化 + 运行中提示（滑块释放 / 刻度点击共用） */
+      function commitEffort() {
+        if (chatProvider !== 'openai-compat') saveUiPrefs(); // 自定义档位随模型走，不写全局默认
+        if (currentConvId && runningJobs[currentConvId]) {
+          toast(chatUltracode ? '编排将从下一条新消息生效，插话不带 ultracode' : '思考强度将从下一条消息生效');
+        } else if (chatUltracode) {
+          toast('Ultracode 已开启（多智能体编排）');
+        }
+      }
+
+      /** 打开强度面板前刷一次：档位可能刚随模型变化；凭证还没回来时顺手补拉一次（否则是空的） */
+      function refreshEffortOnOpen() {
+        if (chatProvider === 'openai-compat' && currentModelEfforts() === null) refreshCredsForEffort();
+        syncEffortUI();
+      }
+
+      /** 关闭下拉开面板（except 指定保留者） */
+      function closeBarMenus(except) {
+        for (const pop of [modelPop, modePop, effortPop]) {
+          if (pop === except) continue;
+          pop.hidden = true;
+        }
+        effortBarBtn.setAttribute('aria-expanded', String(!effortPop.hidden));
+      }
+
+      /** 点 trigger 开关某个下拉（打开时回调 onOpen，如刷新数据/重建内容） */
+      function toggleBarMenu(pop, onOpen) {
+        const opening = pop.hidden;
+        closeBarMenus();
+        pop.hidden = !opening;
+        if (opening && onOpen) onOpen();
+      }
+
+      function syncModelUI() {
+        ensureEffortValid(); // 发送前防线：老 UI/旧会话带回的非法档位（如 xhigh）在渲染前被纠正
+        if (chatProvider === 'openai-compat') {
+          modelBarLabel.textContent = chatCustomLabel || chatCustomModel || '自定义模型';
+          [...modelPills.children].forEach((b) => b.classList.remove('active'));
+          // 按 cid + model 双匹配高亮：同凭证换模型、多凭证同模型都能区分（一凭证多 pill）
+          customModelPills.querySelectorAll('button[data-cid]').forEach((b) =>
+            b.classList.toggle('active', b.dataset.cid === chatCustomCredId && b.dataset.m === chatCustomModel),
+          );
+        } else {
+          modelBarLabel.textContent = MODEL_LABELS[chatModel];
+          [...modelPills.children].forEach((b) => b.classList.toggle('active', b.dataset.m === chatModel));
+          customModelPills.querySelectorAll('button').forEach((b) => b.classList.remove('active'));
+        }
+        syncEffortUI();
+        modeBarLabel.textContent = MODE_LABELS[chatMode];
+        modePop.querySelectorAll('.pop-item').forEach((b) => b.classList.toggle('active', b.dataset.mode === chatMode));
+      }
+
+      // 打开弹层时拉取已配置的自定义模型，按凭证分组动态填充 pills（OpenCode 式：凭证 → 模型列表）
+      async function refreshCustomModelPills() {
+        try {
+          // 取数与缓存口径统一走 ensureCustomCreds（force：弹层打开时强制刷新）
+          const creds = await ensureCustomCreds(true);
+          if (!Array.isArray(creds)) return; // 没取到：保留现有面板内容，也不做归属回退
+          customModelPills.innerHTML = '';
+          creds.forEach((c) => {
+            const group = document.createElement('div');
+            group.className = 'model-group';
+
+            const vendorLabel = c.vendor ? (VENDOR_PRESETS[c.vendor]?.label || c.vendor) : '';
+            const head = document.createElement('div');
+            head.className = 'model-group-head';
+            head.textContent = c.label || vendorLabel || '自定义模型';
+            head.title = c.baseURL || '';
+            group.appendChild(head);
+
+            const pills = document.createElement('div');
+            pills.className = 'model-pills';
+            const models = Array.isArray(c.models) ? c.models : [];
+            if (!models.length) {
+              // 未发现模型（添加时拉取失败 / 老凭证）：给一条手动刷新入口，不自动发网络
+              const b = document.createElement('button');
+              b.textContent = '刷新模型';
+              b.title = '从服务商获取可用模型列表';
+              b.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                b.disabled = true;
+                b.textContent = '获取中…';
+                try {
+                  const rr = await fetch('/api/credentials/' + encodeURIComponent(c.id) + '/refresh-models', { method: 'POST' });
+                  const dd = await rr.json();
+                  if (!rr.ok || dd.error) toast(dd.error || '获取失败');
+                  else toast(`已获取 ${(dd.models || []).length} 个模型`);
+                } catch {
+                  toast('网络错误');
+                }
+                await refreshCustomModelPills();
+              });
+              pills.appendChild(b);
+            } else {
+              models.forEach((m) => {
+                const b = document.createElement('button');
+                b.dataset.m = m.id;
+                b.dataset.cid = c.id; // 高亮与发送都认 id：同模型的多条凭证（不同 key/厂商）才区分得开
+                b.textContent = m.name || m.id;
+                b.title = (c.label ? c.label + ' · ' : '') + m.id;
+                b.addEventListener('click', () => {
+                  chatProvider = 'openai-compat';
+                  chatCustomModel = m.id;
+                  chatCustomLabel = m.name || m.id;
+                  chatCustomCredId = c.id;
+                  // 切到自定义模型的瞬间就按该模型档位归一：老 localStorage 里的 xhigh 等非法值
+                  // 不能带进请求（2026-10-08 事故：DeepSeek 收到 reasoning_effort=xhigh）
+                  normalizeEffortForCurrent();
+                  lsSet('claude_provider', chatProvider);
+                  lsSet('claude_custom_model', chatCustomModel);
+                  lsSet('claude_custom_label', chatCustomLabel);
+                  lsSet('claude_custom_cred_id', chatCustomCredId);
+                  syncModelUI();
+                  persistPrefsToConv();
+                  modelPop.hidden = true;
+                  if (currentConvId && runningJobs[currentConvId]) toast('模型将从下一条消息生效');
+                });
+                pills.appendChild(b);
+              });
+            }
+            group.appendChild(pills);
+            customModelPills.appendChild(group);
+          });
+          // 归属校准与启动 / 还原会话共用一套（rehomeCustomCred）：凭证被删 → 回退 Claude；
+          // 老用户没存过 credId（升级路径）→ 按所选模型唯一认领一次，不至于一升级就被踢回 Claude。
+          reconcileCustomCred();
           const divider = $('#customDivider');
           if (divider) divider.hidden = creds.length === 0;
+          normalizeEffortForCurrent(); // 档位元数据随凭证列表回来，校一次当前值
           syncModelUI();
         } catch {
           /* 忽略：拉取失败不影响 Claude 选择 */
         }
       }
       syncModelUI();
+      if (chatProvider === 'openai-compat') refreshCredsForEffort(); // 启动即自定义会话：拉档位元数据
       // 会话级偏好还原：仅接受白名单内的值（未知模型/模式一律忽略），实际变化才刷 UI + 提示
       function applySessionPrefs(prefs) {
         let changed = false;
@@ -3199,10 +3648,18 @@ export function renderConvListNow() {
           lsSet('claude_model', chatModel);
           changed = true;
         }
-        if (prefs.effort && EFFORTS.includes(prefs.effort) && prefs.effort !== chatEffort) {
-          chatEffort = prefs.effort;
-          lsSet('claude_effort', chatEffort);
-          changed = true;
+        if (prefs.effort && prefs.effort !== chatEffort) {
+          // 自定义模型：缓存未回时乐观接受（refreshCredsForEffort 会再校）；有元数据时按档位集合校验
+          const list = chatProvider === 'openai-compat' ? currentModelEfforts() : null;
+          const valid =
+            chatProvider === 'openai-compat'
+              ? list === null || (list.length > 0 && [EFFORT_OFF, ...list].includes(prefs.effort))
+              : EFFORTS.includes(prefs.effort);
+          if (valid) {
+            chatEffort = prefs.effort;
+            lsSet('claude_effort', chatEffort);
+            changed = true;
+          }
         }
         if (prefs.mode && MODES.includes(prefs.mode) && prefs.mode !== chatMode) {
           chatMode = prefs.mode;
@@ -3213,7 +3670,7 @@ export function renderConvListNow() {
         const nextUltracode = !!prefs.ultracode && canEnableUltracode(chatDisabledTools); // 工具已全局禁用时不还原亮灯，与点击时的守卫对称
         if (nextUltracode !== chatUltracode) {
           chatUltracode = nextUltracode;
-          syncUltracodeRow();
+          syncModelUI(); // 合并进强度档位后，Ultracode 状态反映在强度控件标签上
         }
         // 同款会话级开关，缺字段视为关；不参与 changed 的 toast
         const nextFigmaRestore = !!prefs.figmaRestore;
@@ -3231,14 +3688,43 @@ export function renderConvListNow() {
         }
         // 飞书通知开关是会话级偏好（存 conv.meta.notifyFeishu），随其它偏好一起还原按钮态
         if (window.__convNotify) window.__convNotify.refreshBtn(prefs);
+        // 自定义会话：凭证缓存回来后校验/归一强度档位（此时才知道该模型支持哪些档）
+        if (chatProvider === 'openai-compat') refreshCredsForEffort();
       }
-      modelFabBtn.addEventListener('click', (e) => {
+      toolsFabBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        modelPop.hidden = !modelPop.hidden;
-        if (!modelPop.hidden) {
-          refreshCustomModelPills();
-          refreshToolsSection();
-        }
+        toolsPop.hidden = !toolsPop.hidden;
+        if (!toolsPop.hidden) refreshToolsSection();
+      });
+      modelBarBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleBarMenu(modelPop, refreshCustomModelPills);
+      });
+      effortSlider.addEventListener('input', onEffortSliderInput);
+      effortSlider.addEventListener('change', () => {
+        // 非法档（Ultracode 不可达）已在 input 里回弹并 toast，这里不重复提示
+        if (onEffortSliderInput()) commitEffort();
+      });
+      // 强度面板与模型 / 权限同款：**点击**开合（不再 hover 弹出），点外部或按 Esc 收起
+      effortBarBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleBarMenu(effortPop, refreshEffortOnOpen);
+        effortBarBtn.setAttribute('aria-expanded', String(!effortPop.hidden)); // toggle 后同步（关的那一下 syncEffortUI 不会再跑）
+      });
+      effortMenu.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape' || effortPop.hidden) return;
+        e.stopPropagation();
+        closeBarMenus();
+        effortBarBtn.focus();
+      });
+      modeBarBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleBarMenu(modePop);
+      });
+      // 点击外部：三个下拉开面板与工具弹层一起收起
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('.bar-menu')) closeBarMenus();
+        if (!toolsPop.hidden && !toolsFab.contains(e.target)) toolsPop.hidden = true;
       });
       const figmaRestoreBtn = $('#figmaRestoreBtn');
       // 用 setIconText 而非 innerHTML：项目统一的图标注入方式（会裹一层 .inline-ic 做对齐）
@@ -3257,21 +3743,6 @@ export function renderConvListNow() {
         // 不调 saveUiPrefs：会话级偏好，不进服务端全局默认（同 ultracode）
         if (chatFigmaRestore) toast('设计稿还原已开启：发送含 Figma 链接的消息即自动触发');
       });
-      ultracodeToggle?.addEventListener('change', () => {
-        if (ultracodeToggle.checked && !canEnableUltracode(chatDisabledTools)) {
-          toast('工作流工具已关闭，请先在下方工具列表开启');
-          ultracodeToggle.checked = false; // 浏览器已先打勾，按真值回写
-          return;
-        }
-        chatUltracode = ultracodeToggle.checked;
-        persistPrefsToConv(); // 无会话时 no-op，首条消息由 recordMessage 快照带入
-        syncUltracodeRow();
-        // 不调 saveUiPrefs：ultracode 是会话级偏好，不进服务端全局默认（理由见变量声明处）
-        if (chatUltracode && currentConvId && runningJobs[currentConvId]) toast('编排将从下一条新消息生效，插话不带 ultracode');
-      });
-      document.addEventListener('click', (e) => {
-        if (!modelPop.hidden && !modelFab.contains(e.target)) modelPop.hidden = true;
-      });
       [...modelPills.children].forEach((b) => {
         b.addEventListener('click', () => {
           if (b.dataset.m === chatModel && chatProvider === 'claude-agent') return; // 重复点当前：不触发
@@ -3285,16 +3756,18 @@ export function renderConvListNow() {
           if (currentConvId && runningJobs[currentConvId]) toast('模型将从下一条消息生效');
         });
       });
-      [...modePills.children].forEach((b) => {
+      [...modePop.querySelectorAll('.pop-item')].forEach((b) => {
         b.addEventListener('click', async () => {
           const mode = b.dataset.mode;
+          closeBarMenus();
           if (mode === chatMode) return; // 重复点当前模式：不发多余请求、不弹误导提示
           chatMode = mode;
           lsSet('claude_mode', chatMode);
           saveUiPrefs(); // 同步到服务端配置
           syncModelUI();
           persistPrefsToConv();
-          // 运行中任务：尝试即时切换（仅「询问」起跑可放宽为 接受编辑/自动）
+          // 运行中任务：尝试即时切换（Claude 仅「询问」起跑可放宽为 接受编辑/自动；openai 四档可切、
+          // 策略门实时读新档位，见 run-openai 的 createPolicyGate）
           const job = currentConvId && runningJobs[currentConvId];
           if (!job || !job.runId) return;
           try {
@@ -3313,15 +3786,6 @@ export function renderConvListNow() {
             /* 网络失败不打扰：下一条消息仍会带上新模式 */
           }
         });
-      });
-      effortSlider.addEventListener('input', () => {
-        chatEffort = EFFORTS[Number(effortSlider.value)] || 'medium';
-        lsSet('claude_effort', chatEffort);
-        persistPrefsToConv();
-      });
-      effortSlider.addEventListener('change', () => {
-        saveUiPrefs(); // 同步到服务端配置（用户释放滑块时触发一次）
-        if (currentConvId && runningJobs[currentConvId]) toast('思考强度将从下一条消息生效');
       });
       promptEl.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
@@ -3390,6 +3854,7 @@ export function renderConvListNow() {
       const pendingMap = {}; // convId -> { resetsAt, status, runId }
       const handledResumes = new Set(); // 已接流的续跑 runId，避免重复
       const handledAbandoned = new Set(); // 已展示过终结提示的熔断会话，避免重复
+      const handledFollowUps = new Set(); // P4：已接流的排空 follow-up runId，避免重复
       // 异常重试后的提前轮询：pending 轮询周期是 15s，不提前拉的话「2 秒后自动重试」在用户
       // 眼里会变成「最多 17 秒才见动静」。拉两次——第二次兜住 doResume 起跑稍慢/落盘稍晚的情况，
       // 15s 周期仍是最终兜底。
@@ -3397,6 +3862,12 @@ export function renderConvListNow() {
         const first = (Number(retryInMs) || 2000) + 800;
         setTimeout(refreshPending, first);
         setTimeout(refreshPending, first + 3000);
+      }
+      // 排队 follow-up 后的提前轮询：当前 run 的 done 一到就拉，尽快接上排空起的新 run
+      //（服务端在终结同一 tick 内即起跑新 run，500ms 足够；15s 周期兜底）。
+      function pollPendingSoon() {
+        setTimeout(refreshPending, 500);
+        setTimeout(refreshPending, 2000);
       }
       // 失效清除 / 熔断消费：请服务端按 convId 移除待续跑条目（不阻塞 UI）
       function dismissPending(convId) {
@@ -3436,8 +3907,11 @@ export function renderConvListNow() {
       }
       async function refreshPending() {
         let list;
+        let follows = [];
         try {
-          ({ pending: list } = await (await fetch('/api/run/pending')).json());
+          const body = await (await fetch('/api/run/pending')).json();
+          list = body.pending;
+          follows = Array.isArray(body.followUps) ? body.followUps : []; // P4：busy inbox 排空记录
         } catch {
           return;
         }
@@ -3496,6 +3970,40 @@ export function renderConvListNow() {
             }
           }
         }
+        // P4 busy inbox：排空起的新 run（follow-up 队列被消费）→ 接流 + 清排队气泡。
+        // 与 resuming 分支同策略：只管当前打开的会话；runId 去重；已有 job 时不抢。
+        for (const f of follows) {
+          if (!f || !f.runId || !f.convId) continue;
+          if (f.convId !== currentConvId) continue;
+          if (handledFollowUps.has(f.runId)) continue;
+          const job = runningJobs[f.convId];
+          if (job) {
+            // 已有 job：仅当它正因「run 不存在」静默等待时切换（与 resuming 的更新分支同判据）
+            if (job.pending && job.runId !== f.runId) {
+              job.runId = f.runId;
+              job.pending = false;
+              handledFollowUps.add(f.runId);
+              attachStream(f.convId, job.asstIndex, f.runId);
+            }
+            continue;
+          }
+          const conv = loadConvs().find((x) => x.id === f.convId);
+          if (!conv) continue;
+          const ids = Array.isArray(f.ids) ? f.ids : [];
+          if (ids.length) {
+            conv.messages.forEach((m, i) => {
+              if (m.queued && m.msgId && ids.includes(m.msgId)) setMsgQueuedState(f.convId, i, null);
+            });
+          }
+          handledFollowUps.add(f.runId);
+          delete convFollowUpPending[f.convId]; // 已接上排空 run，本轮排队任务已有归属
+          const idx = convPushMessage(f.convId, 'assistant', '');
+          convSetMsgFields(f.convId, idx, { pending: true, runId: f.runId });
+          addMessage('assistant', '');
+          attachStream(f.convId, idx, f.runId);
+          renderConvListDebounced();
+        }
+        if (handledFollowUps.size > 200) handledFollowUps.clear(); // 防长期运行内存增长（GC 兜底）
         const chip = $('#pendingChip');
         chip.hidden = waiting === 0;
         if (waiting) setIconText(chip, WAITING_ICON_SVG, `${waiting} 个任务待续跑`);
@@ -3619,8 +4127,8 @@ export function renderConvListNow() {
           const effectiveMode = chatMode;
           const startBody =
             chatProvider === 'openai-compat'
-              ? { prompt: text, cwd: runCwd, session: sessionId, provider: 'openai-compat', model: chatCustomModel, credId: chatCustomCredId, convId }
-              : { prompt: text, cwd: runCwd, session: sessionId, model: chatModel, effort: chatEffort, mode: effectiveMode, convId };
+              ? { prompt: text, cwd: runCwd, session: sessionId, provider: 'openai-compat', model: chatCustomModel, credId: chatCustomCredId, convId, requestId: newRequestId(), mode: effectiveMode, effort: runEffortForCurrent() }
+              : { prompt: text, cwd: runCwd, session: sessionId, model: chatModel, effort: chatEffort, mode: effectiveMode, convId, requestId: newRequestId() };
 
           fetch('/api/run/start', {
             method: 'POST',

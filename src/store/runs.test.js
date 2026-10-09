@@ -119,6 +119,25 @@ test('setRunMode：非法目标 / 非询问起跑 / 未知 run / 已结束 → �
   assert.equal(setRunMode(doneRun.id, 'acceptEdits'), false);
 });
 
+test('setRunMode：openai 路径四档可中途切换（策略门实时读 run.mode）；放宽时放行挂起的 permission', async (t) => {
+  const run = createRun();
+  run.provider = 'openai-compat';
+  run.mode = 'default';
+  t.after(() => stopRun(run));
+  // 收紧也生效（run-openai 的门是函数 level，实时读）：切 plan 落值
+  assert.equal(setRunMode(run.id, 'plan'), true);
+  assert.equal(run.mode, 'plan');
+  // 放宽：落值 + 放行挂起/排队的 permission
+  const p1 = askUser(run, { reqId: nextReqId(run), kind: 'permission', title: 'Bash', options: [], defaultChoice: 'deny' });
+  assert.equal(setRunMode(run.id, 'bypassPermissions'), true);
+  assert.equal(run.mode, 'bypassPermissions');
+  assert.equal(await p1, 'allow');
+  assert.equal(run.pending, null);
+  // 非法目标不落值
+  assert.equal(setRunMode(run.id, 'wat'), false);
+  assert.equal(run.mode, 'bypassPermissions');
+});
+
 // ---- setRunMode 判档窗口缓冲测试 ----
 // 背景：auto 判档最长 8s，此窗口内 run.startMode 尚未赋值，setRunMode 若直接判「非 default」
 // 会误返回 false（前端误报切换失败）。改为缓冲到 run._pendingMode，待 startMode 赋值后补发。
@@ -216,7 +235,7 @@ test('askUser：run 仍在运行时行为不变（正常挂起等待用户）', 
 // ── 等待审批的上界（无人值守泄漏防线）───────────────────────────
 // 背景：看门狗对 waiting 的兜底附加了「必须有订阅者」条件，关掉网页时挂起的审批
 // **永远**不会 resolve：run 永远 running、gc 跳过、CLI 子进程常驻、
-// active-runs.json 条目永不清除，重启后还会被当孤儿自动续跑并累加 resumeAttempt。
+// run-index.json 条目永不清除，重启后还会被当孤儿自动续跑并累加 resumeAttempt。
 // 设计意图（无人值守不自动拒绝、等用户回来批）要保留，但必须有远端上界。
 
 test('shouldResolveWaiting：有人观看时沿用 15min 兜底', () => {

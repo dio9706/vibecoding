@@ -174,7 +174,7 @@ test('abandonColleagueDev：留痕 + markHandled + 回同事（无凭证时回�
   assert.equal(m.handledNote, '作废（需求已离开开发期） · T');
 });
 
-test('dispatchColleagueDev 主路径：建子会话、busy 带 convId、以 bypassPermissions 起新上下文 run', async (t) => {
+test('dispatchColleagueDev 主路径：建子会话、busy 带 convId、以无人值守策略起新上下文 run', async (t) => {
   const { c, r, wtDir } = setupDevReq('cd-main-');
   let seen = null;
   await dispatchColleagueDev(getRequirement(r.id), { msgId: 'm1', colleagueId: c.id, prompt: 'P', title: 'T' }, {
@@ -192,7 +192,8 @@ test('dispatchColleagueDev 主路径：建子会话、busy 带 convId、以 bypa
   assert.equal(after.busy.kind, COLLEAGUE_DEV_KIND);
   assert.equal(after.busy.convId, sub.convId, 'busy.convId 指向新建的子会话，前端接流与 healStaleBusy 都靠它');
   assert.equal(after.busy.runId, seen.run.id);
-  assert.equal(seen.opts.mode, 'bypassPermissions');
+  assert.equal(seen.opts.unattended, true, 'T6：无人值守策略由 startClaudeRun 按 bot.execPolicy 解析');
+  assert.equal(seen.opts.mode, undefined, '不再写死 mode：策略由 execPolicy/unattended 解析（bypass 档 = 原 bypassPermissions）');
   assert.equal(seen.opts.convId, sub.convId);
   assert.equal(seen.opts.session, undefined, '新上下文，不 resume devSession');
   assert.equal(typeof seen.run.onSettle, 'function');

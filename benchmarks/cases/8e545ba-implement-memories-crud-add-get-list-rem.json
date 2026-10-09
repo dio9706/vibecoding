@@ -1,0 +1,16 @@
+{
+  "id": "8e545ba-implement-memories-crud-add-get-list-rem",
+  "title": "implement memories CRUD (add/get/list/remove/patch)",
+  "type": "feature",
+  "input": "记忆库的「记忆条目」要完整可用：新增（同 id 幂等、缺 id 报错）、按 id 查询、列出全部（空库返回空数组）、删除（不存在静默跳过、缺 id 报错）、局部更新（不存在静默跳过、不许覆盖 id、空改动不写盘）。",
+  "analysis": "",
+  "fixRef": "8e545ba",
+  "baseRef": null,
+  "testFiles": [
+    "src/store/memory-bank.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "memory-bank"
+  ]
+}

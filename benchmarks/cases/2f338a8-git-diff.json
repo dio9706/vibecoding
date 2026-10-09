@@ -1,0 +1,14 @@
+{
+  "id": "2f338a8-git-diff",
+  "title": "需求归档时收割 git diff 文件至功能账本",
+  "type": "feature",
+  "input": "需求归档时，把这次改动涉及的 git diff 文件清单收割进功能账本（按功能标签归集），方便以后按功能查历史改动。功能标签从需求文档的标签段解析；没有标签就跳过；收割过程（git 命令）失败不能影响归档本身。",
+  "analysis": "",
+  "fixRef": "2f338a8",
+  "baseRef": null,
+  "testFiles": [
+    "src/entrypoints/web/requirement-ops.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": []
+}

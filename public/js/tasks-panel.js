@@ -281,6 +281,14 @@ export function bindTasksNav(openFn, isActiveFn) { _openTasksView = openFn; _isT
           }
           card.appendChild(br);
         }
+        // 自检门结果：summary 由后端 verifier.logic 统一产出（卡片与面板同源，防文案分叉）
+        if (t.verify && t.verify.summary) {
+          const vf = document.createElement('div');
+          vf.style.cssText = 'font-size:11px;margin-top:4px;color:' +
+            (t.verify.skipped ? 'var(--faint)' : t.verify.ok ? 'var(--green)' : 'var(--red)');
+          vf.textContent = (t.verify.ok ? '🔍 ' : '⚠️ ') + t.verify.summary;
+          card.appendChild(vf);
+        }
         // Claude 分析产出
         if (t.analysis && t.analysis.suggestion) {
           const a = document.createElement('div');

@@ -1,0 +1,16 @@
+{
+  "id": "581850f-saveprojectmap-loadprojectmap-updatemodu",
+  "title": "持久化 — saveProjectMap + loadProjectMap + updateModule + deleteProjectMap",
+  "type": "feature",
+  "input": "代码地图要能持久化：把扫描出来的地图保存到磁盘（按项目存）并能读回，支持只改某一个模块、也支持整个删掉；保存和读取要有往返验证，落盘路径口径要一致。",
+  "analysis": "",
+  "fixRef": "581850f",
+  "baseRef": null,
+  "testFiles": [
+    "tests/project-map/collect-facts.logic.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "project-map"
+  ]
+}

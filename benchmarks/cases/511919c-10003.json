@@ -1,0 +1,17 @@
+{
+  "id": "511919c-10003",
+  "title": "新增 \\10003 新建会话指令处理器",
+  "type": "feature",
+  "input": "给管理员加一条固定口令：发送指定文案就新建一个飞书会话（可以带标题、工作目录等参数），只对可信提交人生效，普通消息不能被误触发。",
+  "analysis": "",
+  "fixRef": "511919c",
+  "baseRef": null,
+  "testFiles": [
+    "src/plugins/team-tools/create-session/index.test.js",
+    "src/plugins/team-tools/create-session/logic.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "feishu"
+  ]
+}

@@ -49,12 +49,14 @@ test('反查表：预设 baseURL 无重复（否则反查会覆盖）', () => {
   assert.equal(new Set(urls).size, urls.length, '存在重复的预设 baseURL');
 });
 
-// 引导页的厂商下拉由 VENDOR_PRESETS 动态生成（不像设置页那样硬编码 option），
-// 依赖每个预设都有 label 与 models 数组
-test('每个预设都有 label 与 models 数组（引导页下拉生成依赖）', () => {
+// 多模型改版（2026-10-08）后预设不再携带静态模型列表：模型由添加后 /models 发现。
+// 引导页与设置页的厂商下拉仍依赖每个预设都有非空 label 与字符串 baseURL（custom 允许空）。
+test('每个预设都有非空 label；不再携带静态 models 列表', () => {
   for (const [key, p] of Object.entries(VENDOR_PRESETS)) {
     assert.equal(typeof p.label, 'string', `${key} 缺 label`);
     assert.ok(p.label.length > 0, `${key} 的 label 为空`);
-    assert.ok(Array.isArray(p.models), `${key} 的 models 不是数组`);
+    assert.equal(typeof p.baseURL, 'string', `${key} 的 baseURL 不是字符串`);
+    assert.equal('models' in p, false, `${key} 不应再携带静态模型列表（模型改为 API 发现）`);
+    if (key !== 'custom') assert.ok(p.baseURL.length > 0, `${key} 的 baseURL 为空`);
   }
 });

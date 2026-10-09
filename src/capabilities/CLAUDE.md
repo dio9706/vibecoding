@@ -1,6 +1,6 @@
 # src/capabilities · 模块地图
 
-**定位**：通用能力层——无业务语义、可被 `features`/`plugins` 复用的基础设施。按分层单向依赖，本层只向下依赖 `integrations`/`store`/`shared`，不 import 上层。核心能力包括：备用账号轮换（`token-rotation`）、两种形态互补的 LLM 调用骨架（`llm-classify` 单轮零工具 / `llm-readonly-agent` 多轮只读），以及 agent 工具注册表与对话骨架（`agent-tools` 工具注册 + 危险级校验 + 按角色装配 MCP server / `agent-session` 多轮带工具、跨消息续跑的对话循环，供 `plugins/colleague-agent` 这类持久对话 agent 使用）。
+**定位**：通用能力层——无业务语义、可被 `features`/`plugins` 复用的基础设施。按分层单向依赖，本层只向下依赖 `integrations`/`store`/`shared`，不 import 上层。核心能力包括：备用账号轮换（`token-rotation`）、**工具策略引擎**（`tool-policy`：规则表 + 运行时门，两条 provider 路径与无人值守共用，T6）、两种形态互补的 LLM 调用骨架（`llm-classify` 单轮零工具 / `llm-readonly-agent` 多轮只读），agent 工具注册表与对话骨架（`agent-tools` 工具注册 + 危险级校验 + 按角色装配 MCP server / `agent-session` 多轮带工具、跨消息续跑的对话循环，供 `plugins/colleague-agent` 这类持久对话 agent 使用），以及「委托同事对话」子引擎（`feishu-ask`：派发提问 → LLM 判定/自动追问 → 得出结论交回主 agent）。
 
 ## 文件清单
 
@@ -15,6 +15,22 @@
 | `agent-tools.test.js` | 注册校验、按角色过滤、MCP 装配的单测。 |
 | `agent-session.js` | 对话型 LLM 骨架：`runAgentTurn` 跑一轮**带业务工具、跨消息续跑**的对话（靠 SDK `resume` 维持长期 thread，与另外两种骨架的一次性调用不同）。唯一消费者是 `plugins/colleague-agent`。 |
 | `agent-session.test.js` | 注入假 `query`：工具调用、拒绝、超时、解析失败四条路径的单测。 |
+| `verifier.js` | 验证器：跑**一条 owner 配置的**验证命令并归一结果（通过/失败/超时/跳过）。命令来源：显式配置 > 自动发现（`package.json` 有真实 test 脚本 → `npm test`，`resolveVerifyCommand`）> 空串按「未配置」跳过。fail-open 边界：未配置、命令不可用（`where`/`command -v` 探测）算跳过；正常执行的非零退出/超时才算失败。硬约束：命令只来自人配置或工程 test 脚本，任何运行时数据不得拼入。 |
+| `verifier.logic.js` | 验证器纯函数：输出头尾截断、时长/摘要格式化、任务字段归一（输出与记录分离）、自动发现判定（`discoverVerifyCommand`，剔除 npm init 占位脚本）。 |
+| `verifier.test.js` / `verifier.logic.test.js` | 真 shell（tmp 工作区）与纯函数单测。 |
+| `tool-policy.logic.js` | **工具策略规则表**（T6）：`classifyTool`（read/write/execute/network/agent/other）、六档矩阵（四档 mode + 无人值守 standard/trusted）、危险命令 deny 名单（`detectDangerousCommand`，独立于档位、宁漏勿误杀；含删根/毁盘/关机/炸弹/全盘改权限/**进程击杀类 taskkill/pkill/killall/Stop-Process/kill -N**，A8）、安全命令表（`isSafeCommand`，只认单段命令）、`resolveUnattendedPolicy`（`bot.execPolicy` → 档位 + SDK mode）。零 IO；路径判定复用 `shared/workspace-paths`。 |
+| `tool-policy.js` | 策略运行时门：`createPolicyGate`（无人值守 ask→deny 翻译 + 策略拦截计次、`onFuse` 恰一次；交互路径只 deny 不熔断）、`PRETOOL_ASK_HOOK`、`buildUnattendedClaudeOpts`（直调 `runClaude` 的无人值守选项拼装；bypass 档不装门 = 与改动前一致）。**不 import store/runs**：停 run 与通知由调用方在回调里做。 |
+| `tool-policy*.test.js` | 规则表表驱动（6 档×类别×区内/外）；危险命令正/反例；安全命令边界（链式/重定向不放行）；门的行为（翻译/计次/熔断/别名/回调容错）。 |
+| `feishu-ask.js` | 「委托同事对话」核心：内存委托注册表 + 发起（发卡片/留痕）+ 同事回复截获（`handleColleagueAskReply`）+ 判定步进（追问/结算）+ `waitForReply`（打心跳防看门狗）。 |
+| `feishu-ask.logic.js` | 委托对话的纯函数：职位目标解析、询问卡、判定 prompt、判定结果解析、转录格式化。 |
+| `feishu-ask-tools.js` | 工具面：`AskColleague`（走审批）/ `WaitColleagueReply`（免审批）两个模型工具，装配在 `entrypoints/web/run-openai.js`。 |
+| `web-tools.logic.js` | **联网工具纯函数**（A7）：`normalizeFetchUrl`（仅 http/https）、`htmlToText`/`decodeEntities`/`clipText`（HTML→可读文本）、`buildSearchRequest`/`parseSearchResults`/`formatSearchResults`（tavily/brave/bocha 三家的请求构造与响应解析，`SEARCH_PROVIDERS` 白名单）。零 IO。 |
+| `web-tools.js` | 联网工具运行时（A7）：`createWebTools({search, fetchImpl})` → `WebFetch`（15s 超时/1MB 流式上限/HTML→文本）+ `WebSearch`（未配 key 返回指引文案；401 提示检查 key）。审批走策略表网络类（`NET_TOOLS`）。 |
+| `subagent.logic.js` | **只读子代理纯函数**（A7）：`READONLY_SUBAGENT_TOOL_NAMES`（Read/Glob/Grep/WebFetch/WebSearch/RepoMap）、`pickReadonlyToolDefs`（**不含 Task → 天然禁递归**）、`buildSubagentSystemPrompt`、`SUBAGENT_TOOL_DEF`。装配/嵌套执行在 `entrypoints/web/run-openai.js`。 |
+| `feishu-ask*.test.js` | 三件套单测：纯函数 / 注册表与引擎（注入桩件，不触网络）/ 工具文案。 |
+| `builtin-mcp.js` | 内置 MCP 注册表（context7 / Figma 双形态）：按开关+目标路径解析、npx 平台形态、密钥只进 env、SDK 形态映射、本地服务探测。命令是代码常量，不接受运行时数据。 |
+| `builtin-skills.js` | 内置 Skills 注册表（Superpowers）：白名单（与 fetch 脚本共用）、安装判定（plugin.json + skills 同在）、清单解析（`listItems` 附 per-skill 项）、`resolveSkillPlugins`（启用且已安装才产出 SDK 本地插件条目；存在停用项时先物化「启用视图」镜像——`materializeSkillPlugin`，打包态镜像落 APP_DATA_DIR）。 |
+| `builtin-mcp.test.js` / `builtin-skills.test.js` | 注册表一致性（与 `shared/builtin-ids` 严格对齐）、开关/路径/密钥/平台、安装判定与插件解析。 |
 
 ## 关键流程
 
@@ -55,12 +71,23 @@ llm-classify ────────────→ token-rotation
 
 `agent-session.js` 与另外两个骨架（`llm-classify`/`llm-readonly-agent`）的分工差别只有一点：**`resume`**。另外两个都是一次性调用（`persistSession:false`）；本骨架靠 SDK 的 `resume: sessionId` 维持「这个人上次跟我聊了什么」的长期 thread，调用方自己存取 session id（`colleague-agent` 存在 `store/colleague-messages.js` 的 `agentSessionId` 字段里）作为锚点。
 
+### 流程五：委托同事对话（`feishu-ask`，供 openai-compat 路径）
+
+主 agent 遇到「只有同事知道」的问题时调 `AskColleague`：按 role/name 在同事名册定位唯一目标 → 发飞书询问卡 → 内存注册表登记委托（同一同事仅一条进行中）→ 立即返回 questionId（非阻塞，主 agent 继续干别的）。
+
+同事回复走飞书进程 relay → web 的 `/api/req/colleague-agent/turn`，`handleColleagueAskReply` 在**同事对话 agent 之前**截获（插件停用也照截，该闭环不依赖 colleague-agent）：**判定引擎**（复用 `llm-classify` 单轮 JSON 骨架，模型 `config.feishuAsk.model`）看「原问题 + 对话记录」决定 done 还是 followUp —— 未结论则自动代发追问（上限 `MAX_FOLLOW_UPS`），达上限结算 `abandoned`（如实交回已有信息），有结论则结算 `concluded`。
+
+主 agent 用 `WaitColleagueReply` 拿结论（等待期间打心跳，避免被看门狗当静默卡死）；**等待超时 / 运行中断 = 取消整个委托**（不再自动追问打扰同事），迟到回复从注册表脱落、回落同事对话 agent。注册表在内存：委托绑定在 run 生命周期上，落盘只会制造无人认领的追问。
+
 ### 消费者速览
 
 - **分类骨架**：`app/intent.js`、`plugins/team-tools/task-triage`、`plugins/team-tools/bug-patrol`、`plugins/action-runner/feature/slot-filler`、`plugins/tracking-stats/understand.js`（用 Detailed）、`features/project-checkup`、`features/memory-bank/extract.js`、`features/project-optimize/describe-skill.js`、`entrypoints/web/req-inspect.js`。
 - **只读骨架**：`features/project-optimize/gen-map.js`。
 - **`claudeAuthOpts` 直接接入**：`entrypoints/web/tier.js`、`entrypoints/web/requirement-ops.js`、`plugins/team-tools/*`（task-ops/review/project-qa）等。
 - **agent 工具注册表 / 对话骨架**：唯一消费者是 `plugins/colleague-agent`（`index.js` 注册工具，`session.js` 调 `buildAgentMcpServer` + `runAgentTurn`）。
+- **委托同事对话**：装配在 `entrypoints/web/run-openai.js`（`feishu-ask-tools`），同事回复截获在 `entrypoints/web/routes-requirements.js` 的 turn 路由；判定引擎复用 `llm-classify`。
+- **验证器**：`plugins/team-tools/auto-dev/verify.js`（自动开发自检门，Phase 1；Phase 2 起未配置时自动发现 `npm test`，设置页可配、任务面板展示结果）。
+- **内置能力**：`capabilities/builtin-mcp.js`（openai 路径偏 `run-openai.js` 合并；Claude 路径偏 `run-claude.js` 转 SDK 形态）与 `capabilities/builtin-skills.js`（`run-claude.js` 注入插件——含 per-skill 停用时的启用视图镜像；`routes-settings.js` 的 `/api/builtins` 出清单与 per-skill 开关；chat 工具弹层同源渲染）。
 
 ## 常见改动入口
 
@@ -76,3 +103,7 @@ llm-classify ────────────→ token-rotation
 - 要**放宽/收紧某档危险级的注册期校验**，就改 `agent-tools.js#validateToolDef`（四档不变式都收在这一个函数里；改之前想清楚是不是在加一条新的硬约束，而不是给已有的开口子）。
 - 要**改一轮 agent 对话的超时/取消语义**，就改 `agent-session.js` 的 `AGENT_TURN_TIMEOUT_MS` 与 `runAgentTurn` 里的 `AbortController`/`signal` 逻辑；组装 `query()` options 那部分单独抽成了纯函数 `buildTurnOptions`，改文件头那两个「用错就静默失效」的坑时看这里。
 - 要**让某个分类调用点支持中止**，就在该调用点传 `signal`（`llm-classify` 已支持，不传即行为不变）；目前只有体检链路的三处传了（`audit-engine` / `check-prompts` / `check-comments`）。
+- 要**改委托同事对话的行为**（追问上限/TTL/判定 prompt/目标解析），就改 `feishu-ask.logic.js`（纯函数）与 `feishu-ask.js`（注册表/引擎）；工具文案在 `feishu-ask-tools.js`，装配/审批在 `run-openai.js`，路由截获在 `routes-requirements.js`。
+- 要**改验证命令的执行/判定语义**（超时、fail-open 边界、命令探测、输出截断/摘要），就改 `verifier.js` / `verifier.logic.js`；**自动发现规则**（何时把工程默认成 `npm test`、如何识别占位脚本）在 `verifier.logic.js#discoverVerifyCommand` + `verifier.js#resolveVerifyCommand`。
+- 要**改内置 MCP/Skills**（新增内置项、默认值、平台命令、白名单技能、安装判定），就改 `builtin-mcp.js` / `builtin-skills.js`（id 白名单同步 `shared/builtin-ids.js`，per-skill 项白名单=`SUPERPOWERS_SKILL_IDS`）；拉取逻辑在 `scripts/superpowers-fetch.mjs`；设置页 UI 在 `public/js/settings-panel.js`（「内置能力」区，per-skill 明细可折叠）；chat 工具弹层在 `public/js/chat.js#refreshToolsSection`。
+- 要**改 per-skill 开关的存储/接口/物化语义**，依次看：`shared/builtin-ids.js`（白名单）→ `store/settings.js`（`normalizeBuiltinState` 的 `disabledSkills` 过滤 + `setBuiltinSkillItem`）→ `routes-settings.js`（PUT 的 `skillId` 分支）→ `builtin-skills.js`（`materializeSkillPlugin` 镜像与戳）。改的是「停用哪些」而不是「启用哪些」：新增技能默认启用。

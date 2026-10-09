@@ -4,7 +4,7 @@
  *   断开只退订、绝不中断；完成后留存一段时间供重连读取。
  * 健壮性：每个 run 挂 AbortController + 看门狗（静默过久/总时长超顶自动中断并报错）。
  * 仅内存（不落盘）—— 能扛「关/刷新网页」，扛不了「node 进程重启」（SDK 子进程随之死）；
- * 重启中断的任务由 store/active-runs 落盘镜像 + web 入口启动恢复逻辑自动续跑（发「继续」）。
+ * 重启中断的任务由 store/run-index 落盘锚点 + web 入口启动对账自动续跑（见 run-reconcile.logic.js）。
  */
 
 import { logger } from '../shared/logger.js';
@@ -26,7 +26,7 @@ const WAIT_MAX_MS = 15 * 60 * 1000; // 有人观看时，等待用户决策的�
 /**
  * 无人值守（关了网页、无订阅者）时等待审批的**远端上界**。
  * 原逻辑对 waiting 的兜底附加了「必须有订阅者」条件，于是关掉网页的挂起审批永远不会 resolve：
- * run 永远 running → gc 跳过 → CLI 子进程常驻 → active-runs.json 条目永不清除
+ * run 永远 running → gc 跳过 → CLI 子进程常驻 → run-index.json 条目永不清除
  * → 重启后还被当孤儿自动续跑并累加 resumeAttempt。
  * 「不因无人应答就自动拒绝后台任务」这个设计意图要保留，所以这里取一个足够长、
  * 覆盖整个工作日离开场景的值，而不是把它降到 15 分钟。
@@ -72,6 +72,10 @@ export function createRun() {
     activities: [], // 工具活动流水（转录用，capped）
     todos: [], // TodoWrite 任务清单最新快照
     heldMsgs: [], // 插话持有缓冲：[{id,text}]，未进任务可撤回；本轮 result 时 flush 进 SDK
+    // busy inbox 能力模型（T2-P4，替代旧的 steerHold 布尔）：steer=消息可进当前 run；
+    // followUp=消息可排队为下一轮（当前 run 终结后由 conv-inbox 排空起新 run）。
+    // 由各 provider 入口设置：Claude steer:true；openai steer:false, followUp:true。
+    capabilities: { steer: false, followUp: false },
     modelInfo: null, // { model, effort } —— auto 判档结果（判档异步，经 model 事件/重放告知前端）
     pending: null, // 当前展示给用户的 ask：{ reqId, kind, title, body, options, defaultChoice, resolve }
     pendingQueue: [], // 排队中的 ask：SDK 对同轮并行 tool_use 会并发调 canUseTool，只能逐个呈现，覆盖会丢 resolve
@@ -90,6 +94,7 @@ export function createRun() {
     createdAt: now,
     updatedAt: now,
     _watchdog: null,
+    _journalSeq: 0, // run 事件流序号（见 emitRunEvent；未注册 sink 时不递增）
   };
   runs.set(run.id, run);
   run._watchdog = setInterval(() => {
@@ -181,6 +186,53 @@ function fanout(run, event, data) {
   }
 }
 
+// ---- Run 事件流（journal sink）----
+// runs.js 保持纯内存：事件经注册的 sink 送往落盘实现（真实接线见 entrypoints/web/run-durability.js）。
+// 与 registerRunSettleListener 同范式：store 不 import 上层，谁注册谁写；无 sink 时事件静默丢弃
+// （单测进程不落盘、不污染工作区）。绝不因落盘失败影响 run 状态推进与 SSE：
+// sink 的同步异常与 thenable rejection 全部吞掉（先例 emitSettled）。
+const journalSinks = [];
+
+export function registerRunJournalSink(fn) {
+  if (typeof fn === 'function') journalSinks.push(fn);
+}
+
+/** journal/索引里的文本截断：事件流是事实骨架，不做全文归档（原文在消息与持有区里） */
+export function truncateForJournal(text, max = 2000) {
+  const s = typeof text === 'string' ? text : '';
+  return s.length > max ? s.slice(0, max) + '…' : s;
+}
+
+/**
+ * 发一条 run 事件。schema 见 T2 spec §4.2：`{ v:1, seq, runId, convId, at, type, data }`。
+ * seq 为 run 内单调序号；run-claude 的 submitted/started/resumed 也走这里（此时 convId 须已挂）。
+ */
+export function emitRunEvent(run, type, data) {
+  if (!run || journalSinks.length === 0) return;
+  const event = {
+    v: 1,
+    seq: ++run._journalSeq,
+    runId: run.id,
+    convId: run.convId || null,
+    at: Date.now(),
+    type,
+    data: data || {},
+  };
+  for (const fn of journalSinks) {
+    try {
+      const ret = fn(event);
+      if (ret && typeof ret.then === 'function') ret.then(undefined, () => {});
+    } catch {
+      /* 落盘失败绝不影响 run 收尾与 SSE */
+    }
+  }
+}
+
+/** settled 事件的数据形状（五个终结口共用） */
+function settleEventData(run) {
+  return { status: run.status, subtype: run.subtype, attempts: run.resumeAttempt ?? null };
+}
+
 // ---- 以下由 runClaude 回调驱动状态推进（每次都 touch 刷新看门狗计时）----
 /** SDK 流上任一消息到达即视为存活（含子代理流事件/工具结果），仅刷新看门狗计时 */
 export function runPulse(run) {
@@ -188,6 +240,7 @@ export function runPulse(run) {
 }
 export function runSession(run, sessionId) {
   run.session_id = sessionId;
+  emitRunEvent(run, 'session', { session_id: sessionId });
   touch(run);
   fanout(run, 'session', { session_id: sessionId });
 }
@@ -242,6 +295,7 @@ export function askUser(run, ask) {
       defaultChoice: ask.defaultChoice,
       resolve,
     };
+    emitRunEvent(run, 'ask', { reqId: p.reqId, kind: p.kind, title: p.title });
     if (run.pending) run.pendingQueue.push(p);
     else presentAsk(run, p);
   });
@@ -290,20 +344,54 @@ export function resolveDecision(runId, reqId, choice) {
   const run = runs.get(runId);
   if (!run || !run.pending || run.pending.reqId !== reqId) return false;
   const p = run.pending;
+  emitRunEvent(run, 'decision', { reqId, choice: String(choice ?? '') });
   advanceAsk(run);
   p.resolve(choice);
   return true;
 }
 
 /**
- * 运行中切换权限模式（仅放宽）：只有「询问」起跑的 run 可即时生效——
- * 起跑时装了 PreToolUse ask 钩子，所有工具都会经 canUseTool，改 run.mode 即可放行。
- * 放宽同时自动放行挂起/排队的 permission 询问；dialog（交互提问）保序保留。
- * 非询问起跑的 run 没装钩子，工具不经回调，中途无从拦截 → 返回 false（下一条消息生效）。
+ * 运行中切换权限模式。
+ *
+ * Claude（仅放宽）：只有「询问」起跑的 run 可即时生效——起跑时装了 PreToolUse ask 钩子，
+ * 所有工具都会经 canUseTool，改 run.mode 即可放行。非询问起跑的 run 没装钩子，
+ * 工具不经回调，中途无从拦截 → 返回 false（下一条消息生效）。
+ *
+ * openai-compat（四档可切）：策略门**实时读 run.mode**（run-openai 传的是函数），
+ * 把档位落值即对后续工具调用生效——收紧（plan/default）同样即时。放宽时顺手放行
+ * 挂起/排队的 permission；dialog（交互提问）保序保留。
+ *
+ * @returns {boolean} 是否已落值生效（false = 调用方应提示「下一条消息生效」或「不可切换」）
  */
 export function setRunMode(runId, mode) {
   const run = runs.get(runId);
   if (!run || run.status !== 'running') return false;
+  const allowPendingPermissions = () => {
+    // 排队中的 permission 直接放行；dialog 保序留下
+    const keep = [];
+    for (const p of run.pendingQueue) {
+      if (p.kind === 'permission') {
+        emitRunEvent(run, 'decision', { reqId: p.reqId, choice: 'allow', via: 'set_mode' });
+        p.resolve('allow');
+      } else keep.push(p);
+    }
+    run.pendingQueue = keep;
+    // 展示位是 permission → 放行；advanceAsk 会让队列下一个（若有）上位并广播
+    if (run.pending && run.pending.kind === 'permission') {
+      const p = run.pending;
+      emitRunEvent(run, 'decision', { reqId: p.reqId, choice: 'allow', via: 'set_mode' });
+      advanceAsk(run);
+      p.resolve('allow');
+    }
+    if (!run.pending) fanout(run, 'ask', null); // 通知前端撤下已展示的审批弹窗
+  };
+  if (run.provider === 'openai-compat') {
+    if (!['default', 'acceptEdits', 'plan', 'bypassPermissions'].includes(mode)) return false;
+    run.mode = mode;
+    if (mode === 'acceptEdits' || mode === 'bypassPermissions') allowPendingPermissions();
+    touch(run);
+    return true;
+  }
   // 判档窗口内（startMode 尚未赋值，最长 8s）：先缓冲，待 startClaudeRun 补发
   if (run.startMode === null) {
     run._pendingMode = mode;
@@ -312,20 +400,7 @@ export function setRunMode(runId, mode) {
   if (run.startMode !== 'default') return false;
   if (mode !== 'acceptEdits' && mode !== 'bypassPermissions') return false;
   run.mode = mode;
-  // 排队中的 permission 直接放行；dialog 保序留下
-  const keep = [];
-  for (const p of run.pendingQueue) {
-    if (p.kind === 'permission') p.resolve('allow');
-    else keep.push(p);
-  }
-  run.pendingQueue = keep;
-  // 展示位是 permission → 放行；advanceAsk 会让队列下一个（若有）上位并广播
-  if (run.pending && run.pending.kind === 'permission') {
-    const p = run.pending;
-    advanceAsk(run);
-    p.resolve('allow');
-  }
-  if (!run.pending) fanout(run, 'ask', null); // 通知前端撤下已展示的审批弹窗
+  allowPendingPermissions();
   touch(run);
   return true;
 }
@@ -345,6 +420,13 @@ export function runResult(run, info) {
   run.result = info.result || '';
   run.inputTokens = info.inputTokens ?? 0;
   run.outputTokens = info.outputTokens ?? 0;
+  // 多轮 run 的每轮 result 都记一条（覆盖式字段不丢历史）
+  emitRunEvent(run, 'result', {
+    subtype: run.subtype,
+    isError: run.is_error,
+    inputTokens: run.inputTokens,
+    outputTokens: run.outputTokens,
+  });
   touch(run);
 }
 
@@ -354,6 +436,7 @@ let heldSeq = 0;
 export function holdMsg(run, text) {
   const id = 'hm_' + Date.now().toString(36) + '_' + ++heldSeq;
   run.heldMsgs.push({ id, text });
+  emitRunEvent(run, 'steer', { msgId: id, text: truncateForJournal(text) });
   touch(run);
   fanout(run, 'queue', { held: run.heldMsgs.map((m) => m.id) });
   return id;
@@ -363,6 +446,7 @@ export function withdrawHeldMsg(run, msgId) {
   const i = run.heldMsgs.findIndex((m) => m.id === msgId);
   if (i < 0) return false;
   run.heldMsgs.splice(i, 1);
+  emitRunEvent(run, 'steer_withdrawn', { msgId });
   touch(run);
   fanout(run, 'queue', { held: run.heldMsgs.map((m) => m.id) });
   return true;
@@ -375,6 +459,7 @@ export function flushHeldMsgs(run) {
   for (const m of run.heldMsgs) if (run._input.push(m.text)) ids.push(m.id);
   run.heldMsgs = run.heldMsgs.filter((m) => !ids.includes(m.id));
   if (ids.length) {
+    emitRunEvent(run, 'steer_consumed', { msgIds: ids, via: 'flush' });
     touch(run);
     fanout(run, 'consumed', { msgIds: ids });
   }
@@ -383,7 +468,11 @@ export function flushHeldMsgs(run) {
 /** 额度用尽路径：取出持有消息并按「已进入任务」广播（文本将并入待续跑 prompt） */
 export function consumeHeldMsgs(run) {
   const msgs = run.heldMsgs.splice(0);
-  if (msgs.length) fanout(run, 'consumed', { msgIds: msgs.map((m) => m.id) });
+  if (msgs.length) {
+    const ids = msgs.map((m) => m.id);
+    emitRunEvent(run, 'steer_consumed', { msgIds: ids, via: 'quota' });
+    fanout(run, 'consumed', { msgIds: ids });
+  }
   return msgs;
 }
 /** 立即生效打断当前轮后：作废该轮挂起的 ask（按默认值兜底），并通知前端撤下弹窗 */
@@ -401,7 +490,113 @@ function unsentField(run) {
   const msgs = run.heldMsgs.splice(0);
   run.unsentIds = msgs.map((m) => m.id);
   run.unsentMsgs = msgs; // 保留全量 {id,text}，供 onRunSettled 自动重注入时兜底
+  emitRunEvent(run, 'steer_unsent', { msgIds: run.unsentIds });
   return { unsent: run.unsentIds };
+}
+
+// ---- conv 级 busy inbox：follow-up 队列（T2-P4，spec §4.4）----
+// 语义：同 conv 有 running run 时，不支持 steer 的 provider（当前为 openai-compat）收到的新消息
+// 不并发起第二个 run，而是排队（follow-up）；当前 run 终结后由 web 入口的排空监听
+// （entrypoints/web/conv-inbox.js）取快照起下一轮。队列是纯内存的：进程重启即丢
+//（journal 里 follow_up 事件留有事实，跨重启恢复不在本期范围——与 runs 注册表同寿命）。
+const followUpInbox = new Map(); // convId -> item[]
+// 最近「已排空启动」的记录：前端轮询 /api/run/pending 据此发现新 run 并接流——排空的 run 不在
+// runs 待续跑表里，没有这份映射就没人知道该接哪条流。保留 30min / 50 条，前端 15s 周期兜底。
+const followUpStarts = []; // [{ convId, runId, ids, at }]
+const FOLLOW_UP_START_KEEP_MS = 30 * 60 * 1000;
+const FOLLOW_UP_START_MAX = 50;
+let followUpSeq = 0;
+
+/**
+ * 构造一条排队项。上下文快照取自入队时运行中的 run，排空起新 run 时原样复用
+ *（spec §4.4：`{ text, source, cwd, session, model, effort, mode, provider, credId }`）。
+ */
+export function buildFollowUpItem(run, { text, source = 'web' } = {}) {
+  return {
+    text,
+    source,
+    cwd: run?.cwd || null,
+    session: run?.session_id || null,
+    model: run?.model || null,
+    effort: run?.effort ?? null,
+    mode: run?.mode || null,
+    provider: run?.provider || null,
+    credId: run?.credId || null,
+    runId: run?.id || null, // 入队时所在 run（诊断用；排空不依赖它）
+  };
+}
+
+/** 排队一条 follow-up（同 conv 有 running run 时调用）；返回排队项 id */
+export function enqueueFollowUp(convId, item) {
+  if (!convId) return null;
+  const id = 'fu_' + Date.now().toString(36) + '_' + ++followUpSeq;
+  const entry = { id, at: Date.now(), ...item };
+  const list = followUpInbox.get(convId) || [];
+  list.push(entry);
+  followUpInbox.set(convId, list);
+  const running = findRunningRunByConv(convId);
+  if (running) emitRunEvent(running, 'follow_up', { id, text: truncateForJournal(entry.text), source: entry.source });
+  return id;
+}
+
+/** 该 conv 排队中的 follow-up 列表（副本，旧→新） */
+export function listFollowUps(convId) {
+  return convId ? [...(followUpInbox.get(convId) || [])] : [];
+}
+
+/** 取出该 conv 全部排队项并从队列移除（排空启动新 run 前调用） */
+export function takeFollowUps(convId) {
+  if (!convId) return [];
+  const list = followUpInbox.get(convId) || [];
+  followUpInbox.delete(convId);
+  return list;
+}
+
+/** 撤回一条尚未排空的 follow-up；成功返回 true */
+export function cancelFollowUp(convId, id) {
+  if (!convId || !id) return false;
+  const list = followUpInbox.get(convId);
+  if (!list) return false;
+  const i = list.findIndex((m) => m.id === id);
+  if (i < 0) return false;
+  list.splice(i, 1);
+  if (!list.length) followUpInbox.delete(convId);
+  const running = findRunningRunByConv(convId);
+  if (running) emitRunEvent(running, 'follow_up_cancelled', { id });
+  return true;
+}
+
+/** 记录一次「排队消息已起新 run」；顺带 GC。前端 /api/run/pending 轮询消费 */
+export function markFollowUpStarted(convId, { runId, ids, now = Date.now() } = {}) {
+  followUpStarts.push({ convId, runId: runId || null, ids: Array.isArray(ids) ? ids : [], at: now });
+  gcFollowUpStarts(now);
+}
+
+function gcFollowUpStarts(now = Date.now()) {
+  while (followUpStarts.length && now - followUpStarts[0].at > FOLLOW_UP_START_KEEP_MS) followUpStarts.shift();
+  if (followUpStarts.length > FOLLOW_UP_START_MAX) followUpStarts.splice(0, followUpStarts.length - FOLLOW_UP_START_MAX);
+}
+
+/** 最近已启动的排空记录（旧→新；测试可注入 now 快进 GC） */
+export function listFollowUpStarts(now = Date.now()) {
+  gcFollowUpStarts(now);
+  return followUpStarts.map((e) => ({ ...e, ids: [...e.ids] }));
+}
+
+/** 某条排队项是否已被排空启动（提交幂等重放用）：命中原样返回记录，否则 null */
+export function findFollowUpStartByItem(id, now = Date.now()) {
+  if (!id) return null;
+  gcFollowUpStarts(now);
+  for (let i = followUpStarts.length - 1; i >= 0; i--) {
+    if (followUpStarts[i].ids.includes(id)) return { ...followUpStarts[i], ids: [...followUpStarts[i].ids] };
+  }
+  return null;
+}
+
+/** 清空 inbox 与启动记录（测试用） */
+export function clearFollowUps() {
+  followUpInbox.clear();
+  followUpStarts.length = 0;
 }
 
 /**
@@ -456,6 +651,7 @@ export function finishRun(run) {
     outputTokens: run.outputTokens || 0,
   });
   closeAll(run);
+  emitRunEvent(run, 'settled', settleEventData(run));
   emitSettled(run);
 }
 
@@ -479,6 +675,7 @@ export function failRun(run, message) {
     outputTokens: run.outputTokens || 0,
   });
   closeAll(run);
+  emitRunEvent(run, 'settled', settleEventData(run));
   emitSettled(run);
 }
 
@@ -512,6 +709,7 @@ export function blockRun(run, note) {
   drainAsks(run);
   fanout(run, 'done', { result: run.text, is_error: false, subtype: 'quota_blocked', ...unsentField(run) });
   closeAll(run);
+  emitRunEvent(run, 'settled', settleEventData(run));
   emitSettled(run);
 }
 
@@ -529,6 +727,7 @@ export function retryRun(run, note, retryInMs) {
   drainAsks(run);
   fanout(run, 'done', { result: run.text, is_error: false, subtype: 'exception_retry', retryInMs, ...unsentField(run) });
   closeAll(run);
+  emitRunEvent(run, 'settled', settleEventData(run));
   emitSettled(run);
 }
 
@@ -548,6 +747,7 @@ export function stopRun(run, reason = '已手动停止') {
   drainAsks(run);
   fanout(run, 'done', { result: run.text, is_error: false, subtype: 'stopped', ...unsentField(run) });
   closeAll(run);
+  emitRunEvent(run, 'settled', settleEventData(run));
   emitSettled(run);
 }
 

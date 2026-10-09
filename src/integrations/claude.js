@@ -90,6 +90,8 @@ export async function runClaude(prompt, opts = {}) {
     cwd,
     additionalDirectories,
     env,
+    mcpServers,
+    plugins,
     permissionMode = 'default',
     allowedTools,
     disallowedTools,
@@ -142,6 +144,8 @@ export async function runClaude(prompt, opts = {}) {
           ...(cwd ? { cwd } : {}),
           ...(additionalDirectories?.length ? { additionalDirectories } : {}),
           ...(env ? { env } : {}),
+          ...(mcpServers ? { mcpServers } : {}),
+          ...(plugins?.length ? { plugins } : {}),
           ...(allowedTools ? { allowedTools } : {}),
           ...(disallowedTools ? { disallowedTools } : {}),
           ...(resume ? { resume } : {}),
@@ -222,6 +226,8 @@ export async function runClaude(prompt, opts = {}) {
             session_id: message.session_id,
             inputTokens: usage.input_tokens || 0,
             outputTokens: usage.output_tokens || 0,
+            // SDK result 自带回合数（benchmark 的「回合数」指标口径，缺失为 null 不臆造）
+            numTurns: Number.isFinite(message.num_turns) ? message.num_turns : null,
           });
           inputQueue?.autoClose(); // 无积压插话 → 关闭输入流，query 随之收尾（行为与字符串模式一致）
         }

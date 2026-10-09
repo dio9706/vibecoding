@@ -5,6 +5,9 @@
  */
 import { readJson, updateJson } from './index.js';
 import { DEFAULT_PROVIDER_ID } from '../shared/provider-ids.js';
+import { BUILTIN_MCP_IDS, BUILTIN_SKILL_IDS, SUPERPOWERS_SKILL_IDS } from '../shared/builtin-ids.js';
+import { EXEC_POLICIES } from '../capabilities/tool-policy.logic.js';
+import { SEARCH_PROVIDERS } from '../capabilities/web-tools.logic.js';
 
 const FILE = 'settings.json';
 const DEFAULTS = {
@@ -19,8 +22,21 @@ const DEFAULTS = {
   // taskProjectDir 已迁移为机器人的 projectDir（migrateLegacySettingsToBot）
   // taskNotifyFeishu：任务处理完成后推飞书私聊卡片的总开关。默认关——通知会主动打扰用户，
   // 且依赖 myFeishuOpenId / 启用中的机器人，必须由用户显式开启（task-notify 的第一道守卫读它）
-  uiPrefs: { defaultCwd: '', model: 'auto', effort: 'medium', mode: 'default', defaultModel: '', defaultEffort: '', defaultMode: '', disabledTools: [], taskNotifyFeishu: false, projectMapIdleRefresh: false },
+  uiPrefs: { defaultCwd: '', model: 'auto', effort: 'medium', mode: 'default', defaultModel: '', defaultEffort: '', defaultMode: '', disabledTools: [], taskNotifyFeishu: false, projectMapIdleRefresh: false, openaiMaxSteps: 0 },
   myFeishuOpenId: '', // 我的飞书 open_id：全局身份标识，测试期筛多维表格「属于我的 BUG」用
+  // 内置 MCP 开关：{ [id]: { enabled?, apiKey? } }；缺省值以 capabilities/builtin-mcp 注册表的
+  // defaultEnabled 为准（老 settings 无需迁移，未显式写过就是注册表默认）。未知 id 由 normalize 剔除。
+  builtinMcp: {},
+  // 内置 Skills 开关：{ [id]: { enabled? } }（superpowers 的装载在 Phase 2）
+  builtinSkills: {},
+  // Repo map（代码地图）：给自定义模型会话注入确定性代码索引（文件 + 导出符号），默认开
+  repoMap: { enabled: true },
+  // Bash 执行后端（T6，仅 openai 路径）：local=宿主直接执行（现状）；container=docker/podman 内执行。
+  // backend=container 且引擎不可用时 fail-closed（Bash 报错，不静默退回本地）；network=false 容器无网。
+  exec: { backend: 'local', image: 'node:22-bookworm', network: false },
+  // 联网搜索（仅 openai 路径的 WebSearch 工具）：provider 三选一（tavily/brave/bocha）+ apiKey。
+  // 默认空 = 未配置（工具返回指引文案，不发请求）。
+  search: { provider: '', apiKey: '' },
   // 记忆库：从会话转录提炼用户偏好的调度/预算配置
   memoryBank: {
     enabled: false,        // 默认关闭：提炼要花额度，必须用户显式开启
@@ -52,10 +68,38 @@ export function normalizeSettings(s) {
       ? { ...DEFAULTS.uiPrefs, ...s.uiPrefs }
       : { ...DEFAULTS.uiPrefs },
     myFeishuOpenId: typeof s.myFeishuOpenId === 'string' ? s.myFeishuOpenId.trim() : '',
+    builtinMcp: normalizeBuiltinState(s.builtinMcp, BUILTIN_MCP_IDS),
+    builtinSkills: normalizeBuiltinState(s.builtinSkills, BUILTIN_SKILL_IDS, { skillIds: SUPERPOWERS_SKILL_IDS }),
+    repoMap: { enabled: typeof s.repoMap?.enabled === 'boolean' ? s.repoMap.enabled : DEFAULTS.repoMap.enabled },
+    exec: normalizeExec(s.exec),
+    search: normalizeSearch(s.search),
     memoryBank: s.memoryBank && typeof s.memoryBank === 'object' && !Array.isArray(s.memoryBank)
       ? { ...DEFAULTS.memoryBank, ...s.memoryBank }
       : { ...DEFAULTS.memoryBank },
   };
+}
+
+/**
+ * 内置能力状态归一（纯函数）：只保留白名单 id 的对象条目，enabled 取布尔、apiKey 取非空字符串。
+ * skillIds 传入时额外收录 disabledSkills（技能项白名单过滤 + 去重 + 稳定排序）——只有 Skills 包用。
+ * 未知 id 直接剔除——否则删掉的内置项会在 settings 里留下永不再读的僵尸键。
+ */
+function normalizeBuiltinState(raw, ids, { skillIds = null } = {}) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const id of ids) {
+    const v = raw[id];
+    if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+    const entry = {};
+    if (typeof v.enabled === 'boolean') entry.enabled = v.enabled;
+    if (typeof v.apiKey === 'string' && v.apiKey.trim()) entry.apiKey = v.apiKey.trim();
+    if (skillIds && Array.isArray(v.disabledSkills)) {
+      const disabled = [...new Set(skillIds.filter((sid) => v.disabledSkills.includes(sid)))].sort();
+      if (disabled.length) entry.disabledSkills = disabled;
+    }
+    out[id] = entry;
+  }
+  return out;
 }
 
 export function getSettings() {
@@ -85,8 +129,35 @@ export function normalizeAutonomy(v) {
   return AUTONOMY_LEVELS.includes(v) ? v : 'light';
 }
 
+/**
+ * 无人值守执行档位（T6）：bypass=全放行（默认，与改动前一致）/ standard / trusted。
+ * 枚举本体收在 capabilities/tool-policy.logic.js（规则表＋映射的唯一来源）。
+ */
+export function normalizeExecPolicy(v) {
+  return EXEC_POLICIES.includes(v) ? v : 'bypass';
+}
+
+/** Exec 配置归一（纯函数）：后端白名单 + 镜像名 + network 布尔；非法值 fail-closed 回默认 */
+export function normalizeExec(raw) {
+  const r = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  return {
+    backend: r.backend === 'container' ? 'container' : 'local',
+    image: typeof r.image === 'string' && r.image.trim() ? r.image.trim() : DEFAULTS.exec.image,
+    network: typeof r.network === 'boolean' ? r.network : DEFAULTS.exec.network,
+  };
+}
+
+/** 联网搜索配置归一（纯函数）：provider 三选一白名单 + apiKey trim；非法值回空（未配置） */
+export function normalizeSearch(raw) {
+  const r = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  return {
+    provider: SEARCH_PROVIDERS.includes(r.provider) ? r.provider : '',
+    apiKey: typeof r.apiKey === 'string' ? r.apiKey.trim() : '',
+  };
+}
+
 /** 纯函数：构造一个机器人条目。显式传 id/index/now 保持可测。 */
-export function makeBotEntry({ id, name, platform, appId, appSecret, persona, messages, projectDir, projectNotes, setupScript, autonomy, enabled, index = 0, now }) {
+export function makeBotEntry({ id, name, platform, appId, appSecret, persona, messages, projectDir, projectNotes, setupScript, verifyScript, autonomy, execPolicy, enabled, index = 0, now }) {
   return {
     id,
     name: (name || '').trim() || `机器人 ${index + 1}`,
@@ -98,7 +169,9 @@ export function makeBotEntry({ id, name, platform, appId, appSecret, persona, me
     projectDir: typeof projectDir === 'string' ? projectDir : '', // 事务仅限此工程目录；其他目录只读参考
     projectNotes: typeof projectNotes === 'string' ? projectNotes : '', // 工程说明（后端/前端/figma 等参考信息）
     setupScript: typeof setupScript === 'string' ? setupScript : '', // auto 工作区首建初始化脚本（如 npm install）
+    verifyScript: typeof verifyScript === 'string' ? verifyScript.trim() : '', // 自检命令（空=不验证；只来自 owner 配置）
     autonomy: normalizeAutonomy(autonomy), // 托管程度
+    execPolicy: normalizeExecPolicy(execPolicy), // 无人值守执行档位（T6；默认 bypass=与改动前一致）
     // 注：曾有 per-bot 的 trustedOpenIds（可信提交人白名单），已删除。
     // 它从未接通过任何一端：routes-settings 的 cleanBotInput/botView 不收不吐、设置页没有输入框、
     // 业务侧也早已改成只认基础设置的「我的飞书 open_id」。留一个只写不读的字段，
@@ -124,12 +197,12 @@ export function getActiveBot() {
 }
 
 /** 新增机器人；enabled=true 时互斥禁用其他机器人 */
-export function addBot({ name, platform, appId, appSecret, persona, messages, projectDir, projectNotes, setupScript, autonomy, enabled }) {
+export function addBot({ name, platform, appId, appSecret, persona, messages, projectDir, projectNotes, setupScript, verifyScript, autonomy, execPolicy, enabled }) {
   let created = null;
   updateSettings((s) => {
     created = makeBotEntry({
       id: genId('bot_'),
-      name, platform, appId, appSecret, persona, messages, projectDir, projectNotes, setupScript, autonomy, enabled,
+      name, platform, appId, appSecret, persona, messages, projectDir, projectNotes, setupScript, verifyScript, autonomy, execPolicy, enabled,
       index: s.bots.length,
       now: new Date().toISOString(),
     });
@@ -196,6 +269,104 @@ export function getMcpServers() {
   return getSettings().mcpServers;
 }
 
+// ==== 内置能力（MCP / Skills）开关：只存状态，注册表与默认值在 capabilities 侧 ====
+
+/** 内置 MCP 状态：{ [id]: { enabled?, apiKey? } }；缺省项由注册表 defaultEnabled 兜底 */
+export function getBuiltinMcp() {
+  return getSettings().builtinMcp;
+}
+
+/**
+ * 局部更新内置 MCP 状态。apiKey 传空串 = 清除（不保留空值，防「有 key」判定被空串骗过）。
+ * 未知 id 抛错（白名单在 shared/builtin-ids，与注册表严格一致）。
+ */
+export function setBuiltinMcp(id, patch = {}) {
+  if (!BUILTIN_MCP_IDS.includes(id)) throw new Error(`未知的内置 MCP：${id}`);
+  return updateSettings((s) => {
+    const cur = s.builtinMcp[id] && typeof s.builtinMcp[id] === 'object' ? s.builtinMcp[id] : {};
+    const next = { ...cur };
+    if (typeof patch.enabled === 'boolean') next.enabled = patch.enabled;
+    if (typeof patch.apiKey === 'string') {
+      const key = patch.apiKey.trim();
+      if (key) next.apiKey = key;
+      else delete next.apiKey;
+    }
+    s.builtinMcp = { ...s.builtinMcp, [id]: next };
+  }).builtinMcp;
+}
+
+/** 内置 Skills 状态：{ [id]: { enabled?, disabledSkills? } }；disabledSkills 只存「被停用的技能项」 */
+export function getBuiltinSkills() {
+  return getSettings().builtinSkills;
+}
+
+export function setBuiltinSkill(id, enabled) {
+  if (!BUILTIN_SKILL_IDS.includes(id)) throw new Error(`未知的内置 Skill：${id}`);
+  return updateSettings((s) => {
+    const cur = s.builtinSkills[id] && typeof s.builtinSkills[id] === 'object' ? s.builtinSkills[id] : {};
+    s.builtinSkills = { ...s.builtinSkills, [id]: { ...cur, enabled: !!enabled } };
+  }).builtinSkills;
+}
+
+/** 各内置技能包支持 per-skill 开关的项白名单（新增包在这里登记；未登记 = 没有 per-skill 维度） */
+const BUILTIN_SKILL_ITEM_IDS = { superpowers: SUPERPOWERS_SKILL_IDS };
+
+/**
+ * per-skill 开关：只维护「被停用项」清单（新增/改名的上游技能默认保持启用，不会因存量配置被静默关掉）。
+ * 技能项全恢复启用时删除空数组，保持 settings 干净。
+ */
+export function setBuiltinSkillItem(pkgId, skillId, enabled) {
+  if (!BUILTIN_SKILL_IDS.includes(pkgId) || !BUILTIN_SKILL_ITEM_IDS[pkgId]) throw new Error(`未知的内置 Skill：${pkgId}`);
+  if (!BUILTIN_SKILL_ITEM_IDS[pkgId].includes(skillId)) throw new Error(`未知的技能项：${skillId}`);
+  return updateSettings((s) => {
+    const cur = s.builtinSkills[pkgId] && typeof s.builtinSkills[pkgId] === 'object' ? s.builtinSkills[pkgId] : {};
+    const disabled = new Set(Array.isArray(cur.disabledSkills) ? cur.disabledSkills : []);
+    if (enabled) disabled.delete(skillId);
+    else disabled.add(skillId);
+    const next = { ...cur };
+    const rest = [...disabled].sort();
+    if (rest.length) next.disabledSkills = rest;
+    else delete next.disabledSkills;
+    s.builtinSkills = { ...s.builtinSkills, [pkgId]: next };
+  }).builtinSkills;
+}
+
+// ==== Repo map（代码地图）开关：仅影响自定义模型会话的 system prompt 注入 ====
+
+export function getRepoMapSettings() {
+  return getSettings().repoMap;
+}
+
+// ==== Bash 执行后端（T6，仅 openai 路径）====
+
+export function getExecSettings() {
+  return getSettings().exec;
+}
+
+// ==== 联网搜索（openai 路径 WebSearch 工具）====
+
+export function getSearchSettings() {
+  return getSettings().search;
+}
+
+export function setSearchSettings(patch) {
+  return updateSettings((s) => {
+    s.search = normalizeSearch({ ...s.search, ...(patch && typeof patch === 'object' ? patch : {}) });
+  }).search;
+}
+
+export function setExecSettings(patch) {
+  return updateSettings((s) => {
+    s.exec = normalizeExec({ ...s.exec, ...(patch && typeof patch === 'object' ? patch : {}) });
+  }).exec;
+}
+
+export function setRepoMapEnabled(enabled) {
+  return updateSettings((s) => {
+    s.repoMap = { ...s.repoMap, enabled: !!enabled };
+  }).repoMap;
+}
+
 /** 插件是否启用：未显式设 false 即启用（缺省全开=向后兼容） */
 export function getPluginEnabled(id) {
   return getSettings().plugins[id] !== false;
@@ -231,12 +402,15 @@ function genId(prefix = 'tk_') {
   return prefix + Math.random().toString(36).slice(2, 8);
 }
 
-/** 纯函数：构造一个 token/凭证条目。openai 条目额外带 baseURL/model/vendor；claude 条目不含此三字段。
+/** 纯函数：构造一个 token/凭证条目。openai 条目额外带 baseURL/model/vendor/models；claude 条目不含。
  *  vendor 是**纯展示元数据**（录入时选的厂商预设，用于设置页列表显示「DeepSeek」而非「—」），
  *  不参与任何运行时逻辑——路由靠 providerId，请求参数靠 baseURL/model。
- *  三者一律条件展开：claude 条目不该凭空多出空字段，保持两类条目形状干净。
+ *  `models` = 从服务商 /models 发现到的可用模型（OpenCode 式多模型，T 见 spec
+ *  `docs/superpowers/specs/2026-10-08-credential-multi-model-design.md`）；`model` 是 legacy
+ *  单模型字段（老凭证/curl 手传仍在，新链路不再写入）。
+ *  各可选字段一律条件展开：claude 条目不该凭空多出空字段，保持两类条目形状干净。
  *  显式传 id/index/now 以保持纯粹可测（无 random/时间副作用）。 */
-export function makeTokenEntry({ id, label, token, providerId = DEFAULT_PROVIDER_ID, baseURL, model, vendor, index = 0, now }) {
+export function makeTokenEntry({ id, label, token, providerId = DEFAULT_PROVIDER_ID, baseURL, model, vendor, models, modelsUpdatedAt, index = 0, now }) {
   return {
     id,
     providerId,
@@ -245,6 +419,8 @@ export function makeTokenEntry({ id, label, token, providerId = DEFAULT_PROVIDER
     ...(baseURL != null ? { baseURL } : {}),
     ...(model != null ? { model } : {}),
     ...(vendor != null ? { vendor } : {}),
+    ...(Array.isArray(models) && models.length ? { models: normalizeModelList(models) } : {}),
+    ...(modelsUpdatedAt != null ? { modelsUpdatedAt } : {}),
     status: 'healthy',
     resetsAt: null,
     rateLimitType: null,
@@ -253,23 +429,68 @@ export function makeTokenEntry({ id, label, token, providerId = DEFAULT_PROVIDER
   };
 }
 
+/** 纯函数：归一模型列表 [{id, name?, efforts?, defaultEffort?}]（跳过空 id、去重保序、name 与 id 相同则省略）。
+ *  efforts/defaultEffort 来自 `/models` 的 effort 元数据（自定义模型强度档位，见 composer-bar spec）。 */
+export function normalizeModelList(list) {
+  const out = [];
+  const seen = new Set();
+  for (const m of Array.isArray(list) ? list : []) {
+    const id = typeof m === 'string' ? m.trim() : String(m?.id ?? '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const name = typeof m?.name === 'string' ? m.name.trim() : '';
+    const efforts = Array.isArray(m?.efforts)
+      ? [...new Set(m.efforts.map((s) => (typeof s === 'string' ? s.trim() : '')).filter(Boolean))]
+      : [];
+    const defaultEffort = typeof m?.defaultEffort === 'string' ? m.defaultEffort.trim() : '';
+    out.push({
+      id,
+      ...(name && name !== id ? { name } : {}),
+      ...(efforts.length ? { efforts } : {}),
+      ...(defaultEffort && efforts.includes(defaultEffort) ? { defaultEffort } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * 纯函数：凭证可用的模型列表 —— 读侧**单一事实源**。
+ * `models`（发现结果）优先；否则回落 legacy `model` 单值；否则空。
+ * `GET /api/credentials`、`resolveCredential`、聊天弹层全部经此归一，老凭证无感兼容。
+ */
+export function credentialModels(t) {
+  const list = normalizeModelList(t?.models);
+  if (list.length) return list;
+  const legacy = typeof t?.model === 'string' ? t.model.trim() : '';
+  return legacy ? [{ id: legacy }] : [];
+}
+
+/** 新增凭证/账号并返回**新建条目**（添加端点要把 id 回给前端接着刷新模型列表） */
+export function addTokenEntry(label, token, providerId = DEFAULT_PROVIDER_ID, extra = {}) {
+  let created = null;
+  updateSettings((s) => {
+    created = makeTokenEntry({
+      id: genId(),
+      label,
+      token,
+      providerId,
+      baseURL: extra.baseURL,
+      model: extra.model,
+      vendor: extra.vendor,
+      models: extra.models,
+      modelsUpdatedAt: extra.modelsUpdatedAt,
+      index: s.tokens.length,
+      now: new Date().toISOString(),
+    });
+    s.tokens.push(created);
+  });
+  return created;
+}
+
 /** 新增一个备用账号（追加到偏好末尾） */
 export function addToken(label, token, providerId = DEFAULT_PROVIDER_ID, extra = {}) {
-  return updateSettings((s) => {
-    s.tokens.push(
-      makeTokenEntry({
-        id: genId(),
-        label,
-        token,
-        providerId,
-        baseURL: extra.baseURL,
-        model: extra.model,
-        vendor: extra.vendor,
-        index: s.tokens.length,
-        now: new Date().toISOString(),
-      }),
-    );
-  }).tokens;
+  addTokenEntry(label, token, providerId, extra);
+  return getSettings().tokens;
 }
 
 /** 局部更新某账号（改名 patch={label}；换 token patch={token}） */

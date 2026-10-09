@@ -1,0 +1,16 @@
+{
+  "id": "3386d6c-implement-scan-sessions-discover-unanaly",
+  "title": "implement scan-sessions - discover unanalyzed transcripts",
+  "type": "feature",
+  "input": "记忆库要能自动发现「还没分析过」的会话转录文件：从没分析过、或者在分析之后文件又更新过的，算待分析；已经分析过且没变化的不要重复处理。",
+  "analysis": "",
+  "fixRef": "3386d6c",
+  "baseRef": null,
+  "testFiles": [
+    "src/features/memory-bank/scan-sessions.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "memory-bank"
+  ]
+}

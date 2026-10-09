@@ -1,0 +1,16 @@
+{
+  "id": "6db991d-extractexports-extractimports",
+  "title": "导出符号提取 — extractExports + extractImports",
+  "type": "feature",
+  "input": "项目地图先做符号提取这一步：从单个源码文件里识别导出符号（export default、class、re-export 都算，内部函数不算）和导入依赖（ES import 与 CommonJS require，重复的要去重）。",
+  "analysis": "",
+  "fixRef": "6db991d",
+  "baseRef": null,
+  "testFiles": [
+    "tests/project-map/collect-facts.logic.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "project-map"
+  ]
+}

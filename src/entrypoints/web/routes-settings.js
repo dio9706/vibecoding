@@ -8,6 +8,8 @@ import {
   removeBot,
   AUTONOMY_LEVELS,
   addToken,
+  addTokenEntry,
+  credentialModels,
   updateTokenMeta,
   removeToken,
   reorderTokens,
@@ -23,12 +25,26 @@ import {
   updateMcpServer,
   removeMcpServer,
   ensureMcpServerIds,
+  getBuiltinMcp,
+  setBuiltinMcp,
+  setBuiltinSkill,
+  setBuiltinSkillItem,
+  getBuiltinSkills,
+  getRepoMapSettings,
+  setRepoMapEnabled,
+  getExecSettings,
+  setExecSettings,
+  getSearchSettings,
+  setSearchSettings,
   getPluginEnabled,
   setPluginEnabled,
   getSettings,
   replaceSettings,
 } from '../../store/settings.js';
+import { EXEC_POLICIES } from '../../capabilities/tool-policy.logic.js';
 import { PLUGIN_MANIFEST } from '../../plugins/index.js';
+import { BUILTIN_MCP, probeBuiltinMcp } from '../../capabilities/builtin-mcp.js';
+import { resolveBuiltinSkills } from '../../capabilities/builtin-skills.js';
 import { listBotMessages, sanitizeMessages, MAX_LEN } from '../../shared/messages.js';
 import { deleteConfigsByBot, getConfigs, saveConfigs } from '../../store/action-configs.js';
 import { migrateToBots } from '../../store/bots-migration.js';
@@ -46,6 +62,7 @@ import {
 import { sendJson } from './http-util.js';
 import { withJsonBody } from './body.js';
 import { str, safeDecodeId } from './input.js';
+import { fetchProviderModels } from './provider-models.js';
 
 /** GET /api/plugins —— 插件清单 + 启用状态。注意：features 装配发生在进程启动时，启停重启后生效 */
 export function handlePluginsList(res) {
@@ -99,6 +116,9 @@ export function handleSettings(req, res) {
       uiPrefs: getUiPrefs(), // Web UI 偏好：工作目录 / 模型 / 强度 / 模式
       myFeishuOpenId: getMyFeishuOpenId(), // 我的飞书 open_id：测试期筛「属于我的 BUG」用
       memoryBank: getMemoryBankSettings(), // 记忆库：功能开关 / 凌晨窗口 / 预算 / 阈值配置
+      repoMap: getRepoMapSettings(), // 代码地图（自定义模型会话注入）：{ enabled }
+      exec: getExecSettings(), // Bash 执行后端（T6；仅 openai 路径）：{ backend, image, network }
+      search: getSearchSettings(), // 联网搜索（openai 路径 WebSearch）：{ provider, apiKey }
     });
   }
   if (req.method === 'POST') {
@@ -139,6 +159,11 @@ export function handleSettings(req, res) {
             .filter((t) => typeof t === 'string')
             .map((t) => t.trim())
             .filter(Boolean);
+        }
+        // openaiMaxSteps：工具循环上限（0=无上限）。数字或数字字符串都收；负数/垃圾忽略。
+        if (data.openaiMaxSteps !== undefined) {
+          const n = Number(data.openaiMaxSteps);
+          if (Number.isFinite(n) && n >= 0) patch.openaiMaxSteps = Math.floor(n);
         }
         // taskNotifyFeishu：布尔开关必须单独判——上面的 allowed 循环只认字符串（还会 .trim()），
         // 把它塞进那个数组会被 typeof 检查直接丢掉，开关永远存不下去
@@ -195,6 +220,40 @@ export function handleSettings(req, res) {
         }
         return sendJson(res, 200, { ok: true, memoryBank: getMemoryBankSettings() });
       }
+      if (data.section === 'exec') {
+        // Bash 执行后端（T6）：只收后端白名单/镜像名/网络布尔，其余字段由 normalizeExec fail-closed 兜底
+        const patch = {};
+        if (data.backend === 'local' || data.backend === 'container') patch.backend = data.backend;
+        if (typeof data.image === 'string' && data.image.trim()) patch.image = data.image.trim();
+        if (typeof data.network === 'boolean') patch.network = data.network;
+        try {
+          setExecSettings(patch);
+        } catch (e) {
+          return sendJson(res, 500, { error: '保存失败：' + (e?.message || e) });
+        }
+        return sendJson(res, 200, { ok: true, exec: getExecSettings() });
+      }
+      if (data.section === 'repo-map') {
+        if (typeof data.enabled !== 'boolean') return sendJson(res, 400, { error: 'enabled 必须是布尔值' });
+        try {
+          setRepoMapEnabled(data.enabled);
+        } catch (e) {
+          return sendJson(res, 500, { error: '保存失败：' + (e?.message || e) });
+        }
+        return sendJson(res, 200, { ok: true, repoMap: getRepoMapSettings() });
+      }
+      if (data.section === 'search') {
+        // 联网搜索（openai 路径 WebSearch）：只收 provider 白名单与 key；normalizeSearch fail-closed 兜底
+        const patch = {};
+        if (typeof data.provider === 'string') patch.provider = data.provider.trim();
+        if (typeof data.apiKey === 'string') patch.apiKey = data.apiKey.trim();
+        try {
+          setSearchSettings(patch);
+        } catch (e) {
+          return sendJson(res, 500, { error: '保存失败：' + (e?.message || e) });
+        }
+        return sendJson(res, 200, { ok: true, search: getSearchSettings() });
+      }
       return sendJson(res, 400, { error: '未知 section' });
     });
   }
@@ -216,7 +275,9 @@ function botView(b) {
     projectDir: b.projectDir || '',
     projectNotes: b.projectNotes || '',
     setupScript: b.setupScript || '',
+    verifyScript: b.verifyScript || '',
     autonomy: AUTONOMY_LEVELS.includes(b.autonomy) ? b.autonomy : 'light',
+    execPolicy: EXEC_POLICIES.includes(b.execPolicy) ? b.execPolicy : 'bypass',
     enabled: !!b.enabled,
   };
 }
@@ -251,9 +312,18 @@ function cleanBotInput(data, { requireCreds = false } = {}) {
     if (setup.length > MAX_LEN) return { error: `初始化脚本超过 ${MAX_LEN} 字符` };
     out.setupScript = setup;
   }
+  if (typeof data.verifyScript === 'string') {
+    const verify = data.verifyScript.trim();
+    if (verify.length > MAX_LEN) return { error: `自检命令超过 ${MAX_LEN} 字符` };
+    out.verifyScript = verify;
+  }
   if (data.autonomy !== undefined) {
     if (!AUTONOMY_LEVELS.includes(data.autonomy)) return { error: '托管程度取值无效' };
     out.autonomy = data.autonomy;
+  }
+  if (data.execPolicy !== undefined) {
+    if (!EXEC_POLICIES.includes(data.execPolicy)) return { error: '执行档位取值无效' };
+    out.execPolicy = data.execPolicy;
   }
   if (data.messages !== undefined) {
     const r = sanitizeMessages(data.messages);
@@ -457,7 +527,7 @@ function cleanCredentialPatch(data) {
   return patch;
 }
 
-/** GET /api/credentials —— 列出 openai-compat 凭证（apiKey 掩码） */
+/** GET /api/credentials —— 列出 openai-compat 凭证（apiKey 掩码；models 经 credentialModels 归一，含 legacy model 回落） */
 export function handleCredentialsList(res) {
   const creds = getTokens()
     .filter((t) => (t.providerId || DEFAULT_PROVIDER_ID) === 'openai-compat')
@@ -466,31 +536,56 @@ export function handleCredentialsList(res) {
       label: t.label,
       vendor: t.vendor || '', // 存量凭证无此字段 → 前端按 baseURL 反查兜底
       baseURL: t.baseURL || '',
-      model: t.model || '',
+      model: t.model || '', // legacy：新链路不再写入，保留供旧前端/排查
+      models: credentialModels(t),
+      modelsUpdatedAt: t.modelsUpdatedAt || '',
       masked: maskToken(t.token),
       status: t.status,
     }));
   sendJson(res, 200, { credentials: creds });
 }
 
-/** POST /api/credentials —— 新增 openai-compat 凭证 { label, apiKey, baseURL, model } */
+/** POST /api/credentials —— 新增 openai-compat 凭证 { label, apiKey, baseURL, vendor }。
+ *  model 不再必填（OpenCode 式：凭证=接入，模型列表由 refresh-models 发现）；仍接受以兼容 curl/旧前端。
+ *  返回 credential.id，前端据此接着调 /refresh-models。 */
 export function handleCredentialsAdd(req, res) {
   return withJsonBody(req, res, (data) => {
     const apiKey = str(data.apiKey);
     const baseURL = str(data.baseURL);
-    const model = str(data.model);
-    if (!apiKey || !baseURL || !model) return sendJson(res, 400, { error: 'apiKey / baseURL / model 均必填' });
+    if (!apiKey || !baseURL) return sendJson(res, 400, { error: 'apiKey / baseURL 均必填' });
     const label = str(data.label);
+    const model = str(data.model);
     // 展示用元数据，不必填（手写 API 调用可不传）。空串归一为 undefined：
     // makeTokenEntry 按 != null 条件展开，否则会落一个空的 vendor 字段
     const vendor = str(data.vendor) || undefined;
+    let entry;
     try {
-      addToken(label, apiKey, 'openai-compat', { baseURL, model, vendor });
+      entry = addTokenEntry(label, apiKey, 'openai-compat', { baseURL, model: model || undefined, vendor });
     } catch (e) {
       return sendJson(res, 500, { error: '保存凭证失败：' + (e?.message || e) });
     }
-    logger.info('web', '[POST /api/credentials] 新增自定义模型凭证', { label: label || '(默认)', vendor, baseURL, model });
-    sendJson(res, 200, { ok: true });
+    logger.info('web', '[POST /api/credentials] 新增自定义模型凭证', { label: label || '(默认)', vendor, baseURL, model: model || '(未选，待发现)' });
+    sendJson(res, 200, { ok: true, credential: { id: entry.id } });
+  });
+}
+
+/** POST /api/credentials/:id/refresh-models —— 从服务商拉取模型列表并存入凭证（设置页/聊天弹层共用）。 */
+export function handleCredentialsRefreshModels(req, res, url) {
+  const rest = url.pathname.slice('/api/credentials/'.length);
+  const SUFFIX = '/refresh-models';
+  const id = rest.endsWith(SUFFIX) ? safeDecodeId(rest.slice(0, -SUFFIX.length)) : '';
+  if (!id) return sendJson(res, 404, { error: 'not found' });
+  const cred = getTokenById(id);
+  if (!cred || (cred.providerId || DEFAULT_PROVIDER_ID) !== 'openai-compat') return sendJson(res, 404, { error: 'credential not found' });
+  return withJsonBody(req, res, async () => {
+    try {
+      const models = await fetchProviderModels({ baseURL: cred.baseURL, apiKey: cred.token });
+      updateTokenMeta(id, { models, modelsUpdatedAt: new Date().toISOString() });
+      logger.info('web', '[POST /api/credentials/:id/refresh-models] 模型列表已更新', { id, baseURL: cred.baseURL, count: models.length });
+      sendJson(res, 200, { ok: true, models });
+    } catch (e) {
+      sendJson(res, 502, { error: '拉取模型列表失败：' + (e?.message || e) });
+    }
   });
 }
 
@@ -607,4 +702,62 @@ export function handleMcpServersDelete(req, res, url) {
   }
   logger.info('web', '[DELETE /api/mcp-servers] 删除 MCP 服务器', { id });
   sendJson(res, 200, { ok: true });
+}
+
+// ==== 内置能力（内置 MCP / Skills）开关：清单与默认值来自 capabilities/builtin-mcp.js ====
+
+/** GET /api/builtins —— 内置 MCP 清单（开关 + 密钥状态 + 本地服务探测） */
+export async function handleBuiltinsList(res) {
+  const state = getBuiltinMcp();
+  const mcp = [];
+  for (const def of BUILTIN_MCP) {
+    const st = state[def.id] && typeof state[def.id] === 'object' ? state[def.id] : {};
+    mcp.push({
+      id: def.id,
+      label: def.label,
+      desc: def.desc,
+      transport: def.transport,
+      paths: def.paths,
+      needsKey: def.needsKey || null,
+      hasKey: !!st.apiKey,
+      enabled: typeof st.enabled === 'boolean' ? st.enabled : def.defaultEnabled,
+      // 本地服务探测（figma-devmode 这类）：null = 该项没有探测端点
+      available: def.probe ? await probeBuiltinMcp(def) : null,
+    });
+  }
+  // skills：注册表 + 安装状态 + per-skill 清单（安装时拉取；未安装时设置页显示并禁用开关）
+  sendJson(res, 200, { mcp, skills: resolveBuiltinSkills({ state: getBuiltinSkills(), listItems: true }) });
+}
+
+/** PUT /api/builtins —— 更新开关 { kind:'mcp'|'skill', id, enabled?, apiKey?, skillId? }（skillId 时改 per-skill） */
+export function handleBuiltinsUpdate(req, res) {
+  return withJsonBody(req, res, (data) => {
+    const kind = str(data.kind);
+    const id = str(data.id);
+    if (!id) return sendJson(res, 400, { error: '缺少 id' });
+    const hasEnabled = typeof data.enabled === 'boolean';
+    const hasKey = typeof data.apiKey === 'string';
+    try {
+      if (kind === 'mcp') {
+        if (!BUILTIN_MCP.some((d) => d.id === id)) return sendJson(res, 404, { error: `未知的内置 MCP：${id}` });
+        if (!hasEnabled && !hasKey) return sendJson(res, 400, { error: '没有可更新的字段（enabled / apiKey）' });
+        setBuiltinMcp(id, { ...(hasEnabled ? { enabled: data.enabled } : {}), ...(hasKey ? { apiKey: data.apiKey } : {}) });
+      } else if (kind === 'skill') {
+        if (!hasEnabled) return sendJson(res, 400, { error: 'skill 只接受 enabled 布尔值' });
+        if (data.skillId !== undefined) {
+          const skillId = str(data.skillId);
+          if (!skillId) return sendJson(res, 400, { error: 'skillId 不能为空' });
+          setBuiltinSkillItem(id, skillId, data.enabled);
+        } else {
+          setBuiltinSkill(id, data.enabled);
+        }
+      } else {
+        return sendJson(res, 400, { error: 'kind 必须是 mcp 或 skill' });
+      }
+    } catch (e) {
+      return sendJson(res, 400, { error: e?.message || String(e) });
+    }
+    logger.info('web', '[PUT /api/builtins] 更新内置能力', { kind, id, ...(data.skillId !== undefined ? { skillId: str(data.skillId) } : {}), ...(hasEnabled ? { enabled: data.enabled } : {}), ...(hasKey ? { keyProvided: !!data.apiKey.trim() } : {}) });
+    sendJson(res, 200, { ok: true });
+  });
 }

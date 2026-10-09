@@ -1,0 +1,16 @@
+{
+  "id": "ecfdfe5-implement-sessions-crud-add-get-findbypa",
+  "title": "implement sessions CRUD (add/get/findByPath/patch)",
+  "type": "feature",
+  "input": "记忆库开始管理「会话」：新增（同 id 幂等、缺 id 报错）、按 id 查询、按路径加修改时间精确匹配、局部更新（id 不存在静默跳过、不许覆盖 id 本身）。",
+  "analysis": "",
+  "fixRef": "ecfdfe5",
+  "baseRef": null,
+  "testFiles": [
+    "src/store/memory-bank.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "memory-bank"
+  ]
+}

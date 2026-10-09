@@ -68,6 +68,15 @@ for (const item of ['server.js', 'package.json', 'package-lock.json', 'src', 'pu
   fs.cpSync(from, path.join(stage, item), { recursive: true });
 }
 
+// assets/ 是安装时拉取的可选资源（内置技能包等）：缺失只告警、不阻断构建，
+// 打包版对应功能显示「未安装」（fail-open，与拉取脚本同一纪律）
+const assetsFrom = path.join(ROOT, 'assets');
+if (fs.existsSync(assetsFrom)) {
+  fs.cpSync(assetsFrom, path.join(stage, 'assets'), { recursive: true });
+} else {
+  console.warn('[prepare-sidecar] assets/ 不存在（内置技能未拉取），跳过；npm run setup:superpowers 可补齐');
+}
+
 // 剥离随 src 带入的测试文件（*.test.js / *.test.mjs / *.test.cjs），减小包体
 function stripTests(dir) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -77,6 +86,18 @@ function stripTests(dir) {
   }
 }
 stripTests(path.join(stage, 'src'));
+
+// 剥掉 staging package.json 的生命周期脚本：侧车只跑 `node server.js`，scripts 在侧车里一律用不到；
+// 而根仓库的 postinstall（安装时拉取内置技能）在这里**必然失败**——sidecar 目录没有 scripts/，
+// `npm ci` 会被一个 MODULE_NOT_FOUND 整条拖挂（2026-09-30 实测）。打包链不得依赖根仓库的脚本布局。
+const stagedPkgPath = path.join(stage, 'package.json');
+const stagedPkg = JSON.parse(fs.readFileSync(stagedPkgPath, 'utf8'));
+if (stagedPkg.scripts) {
+  for (const hook of ['preinstall', 'install', 'postinstall', 'prepare', 'prepublish', 'prepublishOnly']) {
+    delete stagedPkg.scripts[hook];
+  }
+}
+fs.writeFileSync(stagedPkgPath, JSON.stringify(stagedPkg, null, 2) + '\n');
 
 console.log('[prepare-sidecar] backend files staged.');
 

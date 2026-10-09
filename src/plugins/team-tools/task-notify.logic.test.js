@@ -65,6 +65,30 @@ test('devLog 摘要：超长截断，空则显示 (无输出)', () => {
   assert.match(buildTaskDoneCard({ ...awaiting, devLog: '   ' }, true).elements[0].text.content, /\(无输出\)/);
 });
 
+test('自检行：通过/未通过/跳过三种状态都上卡片与降级文本', () => {
+  const passed = { ...awaiting, verify: { ok: true, skipped: false, command: 'npm test', durationMs: 45_000, attempts: 1 } };
+  const cardText = buildTaskDoneCard(passed, true).elements[0].text.content;
+  assert.match(cardText, /🔍 自检通过：npm test（45s）/);
+  assert.match(taskDoneFallbackText(passed, true), /自检通过：npm test（45s）/);
+
+  const failed = { ...awaiting, verify: { ok: false, skipped: false, command: 'npm test', exitCode: 1, durationMs: 2000, attempts: 2 } };
+  const failedCard = buildTaskDoneCard(failed, false).elements[0].text.content;
+  assert.match(failedCard, /⚠️ \*\*自检未通过\*\*：npm test 退出码 1（已重试 1 次）/);
+  // 降级纯文本不带 markdown 标记
+  const failedPlain = taskDoneFallbackText(failed, false);
+  assert.match(failedPlain, /⚠️ 自检未通过：npm test 退出码 1/);
+  assert.doesNotMatch(failedPlain, /\*\*/);
+
+  const skipped = { ...awaiting, verify: { ok: true, skipped: true, reason: '未配置验证命令' } };
+  assert.match(buildTaskDoneCard(skipped, true).elements[0].text.content, /未配置自检命令/);
+
+  const skippedHard = { ...awaiting, verify: { ok: true, skipped: true, reason: '命令不存在或无法执行（请检查自检命令配置）' } };
+  assert.match(buildTaskDoneCard(skippedHard, true).elements[0].text.content, /自检已跳过：命令不存在/);
+
+  // 无 verify 字段（存量任务/旧卡片路径）→ 不显示任何自检行
+  assert.doesNotMatch(buildTaskDoneCard(awaiting, true).elements[0].text.content, /自检/);
+});
+
 test('parseTaskCardAction：kind/action 校验与 messageId 兜底', () => {
   const ok = parseTaskCardAction({
     action: { value: { kind: TASK_CARD_KIND, taskId: 't_1', action: 'merge' } },

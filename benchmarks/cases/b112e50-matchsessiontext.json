@@ -1,0 +1,14 @@
+{
+  "id": "b112e50-matchsessiontext",
+  "title": "新增 matchSessionText() 解析会话指令",
+  "type": "feature",
+  "input": "用户会直接发「会话 <8位短码> 正文…」这样的文本来操作某个会话。需要一个解析器：必须以「会话」开头、短码至少 8 位、正文非空，前后空格要清理；不符合的返回空。",
+  "analysis": "",
+  "fixRef": "b112e50",
+  "baseRef": null,
+  "testFiles": [
+    "src/plugins/feishu-relay/logic.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": []
+}

@@ -1,0 +1,14 @@
+{
+  "id": "1c3f55d-buildwelcomecard-welcome",
+  "title": "实现 buildWelcomeCard() 生成 Welcome 卡片",
+  "type": "feature",
+  "input": "机器人没听懂指令时别只回一句干巴巴的文字，改成一张引导卡片：说明能做什么，把已启用的动作列出来（最多显示前 5 条，更多就提示还有别的），一个动作都没配就提示先去配置。另外机器人的固定文案（欢迎语、即时应答）要登记成可配置项，支持按机器人覆盖。",
+  "analysis": "",
+  "fixRef": "1c3f55d",
+  "baseRef": null,
+  "testFiles": [
+    "src/shared/messages.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": []
+}

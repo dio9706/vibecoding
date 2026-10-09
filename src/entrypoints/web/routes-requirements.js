@@ -17,6 +17,7 @@ import { fetchDocRawContent, resolveWikiNodeObj } from '../../integrations/lark.
 import { hasActiveRunForConv } from '../../store/runs.js';
 import { handleReqV2Routes } from './routes-req-v2.js';
 import { handleColleagueTurn } from '../../plugins/colleague-agent/session.js';
+import { handleColleagueAskReply } from '../../capabilities/feishu-ask.js';
 import { sendJson } from './http-util.js';
 import { withJsonBody } from './body.js';
 import { str } from './input.js';
@@ -333,17 +334,31 @@ function handleColleagueSend(req, res) {
 // 202 立即返回：对面是 3s 超时的 fire-and-forget，一轮 agent 要十几秒，同步等必然超时，
 // 而超时重发会在「入队到收尾」的窗口里制造重复任务（四期 auto-notify 踩过同款坑）。
 export async function handleColleagueAgentTurn(req, res, deps = {}) {
-  const { handleTurn = handleColleagueTurn, isEnabled = getPluginEnabled } = deps;
+  const { handleTurn = handleColleagueTurn, isEnabled = getPluginEnabled, handleAskReply = handleColleagueAskReply } = deps;
   return withJsonBody(req, res, async (data) => {
-    if (!isEnabled('colleague-agent')) {
-      return sendJson(res, 409, { error: '同事对话 Agent 插件已停用' });
-    }
     const colleagueId = str(data?.colleagueId);
     if (!colleagueId) return sendJson(res, 400, { error: '缺少 colleagueId' });
     const text = str(data?.text);
     const files = Array.isArray(data?.files) ? data.files : [];
     // 纯空白且无附件 = 没内容可聊，起 agent 纯属烧额度
     if (!text.trim() && !files.length) return sendJson(res, 400, { error: '缺少 text 或 files' });
+
+    // 「委托同事对话」的答复优先截获：命中进行中的委托 → 交给判定引擎（自动追问或结算），
+    // 不再启动同事对话 agent（否则一条消息两套处理，同事会收到两份回应）。
+    // 刻意放在插件启停检查之前：该闭环不依赖 colleague-agent 插件，插件停用时答复也不该丢。
+    const askHit = handleAskReply(colleagueId, { text, files });
+    if (askHit) {
+      sendJson(res, 202, { ok: true, delegated: true });
+      // fire-and-forget：步进异常在内层已兜住，这里再挂一道防未处理 rejection
+      askHit.step.catch((e) =>
+        logger.warn('routes-req', '委托追问步进异常（已捕获）', { colleagueId, err: e?.message || String(e) }),
+      );
+      return;
+    }
+
+    if (!isEnabled('colleague-agent')) {
+      return sendJson(res, 409, { error: '同事对话 Agent 插件已停用' });
+    }
 
     // 先回 202 再干活：顺序反了的话对面已经超时断开，这个响应发给了空气
     sendJson(res, 202, { ok: true });

@@ -24,7 +24,7 @@
 1. `start({ onInbound, onCardAction })` 存回调 → `fs.watch` 监听凭证 → `startWs()`。
 2. `startWs()` 用当前凭证建 WS，`getDispatcher()` 懒建事件路由表，注册 `im.message.receive_v1` / `card.action.trigger`。
 3. 收到 `im.message.receive_v1` → `toInbound(data)`：
-   - `seenBefore(messageId)` 去重（TTL 清理）→ 命中即返回 `null` 静默丢弃；
+   - `seenBefore(messageId)` 去重 → 命中即返回 `null` 静默丢弃。去重认领**落盘**在 `store/submissions.js`（key `feishu:msg:<messageId>`，TTL 10 分钟；未绑定的认领超 `RECLAIM_MS` 复占）——进程重启窗口内的重投照样拦得住，语义详见该 store 文件头；
    - `parseMentions(message)` 抽 @ 列表；
    - 按 `message_type` 分派到 `feishu-normalize.js`：`text`→`parseTextContent`、`image`→`parseImageContent`、`post`→`parsePostContent`、`file`→`parseFileContent`，文本统一过 `stripMentions` 剥掉 `@_user_N` 占位符；
    - 图片/文件 key 交给 `integrations/lark.js` 的 `downloadMessageResourceWithError` 下载到本地（下载失败挂 `downloadError` 字段，不吞消息）；
@@ -46,7 +46,7 @@ console 渠道是同一契约的极简版：`readline` 逐行 → 直接构造 `
 - **要新增一个渠道（QQ / 微信）** → 新建 `src/channels/<id>.js` 实现 `{ id, capabilities, start, send }` 契约，再在 `index.js` 里 `register` 一次即可；dispatch / features / 入口都不用动。
 - **要改飞书报文解析、支持新消息类型** → 改 `feishu-normalize.js`（纯函数，配 `feishu-normalize.test.js`）+ `feishu.js` 里 `toInbound` 的 `msgType` 分派分支。
 - **要改出站发送行为（图片直链拆分 / markdown / 卡片）** → `feishu.js` 的 `sendReply` 及末尾 `send*` 方法。
-- **要改 WS 生命周期 / 凭证热重载 / 去重 / 状态上报** → `feishu.js` 的 `startWs` / `reload` / `getDispatcher` / `seenBefore` / `writeStatus`。
+- **要改 WS 生命周期 / 凭证热重载 / 去重 / 状态上报** → `feishu.js` 的 `startWs` / `reload` / `getDispatcher` / `seenBefore` / `writeStatus`；改去重的落盘与复占语义 → `store/submissions.js`。
 - **要改 @ 占位符剥离或云文档链接识别** → `feishu-normalize.js` 的 `stripMentions` / `parseMentions` / `extractDocLinks` / `stripDocLinks`。
 - **要改注册契约校验或 `list` 输出（设置页/诊断）** → `registry.js`。
 - **要改默认注册哪些渠道** → `index.js`。

@@ -117,11 +117,7 @@
               <span class="ob-label">Base URL</span>
               <input id="obCredBaseURL" placeholder="https://api.xxx.com/v1" autocomplete="off" />
             </label>
-            <label class="ob-field">
-              <span class="ob-label">模型</span>
-              <input id="obCredModel" list="obCredModelList" placeholder="先选厂商" autocomplete="off" />
-              <datalist id="obCredModelList"></datalist>
-            </label>
+            <!-- 不再选模型：添加后自动拉取可用模型列表，在聊天「模型」弹层里按凭证分组选择 -->
           </div>
         </section>
 
@@ -382,8 +378,33 @@
         <option value="bypassPermissions">自动</option>
       </select>
     </label>
+    <label class="set-field">工具循环上限（自定义模型）
+      <input id="basicOpenaiMaxSteps" type="number" min="0" step="1" placeholder="0 = 无上限（默认，同 Claude Code / OpenCode）" autocomplete="off" />
+    </label>
     <div class="set-actions">
       <button class="btn primary" id="basicDefaultsSaveBtn">保存默认值</button>
+    </div>
+  </div>
+
+  <!-- 联网搜索（自定义模型路径的 WebSearch 工具） -->
+  <div class="set-sec">
+    <div class="set-sec-head">
+      <span class="sec-label">联网搜索（自定义模型）</span>
+      <span class="msg-hint">供 WebSearch 工具用；未配置时该工具会提示来此填写</span>
+    </div>
+    <label class="set-field">服务商
+      <select id="basicSearchProvider" class="set-select">
+        <option value="">不启用</option>
+        <option value="tavily">Tavily</option>
+        <option value="brave">Brave Search</option>
+        <option value="bocha">博查（Bocha）</option>
+      </select>
+    </label>
+    <label class="set-field">API Key
+      <input id="basicSearchKey" placeholder="搜索服务商的 API key" autocomplete="off" />
+    </label>
+    <div class="set-actions">
+      <button class="btn primary" id="basicSearchSaveBtn">保存搜索配置</button>
     </div>
   </div>
 
@@ -397,6 +418,24 @@
     </label>
     <div class="set-actions">
       <button class="btn primary" id="basicMyFeishuOpenIdSaveBtn">保存</button>
+    </div>
+  </div>
+
+  <!-- 仓库地图（自定义模型会话注入） -->
+  <div class="set-sec">
+    <div class="set-sec-head">
+      <span class="sec-label">仓库地图</span>
+      <span class="msg-hint">仅自定义模型会话生效</span>
+    </div>
+    <div class="set-field" style="display:flex;align-items:center;gap:9px;margin-top:2px;">
+      <span style="color:var(--text);">注入代码地图（文件 + 导出符号）</span>
+      <label class="tool-toggle" title="启用 / 停用">
+        <input type="checkbox" id="repoMapToggleInput" />
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div style="font-size:11px;color:var(--faint);margin-top:2px;padding:0 2px;">
+      从 git 追踪的源文件抽取、按引用重要度排序（不含文件内容），默认开。
     </div>
   </div>
 
@@ -429,7 +468,7 @@
             <div class="set-sec">
               <div class="set-sec-head">
                 <span class="sec-label">API Key</span>
-                <span class="msg-hint">预设厂商 · 自动填充 baseURL</span>
+                <span class="msg-hint">预设厂商 · 自动填充 baseURL · 添加后自动获取模型列表</span>
               </div>
               <div class="token-list" id="credList"></div>
               <div class="token-add cred-add">
@@ -443,10 +482,8 @@
                   <option value="zhipu">智谱</option>
                   <option value="custom">其他（自定义）</option>
                 </select>
-                <!-- 可选可填：datalist 给预设建议，但不限制取值。厂商上新模型
-                     （deepseek-v4-flash 之类）无需改代码，也不必退回「其他（自定义）」重填 baseURL -->
-                <input id="credModel" list="credModelList" placeholder="先选厂商" autocomplete="off" disabled />
-                <datalist id="credModelList"></datalist>
+                <!-- OpenCode 式：凭证只认接入信息（key/baseURL），不再选具体模型；
+                     模型列表由添加后自动拉取 / 凭证行「刷新模型」发现 -->
                 <input id="credBaseURL" placeholder="baseURL，如 https://api.xxx.com/v1" autocomplete="off" />
                 <input id="credApiKey" type="password" placeholder="apiKey (sk-…)" autocomplete="new-password" />
                 <button class="btn" id="credAddBtn">＋ 添加</button>
@@ -497,6 +534,13 @@
             </div>
           </div>
           <div class="set-tab" data-tab="mcp" hidden>
+            <div class="set-sec">
+              <div class="set-sec-head">
+                <span class="sec-label">内置能力</span>
+                <span class="msg-hint">开箱可用 · 开关保存后下次运行生效</span>
+              </div>
+              <div class="builtin-list" id="builtinList"></div>
+            </div>
             <div class="set-sec">
               <div class="set-sec-head">
                 <span class="sec-label">MCP 服务器（stdio）</span>
@@ -630,6 +674,16 @@
               </label>
               <label class="set-field">auto 工作区初始化脚本（可空；自动开发工作区首次创建后以本机权限执行一次，请勿粘贴不可信命令；密钥请走环境变量，勿内联在脚本中）
                 <input id="botSetupScript" placeholder="如 npm install" autocomplete="off" />
+              </label>
+              <label class="set-field">自检命令（可空；自动开发完成后由系统复跑判定，未通过会带输出自动重试；留空但工程 package.json 有 test 脚本时自动使用 npm test。命令以本机权限执行，请仅填写可信内容）
+                <input id="botVerifyScript" placeholder="如 npm test" autocomplete="off" />
+              </label>
+              <label class="set-field">无人值守执行档位（自动开发/系统任务的工具权限；策略拒绝会计次，累计 3 次熔断并提醒）
+                <select id="botExecPolicy" class="set-select">
+                  <option value="bypass">放行全部（现状）</option>
+                  <option value="standard">标准：区内读写自动，命令仅安全清单，其余拒绝</option>
+                  <option value="trusted">可信：除危险命令（删根/毁盘/关停）外全放行</option>
+                </select>
               </label>
               <div class="msg-list" id="botMsgList"></div>
               <div class="set-actions" style="gap:8px;">
@@ -859,74 +913,90 @@
       </div>
 
       <div class="fab-row" id="fabRow">
-        <div class="model-fab" id="modelFab">
-          <div class="model-pop" id="modelPop" hidden>
-            <div class="model-pills" id="modelPills">
-              <button data-m="auto">Auto</button>
-              <button data-m="claude-fable-5-1" title="最强模型 · 独立限流桶（撞墙仍会切号）· 单价高于 Opus">Fable 5.1</button>
-              <button data-m="claude-opus-5">Opus 5</button>
-              <button data-m="claude-sonnet-5">Sonnet 5</button>
-              <button data-m="claude-haiku-5">Haiku 5</button>
-            </div>
-            <div class="pop-divider" id="customDivider" hidden></div>
-            <div class="model-pills" id="customModelPills" title="自定义模型"></div>
-            <div class="effort-row" id="effortRow">
-              <div class="effort-ends"><span>Faster</span><span>Smarter</span></div>
-              <input type="range" id="effortSlider" min="0" max="3" step="1" value="1" />
-            </div>
-            <div class="pop-divider"></div>
-            <div class="model-pills" id="modePills" title="权限模式">
-              <button data-mode="default">询问</button>
-              <button data-mode="acceptEdits">接受编辑</button>
-              <button data-mode="plan">计划</button>
-              <button data-mode="bypassPermissions">自动</button>
-            </div>
-            <div class="pop-divider"></div>
-            <!-- 会话级行为偏好（与「哪些工具可用」是两个维度，故不并入下方工具列表） -->
-            <div class="tools-section" id="convPrefsSection">
-              <div class="tools-section-hdr">会话</div>
-              <div class="tool-row" id="notifyRow">
-                <span class="tool-row-name off" title="任务结束/失败后发飞书私聊卡片">🔔 飞书通知</span>
-                <label class="tool-toggle"><input type="checkbox" id="notifyToggle" /><span class="toggle-slider"></span></label>
-              </div>
-              <div class="tool-row" id="ultracodeRow">
-                <span class="tool-row-name off" title="多智能体编排：开着时本会话发送的新消息带 ultracode 关键字（插话不带）">✨ <span class="radiant-text" data-text="Ultracode">Ultracode</span></span>
-                <label class="tool-toggle"><input type="checkbox" id="ultracodeToggle" /><span class="toggle-slider"></span></label>
-              </div>
-            </div>
-            <div class="pop-divider"></div>
+        <div class="model-fab" id="toolsFab">
+          <div class="model-pop" id="toolsPop" hidden>
             <div class="tools-section" id="toolsSection">
               <div class="tools-section-hdr">工具</div>
               <div id="builtinToolsList"></div>
               <div class="pop-divider tools-mcp-sep" id="mcpToolsDivider" hidden></div>
               <div id="mcpToolsList"></div>
+              <div class="pop-divider tools-mcp-sep" id="skillToolsDivider" hidden></div>
+              <div id="skillToolsList"></div>
             </div>
           </div>
-          <button class="model-fab-btn" id="modelFabBtn" title="模型 / 思考强度">
-            <span id="modelFabLabel">Auto</span>
+          <button class="model-fab-btn" id="toolsFabBtn" title="工具开关：内置工具 / MCP / 技能">
+            <span>🔧 工具</span>
             <span class="caret">▴</span>
           </button>
         </div>
       </div>
 
       <footer class="composer">
-        <button
-          class="composer-icon-btn"
-          id="figmaRestoreBtn"
-          type="button"
-          aria-pressed="false"
-          title="设计稿精确还原：贴 Figma 链接自动导出资源、语义命名、传 OSS"
-        ></button>
-        <div
-          id="prompt"
-          class="composer-input"
-          contenteditable="true"
-          role="textbox"
-          aria-multiline="true"
-          data-ph="输入消息，Enter 发送 / Shift+Enter 换行 · 可拖入图片/文件"
-        ></div>
-        <button class="btn primary" id="sendBtn">发送</button>
-        <button class="btn stop" id="stopBtn" title="中断当前运行" hidden>停止</button>
+        <div class="composer-box">
+          <div
+            id="prompt"
+            class="composer-input"
+            contenteditable="true"
+            role="textbox"
+            aria-multiline="true"
+            data-ph="输入消息，Enter 发送 / Shift+Enter 换行 · 可拖入图片/文件"
+          ></div>
+          <div class="composer-bar">
+            <div class="bar-menu">
+              <button class="bar-chip" id="modelBarBtn" type="button" title="选择模型">
+                <span id="modelBarLabel">Auto</span><span class="caret">▴</span>
+              </button>
+              <div class="bar-pop" id="modelPop" hidden>
+                <div class="model-pills" id="modelPills">
+                  <button data-m="auto">Auto</button>
+                  <button data-m="claude-fable-5-1" title="最强模型 · 独立限流桶（撞墙仍会切号）· 单价高于 Opus">Fable 5.1</button>
+                  <button data-m="claude-opus-5">Opus 5</button>
+                  <button data-m="claude-sonnet-5">Sonnet 5</button>
+                  <button data-m="claude-haiku-5">Haiku 5</button>
+                </div>
+                <div class="pop-divider" id="customDivider" hidden></div>
+                <div class="model-pills" id="customModelPills" title="自定义模型（按凭证分组）"></div>
+              </div>
+            </div>
+            <div class="bar-menu" id="effortMenu">
+              <button
+                class="bar-chip"
+                id="effortBarBtn"
+                type="button"
+                aria-haspopup="true"
+                aria-expanded="false"
+                title="思考强度 / Ultracode"
+              >
+                <span id="effortBarLabel">强度 · 中</span><span class="caret">▴</span>
+              </button>
+              <div class="bar-pop effort-pop" id="effortPop" hidden>
+                <div class="effort-meteors" id="effortMeteors" aria-hidden="true"></div>
+                <div class="effort-head">
+                  <span class="effort-cur" id="effortValue">中</span>
+                  <span class="effort-desc" id="effortDesc">平衡</span>
+                </div>
+                <input type="range" id="effortSlider" min="0" max="5" step="1" value="2" aria-label="思考强度" />
+                <div class="effort-ticks" id="effortTicks"></div>
+              </div>
+            </div>
+            <div class="bar-menu">
+              <button class="bar-chip" id="modeBarBtn" type="button" title="权限模式">
+                <span id="modeBarLabel">询问</span><span class="caret">▴</span>
+              </button>
+              <div class="bar-pop" id="modePop" hidden>
+                <button class="pop-item" type="button" data-mode="default">询问<span class="pop-item-desc">每步操作都先确认</span></button>
+                <button class="pop-item" type="button" data-mode="acceptEdits">接受编辑<span class="pop-item-desc">文件编辑自动放行</span></button>
+                <button class="pop-item" type="button" data-mode="plan">计划<span class="pop-item-desc">只读探索，不改动</span></button>
+                <button class="pop-item" type="button" data-mode="bypassPermissions">自动<span class="pop-item-desc">不再逐条询问</span></button>
+              </div>
+            </div>
+            <button class="bar-icon" id="figmaRestoreBtn" type="button" aria-pressed="false" title="设计稿精确还原：贴 Figma 链接自动导出资源、语义命名、传 OSS"></button>
+            <button class="bar-icon" id="notifyBtn" type="button" aria-pressed="false" title="任务结束/失败后发飞书私聊卡片">🔔</button>
+            <span class="spacer"></span>
+            <button class="btn primary" id="sendBtn">发送</button>
+            <button class="btn stop" id="stopBtn" title="中断当前运行" hidden>停止</button>
+          </div>
+        </div>
       </footer>
       </div>
     </div>

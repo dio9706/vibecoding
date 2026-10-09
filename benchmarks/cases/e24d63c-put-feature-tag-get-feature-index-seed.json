@@ -1,0 +1,16 @@
+{
+  "id": "e24d63c-put-feature-tag-get-feature-index-seed",
+  "title": "新增功能标签路由（PUT feature-tag / GET feature-index）及 seed 快照注入",
+  "type": "feature",
+  "input": "给需求系统加功能标签能力：需求文档定稿时把文档里的功能标签解析并保存到需求上；再提供查询功能账本标签的接口。另外创建需求时支持注入种子快照（把预置的标签等内容一次性带上），免得创建完再逐项补。",
+  "analysis": "",
+  "fixRef": "e24d63c",
+  "baseRef": null,
+  "testFiles": [
+    "src/entrypoints/web/routes-requirements.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "requirements"
+  ]
+}

@@ -38,7 +38,7 @@ test('isNewUser：字段缺失/非数组/入参为空 → 按新用户处理', (
 const CLAUDE_OK = { modelTab: 'claude', claude: { token: 'sk-ant-oat01-abc' } };
 const CUSTOM_OK = {
   modelTab: 'custom',
-  custom: { apiKey: 'sk-x', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  custom: { apiKey: 'sk-x', baseURL: 'https://api.deepseek.com/v1' },
 };
 
 test('模型段 claude Tab：token 有值 → 通过', () => {
@@ -54,17 +54,18 @@ test('模型段 claude Tab：token 空/纯空格/缺失 → 报错', () => {
   assert.match(validateOnboardForm({ modelTab: 'claude' }).errors.model, /Token/);
 });
 
-test('模型段 custom Tab：三项齐 → 通过', () => {
+test('模型段 custom Tab：两项齐 → 通过（多模型改版后不再要求模型名）', () => {
   const r = validateOnboardForm(CUSTOM_OK);
   assert.equal(r.ok, true);
   assert.deepEqual(r.errors, {});
 });
 
-test('模型段 custom Tab：缺 apiKey / baseURL / model 各自报错', () => {
+test('模型段 custom Tab：缺 apiKey / baseURL 各自报错', () => {
   const mk = (patch) => ({ modelTab: 'custom', custom: { ...CUSTOM_OK.custom, ...patch } });
   assert.match(validateOnboardForm(mk({ apiKey: '' })).errors.model, /API Key/);
   assert.match(validateOnboardForm(mk({ baseURL: '' })).errors.model, /Base URL/);
-  assert.match(validateOnboardForm(mk({ model: '' })).errors.model, /模型/);
+  // 历史字段 model 不再参与校验：带着它也不报错、缺了也不报错
+  assert.equal(validateOnboardForm(mk({ model: '' })).ok, true);
 });
 
 // modelTab 缺失/非法时按 claude 分支走：默认 Tab 就是 Claude 账号，

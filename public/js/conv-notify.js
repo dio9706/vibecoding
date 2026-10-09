@@ -22,10 +22,7 @@ const POLL_MS = 5000;
  *           getCurrentConvId: () => (string|null) }} deps
  */
 export function bindConvNotify(deps) {
-  const input = document.getElementById('notifyToggle');
-  // 同行的名字 span：勾选态之外再切 .off 灰字，与下方工具列表行的视觉一致；
-  // 行结构缺失时（本模块被加载在没有这一行的页面上）降级为只切勾选态
-  const rowName = input?.closest('.tool-row')?.querySelector('.tool-row-name') || null;
+  const btn = document.getElementById('notifyBtn');
   const applyInjected = deps?.applyInjected;
   const getConvId = deps?.getCurrentConvId || (() => null);
   let timer = null; // 单一轮询定时器：全局只应存在一个，切会话时换目标而不是叠加
@@ -45,15 +42,15 @@ export function bindConvNotify(deps) {
   }
 
   /**
-   * 按会话偏好刷新开关行外观（勾选态 + 名字灰字）。
+   * 按会话偏好刷新开关按钮外观（亮/灭 + aria-pressed，键盘与读屏可感知）。
    * 形参未必是 conv：applySessionPrefs 的 CLI 历史分支传的是合成对象 {model, mode}，
    * 此时可选链天然落到「未激活」，正合语义（磁盘历史会话从没登记过通知）。
    */
   function refreshBtn(conv) {
-    if (!input) return;
+    if (!btn) return;
     const on = !!conv?.meta?.notifyFeishu;
-    input.checked = on;
-    rowName?.classList.toggle('off', !on);
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', String(on));
   }
 
   /** 服务端登记表存的是会话快照（飞书侧靠它 resume 回原会话），缺字段一律给可用默认值。 */
@@ -176,22 +173,19 @@ export function bindConvNotify(deps) {
     }
   }
 
-  // change 而非 click：checkbox 在事件到达前已被浏览器改了勾选态；toggle() 有多条拒绝路径
+  // 点击而非 change：本轮实现是按钮，toggle() 有多条拒绝路径
   //（无会话 / 网络失败 / 服务端配置缺失），所以无论成败收尾都按 conv.meta 真值回写一次，
-  // 否则拒绝路径会留下「勾着但没登记」的假象。
+  // 否则拒绝路径会留下「亮着但没登记」的假象。
   // busy：/on 往返期间再点一次会让第二个 toggle() 读到未写入的 meta、重复登记，且在途窗口里视觉是「已开」而服务端未登记；
-  // 在途期间禁用控件、点击直接回弹。
+  // 在途期间禁用按钮、点击直接忽略。
   let busy = false;
-  input?.addEventListener('change', () => {
-    if (busy) {
-      refreshBtn(findConv(getConvId()));
-      return;
-    }
+  btn?.addEventListener('click', () => {
+    if (busy) return;
     busy = true;
-    input.disabled = true;
+    btn.disabled = true;
     toggle().finally(() => {
       busy = false;
-      input.disabled = false;
+      btn.disabled = false;
       refreshBtn(findConv(getConvId()));
     });
   });

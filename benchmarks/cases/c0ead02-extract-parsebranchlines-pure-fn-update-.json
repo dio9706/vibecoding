@@ -1,0 +1,16 @@
+{
+  "id": "c0ead02-extract-parsebranchlines-pure-fn-update-",
+  "title": "extract parseBranchLines pure fn; update tests to test real impl",
+  "type": "feature",
+  "input": "分支选择器的解析逻辑现在没法单测，把它抽成纯函数：输入 git 的分支列表，输出结构化的本地/远程分支（各自按字母序、本地在前远程在后、当前分支正确标记），空输入给空列表。",
+  "analysis": "",
+  "fixRef": "c0ead02",
+  "baseRef": null,
+  "testFiles": [
+    "src/entrypoints/web/routes-git.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "git"
+  ]
+}

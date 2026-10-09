@@ -10,7 +10,9 @@ import { runAgentLoop } from './agent-loop.js';
 
 export const OPENAI_COMPAT_CAPABILITIES = Object.freeze({
   agentic: true, tools: true, fileIO: true, permissions: true,
-  stream: true, resume: false, rateLimitAware: false, compaction: false,
+  // resume：T2-P3 起为 true —— conv-messages 逐步落盘即检查点，run-index 对账续跑
+  // compaction：T7 起为 true —— 编排层滚动摘要（conv-messages v2 + conv-compact），原文保留
+  stream: true, resume: true, rateLimitAware: false, compaction: true,
 });
 
 /**
@@ -30,6 +32,7 @@ export function createOpenAiCompatProvider(deps = {}) {
         model: input.model,
         tools: input.tools,
         abortSignal: input.abortController?.signal,
+        reasoningEffort: input.effort,
       });
     });
   return {

@@ -1,0 +1,16 @@
+{
+  "id": "939026c-avoid-mutating-bank-in-sessions-crud-gua",
+  "title": "avoid mutating bank in sessions CRUD, guard id field in patchSession",
+  "type": "bug",
+  "input": "记忆库会话的增改删现在会直接改动读取出来的数据对象（有副作用隐患），改成不可变写法；另外局部更新会话时要防止把 id 字段覆盖掉。",
+  "analysis": "",
+  "fixRef": "939026c",
+  "baseRef": null,
+  "testFiles": [
+    "src/store/memory-bank.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "memory-bank"
+  ]
+}

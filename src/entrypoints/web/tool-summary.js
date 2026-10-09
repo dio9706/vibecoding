@@ -66,6 +66,12 @@ export function summarizeTool(a) {
       // 与转录行（claude.logic.js 的「工作流(名)启动：…」）同形：同一实体在相邻两行里只用一种写法
       return desc ? `工作流(${wfName})：${clip(desc, 40)}` : `工作流(${wfName})`;
     }
+    case 'AskColleague':
+      return `询问 ${clip(inp.name || inp.role || '同事', 16)}：${clip(inp.question, 40)}`;
+    case 'WaitColleagueReply':
+      return '等待同事答复…';
+    case 'RepoMap':
+      return `查代码地图${inp.query ? ` “${clip(inp.query, 32)}”` : ''}${inp.refresh ? '（刷新）' : ''}`;
     case 'TodoWrite':
       return '更新任务清单';
     default:
@@ -73,20 +79,10 @@ export function summarizeTool(a) {
   }
 }
 
-// 只读工具自动放行；其余（Write/Edit/Bash 等改动类）执行前询问用户
-export const READONLY_TOOLS = new Set([
-  'Read',
-  'Grep',
-  'Glob',
-  'LS',
-  'NotebookRead',
-  'TodoWrite',
-  'WebSearch',
-  'WebFetch',
-  'Task',
-  'Agent', // SDK 0.3.210+ 子代理工具改名 Agent；子代理内部的改动类工具仍会逐个走审批
-  // Workflow 刻意不放行：它一次能拉起十几个子代理，风险不在改文件而在烧额度；询问模式下必须让用户点头
-]);
+// 只读放行集已收归策略引擎（T6）：统一规则表在 capabilities/tool-policy.logic.js#classifyTool。
+// 本文件只留摘要/解析（summarizeTool / parseDialog），不再持有审批名单——两份名单必然分叉。
+// 备忘：Workflow 刻意不在任何放行面（一轮能拉起十几个子代理，风险在烧额度，默认档 ask）；
+// 理由的完整表述见 tool-policy.logic.js 的 agent 类注释与 T6 spec。
 
 /** 尽力从 dialog payload 解析出可渲染的问题/选项；结构不认识返回 null（→ cancelled） */
 export function parseDialog(request) {

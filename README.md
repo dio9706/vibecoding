@@ -110,7 +110,7 @@ git push origin v1.0.0
 ## 🔧 七大特性：如何配置
 
 ### 1. 关闭窗口后继续运行
-- **原理**：任务在后端进程内执行并登记到 `active-runs.json`；前端只是订阅流。关窗后任务照跑，重开页面通过 `/api/run/pending` 自动接回。
+- **原理**：任务在后端进程内执行并登记到 `run-index.json`；前端只是订阅流。关窗后任务照跑，重开页面通过 `/api/run/pending` 自动接回。
 - **配置**：无需额外配置。**强烈建议用 PM2 守护**（见上），否则手动 `node server.js` 的进程随终端关闭而退出。
 - **相关**：看门狗（静默 15min / 硬超时 2h 兜底）+ 手动停止按钮。
 
@@ -172,6 +172,8 @@ git push origin v1.0.0
 | `SCRIPTS_DIR` | 可选 | `scripts` | 动作脚本目录 |
 | `PYTHON_BIN` | 可选 | `python` | Python 解释器 |
 | `CLASSIFY_MODEL` | 可选 | `claude-sonnet-4-6` | 意图/triage 兜底轻模型 |
+| `COLLEAGUE_ASK_MODEL` | 可选 | 沿用 `CLASSIFY_MODEL` | 委托同事对话的判定/追问模型 |
+| `SUPERPOWERS_REF` | 可选 | `main` | 内置 Superpowers 技能包拉取的版本（分支/tag；CI 建议钉版） |
 | `FRONTEND_DIR` / `BACKEND_DIR` | 可选 | ⚠️原作者路径 | 需求分析只读的代码目录，**换机务必覆盖** |
 | `TRIAGE_TRIGGER` | 可选 | 内置正则 | 待办触发词 |
 | `REACTION_EMOJIS` | 可选 | 5 个内置 | 处理中随机表情 |
@@ -182,7 +184,7 @@ git push origin v1.0.0
 | 文件 | 内容 |
 |------|------|
 | `settings.json` | 飞书凭证 + **Anthropic token 池** + 文案 + UI 偏好（设置页写入） |
-| `active-runs.json` / `pending-resume.json` | 关窗续跑 / 额度续跑状态 |
+| `run-index.json` / `pending-resume.json` | 关窗续跑 / 额度续跑状态 |
 | `tasks.json` / `event-log.jsonl` | 会话 / 事件数据 |
 | `action-configs.json` / `action-log.jsonl` | 动作配置 / 执行记录 |
 | `saved-dirs.json` / `user-vars.json` / `bindings.json` / `feishu-status.json` | 常用目录 / 用户变量 / 绑定 / 飞书状态 |

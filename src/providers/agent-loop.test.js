@@ -10,9 +10,17 @@ function recordingModel(steps) {
     const s = steps[calls.length - 1] || { finishReason: 'stop' };
     async function* stream() {
       if (s.text) yield { type: 'text', text: s.text };
-      for (const tc of s.toolCalls || []) yield { type: 'tool-call', toolCallId: tc.toolCallId, toolName: tc.toolName, input: tc.input };
+      for (const tc of s.toolCalls || []) {
+        yield {
+          type: 'tool-call',
+          toolCallId: tc.toolCallId,
+          toolName: tc.toolName,
+          input: tc.input,
+          ...(tc.invalid ? { invalid: true, errorText: 'invalid input' } : {}),
+        };
+      }
     }
-    const responseMessages = [{
+    const responseMessages = s.responseMessages || [{
       role: 'assistant',
       content: s.text
         ? [{ type: 'text', text: s.text }]
@@ -101,6 +109,79 @@ test('maxSteps 兜底：模型一直要工具也会停', async () => {
   );
   assert.equal(n, 2);
   assert.equal(resulted, true);
+});
+
+// 2026-10-08 事故：预算用尽被静默当成功 → 界面「(无输出)」。现在改为 OpenCode 式强制收尾。
+test('maxSteps 用尽 → 强制收尾：收尾轮 disableTools + 系统提示；结果=总结，工具不再执行，用量/检查点照常', async () => {
+  const calls = [];
+  const modelRun = (messages, opts = {}) => {
+    const wrap = !!opts.disableTools;
+    const last = messages[messages.length - 1];
+    calls.push({ disableTools: wrap, lastRole: last?.role, lastContent: String(last?.content || '') });
+    return {
+      stream: (async function* () {
+        if (wrap) yield { type: 'text', text: '已达上限：完成 A，未完成 B' };
+        else yield { type: 'tool-call', toolCallId: 't', toolName: 'x', input: {} };
+      })(),
+      finished: Promise.resolve(wrap
+        ? { finishReason: 'stop', toolCalls: [], responseMessages: [{ role: 'assistant', content: [{ type: 'text', text: '已达上限：完成 A，未完成 B' }] }], usage: { inputTokens: 5, outputTokens: 3 } }
+        : { finishReason: 'tool-calls', toolCalls: [{ toolCallId: 't', toolName: 'x', input: {} }], responseMessages: [], usage: { inputTokens: 10, outputTokens: 2 } }),
+    };
+  };
+  let info = null;
+  let execs = 0;
+  const persisted = [];
+  const out = await runAgentLoop(
+    { messages: [{ role: 'user', content: 'go' }], modelRun, executeTool: async () => { execs++; }, maxSteps: 3 },
+    { onResult: (r) => { info = r; }, onMessages: (b) => persisted.push(...b) },
+  );
+  assert.equal(execs, 3, '收尾轮不执行任何工具');
+  assert.equal(out.steps, 3, 'steps 只计预算内步数');
+  assert.equal(out.exhausted, true, '耗尽必须显式标记');
+  assert.equal(out.wrappedUp, true, '收尾成功');
+  assert.equal(out.result, '已达上限：完成 A，未完成 B');
+  assert.equal(calls.length, 4, '预算 3 次 + 收尾 1 次');
+  assert.equal(calls[3].disableTools, true, '收尾轮不向模型暴露工具');
+  assert.equal(calls[3].lastRole, 'system');
+  assert.match(calls[3].lastContent, /工具已禁用/);
+  assert.equal(out.inputTokens, 35, '收尾轮 usage 计入（30+5）');
+  assert.equal(out.outputTokens, 9, '（6+3）');
+  assert.equal(info.wrappedUp, true);
+  assert.equal(info.exhausted, true);
+  assert.ok(persisted.some((m) => m.role === 'assistant'), '收尾总结落检查点（历史不再停在半截 tool 结果）');
+});
+
+test('无上限（不传 maxSteps）：跑到模型自停，不触发收尾；exhausted:false wrappedUp:false', async () => {
+  let n = 0;
+  const modelRun = () => {
+    n += 1;
+    const step = n;
+    return {
+      stream: (async function* () {
+        if (step <= 5) yield { type: 'tool-call', toolCallId: 't' + step, toolName: 'x', input: {} };
+        else yield { type: 'text', text: '完成' };
+      })(),
+      finished: Promise.resolve(step <= 5
+        ? { finishReason: 'tool-calls', toolCalls: [{ toolCallId: 't' + step, toolName: 'x', input: {} }], responseMessages: [] }
+        : { finishReason: 'stop', toolCalls: [], responseMessages: [] }),
+    };
+  };
+  let execs = 0;
+  const out = await runAgentLoop({ messages: [], modelRun, executeTool: async () => { execs++; } }, {});
+  assert.equal(execs, 5, '5 次工具 + 1 次文本收尾，无预算截断');
+  assert.equal(out.exhausted, false);
+  assert.equal(out.wrappedUp, false);
+  assert.equal(out.result, '完成');
+});
+
+test('maxSteps 内正常收尾（最后一步是文本）→ exhausted:false', async () => {
+  const modelRun = () => {
+    async function* stream() { yield { type: 'text', text: 'done' }; }
+    return { stream: stream(), finished: Promise.resolve({ finishReason: 'stop', toolCalls: [], responseMessages: [], usage: { inputTokens: 1, outputTokens: 1 } }) };
+  };
+  const out = await runAgentLoop({ messages: [], modelRun, executeTool: async () => {}, maxSteps: 1 }, {});
+  assert.equal(out.exhausted, false);
+  assert.equal(out.result, 'done');
 });
 
 test('toToolResultMessage：字符串→text，对象→json', () => {
@@ -272,6 +353,130 @@ test('onPulse：每一步都打心跳，步数越多心跳越多', async () => {
 });
 
 test('onPulse：未提供该钩子时不抛异常（可选钩子）', async () => {
+  const model = recordingModel([{ text: 'hi', finishReason: 'stop' }]);
+  await runAgentLoop({ messages: [], modelRun: model, executeTool: async () => 'ok' }, {});
+});
+
+// ── 无效工具调用（AI SDK 校验失败）─────────────────────────────
+// 背景（2026-09-30 实测 ai@7）：zod schema 不匹配 / JSON 解析失败 / 未知工具时，
+// AI SDK 把调用标成 invalid:true，并**自动**在 responseMessages 里补一条 error 结果。
+// agent-loop 若不识别：① 会为一个注定不执行的调用弹审批卡；② 会真的执行它；
+// ③ 会给同一个 toolCallId 再追加一条结果 → 下一轮请求重复 tool-result 而畸形。
+
+test('无效调用：不执行、不弹审批、不重复追加结果，循环继续下一轮', async () => {
+  const autoResult = {
+    role: 'tool',
+    content: [{ type: 'tool-result', toolCallId: 't1', toolName: 'readFile', output: { type: 'error-text', value: 'invalid input' } }],
+  };
+  const model = recordingModel([
+    {
+      finishReason: 'tool-calls',
+      toolCalls: [{ toolCallId: 't1', toolName: 'readFile', input: { path: 123 }, invalid: true }],
+      responseMessages: [
+        { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 't1', toolName: 'readFile', input: { path: 123 } }] },
+        autoResult,
+      ],
+    },
+    { text: 'fixed', finishReason: 'stop' },
+  ]);
+  let executed = 0;
+  let asked = 0;
+  const r = await runAgentLoop(
+    { messages: [{ role: 'user', content: 'go' }], modelRun: model, executeTool: async () => { executed++; } },
+    { canUseTool: async () => { asked++; return { behavior: 'allow' }; } },
+  );
+  assert.equal(executed, 0, '无效调用不得执行');
+  assert.equal(asked, 0, '无效调用不得触发审批');
+  assert.equal(r.result, 'fixed', '循环应继续到下一轮');
+  assert.equal(model.calls.length, 2);
+  const results = r.messages.filter((m) => m.role === 'tool').flatMap((m) => m.content);
+  assert.equal(
+    results.filter((x) => x.toolCallId === 't1').length,
+    1,
+    't1 恰好一条结果（AI SDK 自带那条；不能重复追加）',
+  );
+});
+
+test('无效调用：activity 带 invalid 标记（供上层提示「参数无效」）', async () => {
+  const activities = [];
+  const model = recordingModel([
+    {
+      finishReason: 'tool-calls',
+      toolCalls: [{ toolCallId: 't1', toolName: 'readFile', input: {}, invalid: true }],
+      responseMessages: [
+        { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 't1', toolName: 'readFile', input: {} }] },
+        { role: 'tool', content: [{ type: 'tool-result', toolCallId: 't1', toolName: 'readFile', output: { type: 'error-text', value: 'bad' } }] },
+      ],
+    },
+    { text: 'ok', finishReason: 'stop' },
+  ]);
+  await runAgentLoop(
+    { messages: [], modelRun: model, executeTool: async () => 'ok' },
+    { onActivity: (a) => activities.push(a) },
+  );
+  assert.equal(activities.length, 1);
+  assert.equal(activities[0].invalid, true);
+  assert.equal(activities[0].name, 'readFile');
+});
+
+test('finishReason=error：当作失败抛出，不静默当成功', async () => {
+  let result = null;
+  await assert.rejects(
+    runAgentLoop(
+      { messages: [], modelRun: recordingModel([{ text: 'partial', finishReason: 'error' }]), executeTool: async () => 'ok' },
+      { onResult: (r) => { result = r; } },
+    ),
+    /finishReason=error/,
+  );
+  assert.equal(result?.is_error, true, 'onResult 应报 error');
+  assert.equal(result?.result, 'partial', '已产出的文本照常带上（不假装没发生）');
+});
+
+// ── onMessages 检查点钩子（T2-P3）──────────────────────────────
+// 背景：conv-messages 原先只在 run 成功结束时一次性写入；中途崩溃本轮已产生的
+// assistant/tool 消息全丢，重启只能从零重来。onMessages 把「每步新增的消息」按批交给
+// 上层立即落盘（run-openai.js#persistBatch），崩溃后历史里就是「干到一半」的现场。
+
+test('onMessages：每步 responseMessages 与每条工具结果都按批交出（批内容就是 convo 里的对象）', async () => {
+  const model = recordingModel([
+    { toolCalls: [{ toolCallId: 't1', toolName: 'readFile', input: {} }], finishReason: 'tool-calls' },
+    { text: 'done', finishReason: 'stop' },
+  ]);
+  const batches = [];
+  const r = await runAgentLoop(
+    { messages: [{ role: 'user', content: 'go' }], modelRun: model, executeTool: async () => 'FILE BODY' },
+    { onMessages: (b) => batches.push(b), canUseTool: async () => ({ behavior: 'allow' }) },
+  );
+  // 批序：assistant(tool-call) → tool 结果 → assistant(文本)
+  assert.equal(batches.length, 3);
+  assert.deepEqual(batches[0].map((m) => m.role), ['assistant']);
+  assert.deepEqual(batches[1].map((m) => m.role), ['tool']);
+  assert.equal(batches[1][0].content[0].toolCallId, 't1');
+  assert.deepEqual(batches[2].map((m) => m.role), ['assistant']);
+  for (const m of batches.flat()) assert.ok(r.messages.includes(m), '交出的必须是 convo 里的同一对象');
+});
+
+test('onMessages：被中断跳过的工具结果也在批里（续跑时不悬空）', async () => {
+  const ac = new AbortController();
+  const model = recordingModel([
+    {
+      toolCalls: [
+        { toolCallId: 't1', toolName: 'write', input: { n: 1 } },
+        { toolCallId: 't2', toolName: 'write', input: { n: 2 } },
+      ],
+      finishReason: 'tool-calls',
+    },
+  ]);
+  const batches = [];
+  await runAgentLoop(
+    { messages: [], modelRun: model, signal: ac.signal, executeTool: async () => { ac.abort(); return 'ok'; } },
+    { onMessages: (b) => batches.push(b) },
+  );
+  const toolIds = batches.flat().filter((m) => m.role === 'tool').flatMap((m) => m.content.map((c) => c.toolCallId));
+  assert.deepEqual(toolIds.sort(), ['t1', 't2'], '每条调用都要有结果落到检查点，会话才能续');
+});
+
+test('onMessages：可选钩子，未提供时不抛（既有调用方零影响）', async () => {
   const model = recordingModel([{ text: 'hi', finishReason: 'stop' }]);
   await runAgentLoop({ messages: [], modelRun: model, executeTool: async () => 'ok' }, {});
 });

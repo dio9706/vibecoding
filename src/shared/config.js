@@ -79,6 +79,11 @@ export const config = {
     // DEV 编译脚本（在 config.scripts.dir 下），需支持 --env dev --branch <name>
     compileScript: process.env.UNATTENDED_COMPILE_SCRIPT || 'get_qrcode.py',
   },
+  feishuAsk: {
+    // 委托同事对话的「判定/追问」模型：输出是发给真人看的（追问话术 + 结论摘要），
+    // 缺省沿用 CLASSIFY_MODEL；可用 COLLEAGUE_ASK_MODEL 单独上调质量，不影响其他分类点。
+    model: process.env.COLLEAGUE_ASK_MODEL || process.env.CLASSIFY_MODEL || 'claude-haiku-4-5',
+  },
 };
 
 export function assertLarkConfig() {

@@ -1,0 +1,16 @@
+{
+  "id": "f22ed6a-add-v1-to-v2-migration-with-backup-on-re",
+  "title": "add v1 to v2 migration with backup on readBank",
+  "type": "feature",
+  "input": "记忆库从 v1 升级到 v2 时，读到旧格式的数据要先备份原文件再迁移，绝对不能静默丢数据。",
+  "analysis": "",
+  "fixRef": "f22ed6a",
+  "baseRef": null,
+  "testFiles": [
+    "src/store/memory-bank.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "memory-bank"
+  ]
+}

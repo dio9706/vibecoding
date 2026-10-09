@@ -19,8 +19,11 @@ import {
   askUser,
   nextReqId,
   setRunMode,
+  stopRun,
   flushHeldMsgs,
   consumeHeldMsgs,
+  emitRunEvent,
+  truncateForJournal,
 } from '../../store/runs.js';
 import {
   getPending,
@@ -29,20 +32,25 @@ import {
   removePending,
   shouldAbandonResume,
 } from '../../store/pending-resume.js';
+import { listRunIndex, removeRun, partitionRunIndex, isPidAlive, migrateLegacyActiveRuns } from '../../store/run-index.js';
+import { readRunEvents } from '../../store/run-journal.js';
 import {
-  listActiveRuns,
-  addActiveRun,
-  patchActiveRun,
-  removeActiveRun,
-  removeActiveRuns,
-  partitionActiveRuns,
-  isPidAlive,
-} from '../../store/active-runs.js';
+  mirrorRunStart,
+  mirrorRunPatch,
+  mirrorRunRemove,
+  appendStandaloneRunEvent,
+} from './run-durability.js';
+import { classifyInterrupted } from './run-reconcile.logic.js';
+import { scheduleOpenAiOrphanResume } from './run-openai.js';
 import os from 'node:os';
 import { getActiveToken, noteRateLimit } from '../../capabilities/token-rotation.js';
-import { summarizeTool, READONLY_TOOLS, parseDialog } from './tool-summary.js';
-import { isRetryEligible } from './run-claude.logic.js';
-import { getUiPrefs } from '../../store/settings.js';
+import { summarizeTool, parseDialog } from './tool-summary.js';
+import { createPolicyGate, resolveUnattendedPolicy, PRETOOL_ASK_HOOK } from '../../capabilities/tool-policy.js';
+import { systemNotify } from '../../integrations/notify.js';
+import { isRetryEligible, MAX_RESUME_ATTEMPTS } from './run-claude.logic.js';
+import { getUiPrefs, getBuiltinMcp, getBuiltinSkills } from '../../store/settings.js';
+import { resolveBuiltinMcp, toClaudeServerConfig } from '../../capabilities/builtin-mcp.js';
+import { resolveSkillPlugins } from '../../capabilities/builtin-skills.js';
 
 /** 别名映射：SDK 内部工具名 → 用户配置的逻辑工具名（前端 BUILTIN_TOOLS 的 id） */
 const TOOL_DISABLE_ALIASES = {
@@ -53,22 +61,53 @@ const TOOL_DISABLE_ALIASES = {
   NotebookRead: 'Read',  // NotebookRead 归并到 Read
 };
 
-/** 用 run 注册表回调驱动 Claude（abortController 供看门狗/超时/手动停止中断） */
-export function startClaudeRun(run, { prompt, cwd, addDirs, session, model, effort, mode, convId, resumePendingId, resumeAttempt = 0 }) {
-  run.steerHold = true; // 续跑/孤儿恢复等所有 Claude 运行入口统一支持插话持有（handleRunStart 的提前置位覆盖判档窗口）
+/** 用 run 注册表回调驱动 Claude（abortController 供看门狗/超时/手动停止中断）。
+ *  execPolicy/unattended（T6）：无人值守调用方（需求系统任务/colleague-dev/auto-dev）传入；
+ *  按 bot.execPolicy 解析档位（默认 bypass=与改动前一致），策略门见 capabilities/tool-policy.js。 */
+export function startClaudeRun(run, { prompt, cwd, addDirs, session, model, effort, mode, convId, resumePendingId, resumeAttempt = 0, requestId, execPolicy = null, unattended = false }) {
+  run.capabilities.steer = true; // 续跑/孤儿恢复等所有 Claude 运行入口统一支持插话持有（handleRunStart 的提前置位覆盖判档窗口）
   run.convId = convId || run.convId || null;
   // 插话埋点（routes-run 的 /api/run/send）只拿得到 run 对象，起跑上下文挂上来供它取用。
   // model 在此已是 auto 判档后的实际取值，比请求体里的 'auto' 更有信息量。
   run.cwd = cwd || null;
   run.model = model || null;
+  run.provider = 'claude-agent'; // journal/索引的 provider 归属（openai 路径在各自入口设置）
+  run.requestId = requestId || null; // 提交幂等键（journal 里与 submissions 认领对账）
+  run.resumeAttempt = resumeAttempt || 0; // 续跑代次快照（settled 事件带出，供熔断排查）
   // 读取用户禁用的工具列表（起跑时快照，避免运行期并发读写竞争）
   const { disabledTools: rawDisabledTools } = getUiPrefs();
   const disabledToolsSet = new Set(Array.isArray(rawDisabledTools) ? rawDisabledTools : []);
   const effectiveMode = mode || 'default'; // default(询问) | acceptEdits | plan | bypassPermissions
-  run.mode = effectiveMode; // 运行时可变（/api/run/set-mode 可中途放宽）
-  run.startMode = effectiveMode; // 起跑模式：非「询问」起跑未装 ask 钩子，中途无法拦截
+  // 工具策略（T6）：无人值守按 bot.execPolicy 解析（bypass 档 = 与改动前完全一致）；
+  // 交互路径档位即 mode（gate 运行时读 run.mode，支持 /api/run/set-mode 中途放宽）。
+  const policy = unattended
+    ? resolveUnattendedPolicy(execPolicy)
+    : { execPolicy: null, unattended: false, policyLevel: effectiveMode, sdkMode: effectiveMode };
+  const sdkMode = policy.sdkMode;
+  run.mode = sdkMode; // 运行时可变（/api/run/set-mode 可中途放宽）
+  run.startMode = sdkMode; // 起跑模式：非「询问」起跑未装 ask 钩子，中途无法拦截
+  const policyGate = createPolicyGate({
+    provider: 'claude-agent',
+    level: unattended ? policy.policyLevel : () => run.mode || 'default',
+    unattended: !!unattended,
+    workspace: cwd,
+    disabledTools: disabledToolsSet,
+    alias: TOOL_DISABLE_ALIASES,
+    onDeny: (info) => {
+      emitRunEvent(run, 'policy_block', { tool: info.tool, klass: info.klass, ruleId: info.ruleId, reason: info.reason, count: info.count });
+      logger.warn('web', '工具调用被策略拒绝', { runId: run.id, tool: info.tool, ruleId: info.ruleId, count: info.count });
+    },
+    onFuse: (info) => {
+      // 无人值守计次熔断（T6 spec §4.2）：停 run + 系统通知；会话通知开启时另有卡片（settle 监听统一发）
+      systemNotify(
+        '无人值守任务被安全策略拦截',
+        `会话 ${run.convId || run.id}：连续 ${info.count} 次被策略拒绝（最后：${info.last.tool}），已停止。可调高机器人执行档位（execPolicy）后重试。`,
+      );
+      stopRun(run, `连续 ${info.count} 次被安全策略拦截，已停止并通知管理员（最后：${info.last.tool}）`);
+    },
+  });
   // 补发判档窗口内缓冲的模式切换（setRunMode 在 startMode 赋值前调用会先缓冲到 _pendingMode）
-  if (run._pendingMode && effectiveMode === 'default') {
+  if (run._pendingMode && sdkMode === 'default') {
     const targetMode = run._pendingMode;
     delete run._pendingMode;
     if (targetMode === 'acceptEdits' || targetMode === 'bypassPermissions') {
@@ -80,27 +119,58 @@ export function startClaudeRun(run, { prompt, cwd, addDirs, session, model, effo
   let lastRate = null;
   const active = getActiveToken(); // {id, token, label} | null
   run._tokenId = active?.id || null; // 限流归因：记本次用的号
-  const params = { session, cwd, model, effort, mode: effectiveMode, convId, resumePendingId, tokenId: run._tokenId, resumeAttempt };
-  // 落盘镜像：进程重启后据此把孤儿 run 转「待续跑」自动续接（见启动回调的孤儿恢复）
-  addActiveRun({
+  const params = { session, cwd, model, effort, mode: sdkMode, convId, resumePendingId, tokenId: run._tokenId, resumeAttempt };
+  // 事件流（P2 影子）：submitted 记本次运行的入口事实（只写不读，P5 对账起用）
+  emitRunEvent(run, 'submitted', {
+    provider: 'claude-agent',
+    requestId: requestId || null,
+    cwd: cwd || null,
+    model: model || null,
+    effort: effort || null,
+    mode: sdkMode,
+    execPolicy: policy.execPolicy,
+    unattended: !!unattended,
+    session: session || null,
+    resumeAttempt: run.resumeAttempt,
+  });
+  // 落盘索引（P5 起唯一恢复来源）：进程重启后据此把孤儿 run 对账成「待续跑」自动续接
+  mirrorRunStart({
     runId: run.id,
     convId: run.convId,
+    provider: 'claude-agent',
     session_id: session || null, // 新会话此刻还没有 session，onInit 到达后回填
     cwd,
     model,
     effort,
-    mode: effectiveMode,
+    mode: sdkMode,
+    requestId: requestId || null,
+    prompt: prompt ? truncateForJournal(prompt) : null, // 截断存档：P3 续跑查 repo map 用
     resumeAttempt, // 续跑代次：重启后孤儿恢复据此 +1 计次，达 MAX_RESUME_ATTEMPTS 熔断
     // 属主标记：多实例（PM2 web + Tauri 桌面版）共用同一个 APP_DATA_DIR，
     // 启动时据此区分「真孤儿」与「别的实例正在跑」，避免抢跑同一 session 重复烧额度。
     pid: process.pid,
     startedAt: Date.now(),
+    updatedAt: Date.now(),
+    status: 'running',
+    lastSeq: run._journalSeq || 0,
   });
+  // 内置 MCP（context7 等；figma-devmode 为 http，仅本路径可用）。
+  // 刻意只注入内置：用户自定义 MCP 是否进 Claude 路径是后续独立子项（避免存量行为突变）。
+  const builtinMcp = resolveBuiltinMcp({ state: getBuiltinMcp(), provider: 'claude' });
+  const mcpServers = builtinMcp.length
+    ? Object.fromEntries(builtinMcp.map((e) => [e.builtinId, toClaudeServerConfig(e)]))
+    : null;
+  // 内置 Skills（superpowers）：启用且**已安装**（安装时拉取）才注入为本地 plugin，SDK 从插件加载 skills。
+  // 停用了部分技能时，resolveSkillPlugins 指向按需物化的「启用视图」镜像——SDK 没有 per-skill 禁用项，
+  // Options.skills 是 allowlist（传了会连带隐藏项目/用户级技能），镜像方案只动本插件目录。
+  const plugins = resolveSkillPlugins({ state: getBuiltinSkills() });
   providers.get(DEFAULT_PROVIDER_ID).run(prompt, {
     cwd: cwd || undefined,
     ...(addDirs?.length ? { additionalDirectories: addDirs } : {}),
     ...(active ? { env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: active.token } } : {}),
-    permissionMode: effectiveMode,
+    ...(mcpServers ? { mcpServers } : {}),
+    ...(plugins.length ? { plugins } : {}),
+    permissionMode: sdkMode,
     resume: session || undefined,
     includePartialMessages: true, // token 级流式，前端打字机更顺滑
     abortController: run.abortController,
@@ -122,34 +192,18 @@ export function startClaudeRun(run, { prompt, cwd, addDirs, session, model, effo
 
 AskUserQuestion 工具会呈现出格式良好的选择卡片，用户可以点击选项来快速完成决策，这是比在文本中列出「1. 2. 3.」更好的交互方式。`,
     },
-    // 「询问」模式必须强制走 canUseTool：用户全局 settings.json 把 Bash/Edit/Write 等整体 allow，
+    // 「询问」起跑必须强制走 canUseTool：用户全局 settings.json 把 Bash/Edit/Write 等整体 allow，
     // 而 allow 规则优先于 canUseTool（回调被架空、工具直接执行）。PreToolUse 钩子返回 ask
-    // 把每次工具调用的裁决权交回 canUseTool（SDK 官方推荐做法）；只读工具仍在回调里自动放行。
-    ...(effectiveMode === 'default'
-      ? {
-          hooks: {
-            PreToolUse: [
-              {
-                hooks: [
-                  async () => ({
-                    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' },
-                  }),
-                ],
-              },
-            ],
-          },
-        }
-      : {}),
+    // 把每次工具调用的裁决权交回 canUseTool（SDK 官方推荐做法）；裁决本身在策略门里（T6）。
+    ...(sdkMode === 'default' ? { hooks: PRETOOL_ASK_HOOK } : {}),
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
     canUseTool: async (toolName, input) => {
-      // 用户显式禁用的工具：任意模式下均拒绝执行（disabledTools 比权限模式优先级更高）
-      const logicalName = TOOL_DISABLE_ALIASES[toolName] || toolName;
-      if (disabledToolsSet.has(logicalName)) {
-        return { behavior: 'deny', message: `工具「${toolName}」已被用户关闭，可在右下角模型选择器中重新开启` };
-      }
-      if (run.mode !== 'default') return { behavior: 'allow' }; // 已放宽（含中途放宽）→ 此处直接放行；非询问起跑的实际裁决在 SDK permissionMode
-      if (READONLY_TOOLS.has(toolName)) return { behavior: 'allow' };
+      // 统一策略门（T6）：disabledTools/只读/区内写/越界/网络/危险命令都在规则表里裁决。
+      // 无人值守下 gate 会把 ask 翻成 deny（并计次熔断）；交互路径 ask 走审批卡。
+      const d = policyGate.decide(toolName, input);
+      if (d.action === 'allow') return { behavior: 'allow' };
+      if (d.action === 'deny') return { behavior: 'deny', message: d.reason };
       const choice = await askUser(run, {
         reqId: nextReqId(run),
         kind: 'permission',
@@ -190,7 +244,7 @@ AskUserQuestion 工具会呈现出格式良好的选择卡片，用户可以点�
     },
     onInit: (info) => {
       runSession(run, info.session_id);
-      patchActiveRun(run.id, { session_id: info.session_id }); // 回填续跑锚点
+      mirrorRunPatch(run.id, { session_id: info.session_id, updatedAt: Date.now() }); // 回填续跑锚点（双写）
     },
     onPulse: () => runPulse(run),
     onText: (text) => runText(run, text),
@@ -225,13 +279,13 @@ AskUserQuestion 工具会呈现出格式良好的选择卡片，用户可以点�
     () => settleRun(run, null, lastRate, params),
     (err) => settleRun(run, err, lastRate, params),
   );
+  // 事件流（P2 影子）：provider run() 已启动。放在链式语句之后即可（onInit 是异步回调，不会早于本行）
+  emitRunEvent(run, 'started', { pid: process.pid });
 }
 
 const resumeTimers = new Map(); // pending 条目 id -> setTimeout 句柄
 
-// 续跑上限：允许极少数合理的意外重启自动续跑，同时对病态循环（Claude 自重启）快速熔断。
-// 计次跨进程重启持久化：active-runs.resumeAttempt → pending.attempts 每轮 +1。
-const MAX_RESUME_ATTEMPTS = 3;
+// 续跑上限（MAX_RESUME_ATTEMPTS）与 openai 检查点续跑共用，定义收在 run-claude.logic.js。
 
 // 异常结束后的重试延迟：给瞬态故障（进程崩溃/传输错误）一点恢复余地，又不让用户干等。
 const RETRY_DELAY_MS = 2000;
@@ -242,6 +296,7 @@ const RETRY_DELAY_MS = 2000;
  */
 function abandonResume({ convId, attempts, entryId, reason }) {
   logger.warn('web', '续跑熔断', { convId, attempts, reason });
+  appendStandaloneRunEvent(convId, 'abandoned', { attempts, reason, entryId: entryId || null });
   if (entryId) {
     updatePending(entryId, { status: 'abandoned', reason, attempts });
   } else {
@@ -259,7 +314,7 @@ function settleRun(run, err, lastRate, params) {
     return;
   }
   run._settled = true;
-  removeActiveRun(run.id); // run 已收尾（任何路径），不再是重启恢复对象
+  mirrorRunRemove(run.id); // run 已收尾（任何路径），不再是重启恢复对象（active-runs 与影子索引同删）
   const rejected = lastRate && lastRate.status === 'rejected'; // 额度耗尽
   const sid = run.session_id || params.session;
   if (rejected && sid && params.convId) {
@@ -405,7 +460,14 @@ export function doResume(entryId) {
   }
   const run = createRun();
   run.convId = entry.convId;
+  const priorRunId = entry.runId || null; // updatePending 会覆盖 runId，先留痕供 journal 追溯
   updatePending(entry.id, { status: 'resuming', runId: run.id });
+  emitRunEvent(run, 'resumed', {
+    fromRunId: priorRunId,
+    attempt: entry.attempts || 0,
+    reason: entry.reason || null,
+    pendingId: entry.id,
+  });
   startClaudeRun(run, {
     prompt: entry.prompt || '继续',
     cwd: entry.cwd,
@@ -419,13 +481,22 @@ export function doResume(entryId) {
   });
 }
 
-/** 进程启动时调用：孤儿 run 转待续跑 + 重排 pending 定时器（逻辑原样自 server.listen 回调提取） */
-export function recoverPendingAndOrphans() {
-  // 孤儿恢复：上次进程死亡（崩溃/pm2 重启）时仍在跑的 run → 转待续跑，自动发「继续」续接 session。
-  // 无 session 锚点（判档窗口/首轮 init 前崩溃）的无法续接，只记日志。
-  // 只回收「属主进程确认已死」的条目：多实例共用 APP_DATA_DIR 时，
-  // 无条件整表清空会把另一个实例正在跑的 run 抢过来重复续跑（详见 active-runs.js）。
-  const { orphans, foreign } = partitionActiveRuns(listActiveRuns(), {
+/**
+ * 启动对账（P5，spec §4.5）：run-index 孤儿 → 读 journal 归类 → 续跑排程 / 熔断 / 摘除。
+ *
+ * 与 P5 前的主要差异：不再读 active-runs.json（升级存量由 migrateLegacyActiveRuns 一次性并入）；
+ * Claude 与 openai 共用同一份索引与同一套 classifyInterrupted 判定，各自路由到自己的续跑入口。
+ * 多实例守卫沿用 partitionRunIndex（属主进程存活且非自己的条目原样保留，防抢跑）。
+ * @param {{scheduleOpenAi?: Function}} [deps] scheduleOpenAi 供测试注入（默认 openai 检查点续跑排程）
+ */
+export function reconcileRuns({ scheduleOpenAi = scheduleOpenAiOrphanResume } = {}) {
+  // 升级迁移（幂等）：P5 前只写 active-runs 的存量条目先并入索引，避免升级首启丢孤儿
+  try {
+    migrateLegacyActiveRuns();
+  } catch (e) {
+    logger.warn('web', 'active-runs 存量迁移失败（跳过，继续对账）', { err: e?.message || String(e) });
+  }
+  const { orphans, foreign } = partitionRunIndex(listRunIndex(), {
     selfPid: process.pid,
     isPidAlive,
     bootTimeMs: Date.now() - os.uptime() * 1000,
@@ -436,38 +507,60 @@ export function recoverPendingAndOrphans() {
       pids: [...new Set(foreign.map((e) => e.pid))],
     });
   }
-  if (orphans.length) {
-    removeActiveRuns(orphans.map((o) => o.runId));
-    for (const o of orphans) {
-      if (!o.session_id || !o.convId) {
-        logger.warn('web', '孤儿 run 缺 session/convId，无法续跑', { runId: o.runId, convId: o.convId || null });
-        continue;
-      }
-      const nextAttempt = (o.resumeAttempt || 0) + 1; // 本次孤儿续跑的代次
-      if (shouldAbandonResume(nextAttempt, MAX_RESUME_ATTEMPTS)) {
-        // 连续自重启/续跑达上限 → 熔断，不再续跑（破环根治）
-        abandonResume({
-          convId: o.convId,
-          attempts: nextAttempt,
-          reason: `连续 ${nextAttempt - 1} 次自动续跑仍中断，超过上限 ${MAX_RESUME_ATTEMPTS}`,
-        });
-        continue;
-      }
-      logger.info('web', '恢复因进程重启中断的任务', { runId: o.runId, convId: o.convId, attempt: nextAttempt });
-      addPending({
-        convId: o.convId,
-        session_id: o.session_id,
-        cwd: o.cwd,
-        model: o.model,
-        effort: o.effort,
-        mode: o.mode,
-        attempts: nextAttempt, // 续跑代次随孤儿链 +1
-        reason: 'orphan_recovery', // 标记为进程重启孤儿恢复，非额度耗尽
-        resetsAt: Math.floor(Date.now() / 1000), // 立即可续（scheduleResume 自带 +30s 缓冲）
-      });
+  for (const entry of orphans) {
+    const decision = classifyInterrupted(entry, readRunEvents(entry.runId), { maxAttempts: MAX_RESUME_ATTEMPTS });
+    // 无论结局如何先摘旧条目（续跑/熔断都会写新记录）；失败时留待下次对账，journal settled 兜底
+    try {
+      removeRun(entry.runId);
+    } catch (e) {
+      logger.warn('web', '孤儿条目移除失败（继续处理）', { runId: entry.runId, err: e?.message || String(e) });
     }
+    if (decision.action === 'discard') {
+      logger.info('web', '中断 run 无需续跑，已摘除索引', {
+        runId: entry.runId,
+        convId: entry.convId || null,
+        reason: decision.reason,
+      });
+      continue;
+    }
+    if (decision.action === 'abandon') {
+      abandonResume({ convId: entry.convId, attempts: decision.attempt, reason: decision.reason });
+      continue;
+    }
+    if (entry.provider === 'openai-compat') {
+      logger.info('web', '恢复因进程重启中断的自定义模型任务（检查点续跑）', {
+        runId: entry.runId,
+        convId: entry.convId,
+        attempt: decision.attempt,
+      });
+      scheduleOpenAi(entry, decision.attempt);
+      continue;
+    }
+    logger.info('web', '恢复因进程重启中断的任务', {
+      runId: entry.runId,
+      convId: entry.convId,
+      attempt: decision.attempt,
+    });
+    addPending({
+      convId: entry.convId,
+      session_id: entry.session_id,
+      cwd: entry.cwd,
+      model: entry.model,
+      effort: entry.effort,
+      mode: entry.mode,
+      attempts: decision.attempt, // 续跑代次随孤儿链 +1
+      reason: 'orphan_recovery', // 标记为进程重启孤儿恢复，非额度耗尽
+      resetsAt: Math.floor(Date.now() / 1000), // 立即可续（scheduleResume 自带 +30s 缓冲）
+    });
   }
+}
+
+/** 进程启动时调用：对账孤儿 run（Claude/openai 统一）+ 重排 pending 定时器（原 recoverPendingAndOrphans 职责）。
+ * @param {{reconcile?: Function, schedule?: Function}} [deps] 测试注入（默认 reconcileRuns / scheduleResume）
+ */
+export function recoverPendingAndOrphans({ reconcile = reconcileRuns, schedule = scheduleResume } = {}) {
+  reconcile();
   // 恢复「额度用尽待续跑」的排程（跨重启；含上面刚转换的孤儿条目）
   // abandoned（熔断）与 done 均不重排：熔断条目仅供前端消费一次终结提示后 dismiss
-  for (const e of getPending()) if (e.status !== 'done' && e.status !== 'abandoned') scheduleResume(e);
+  for (const e of getPending()) if (e.status !== 'done' && e.status !== 'abandoned') schedule(e);
 }

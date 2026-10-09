@@ -1,0 +1,14 @@
+{
+  "id": "6a5499b-store-feature-index",
+  "title": "实现功能账本数据层（store/feature-index）",
+  "type": "feature",
+  "input": "建一个功能账本的数据层：以功能标签为键，记录改动涉及的文件以及频次；支持按标签查询、取改动最频繁的前 N 个文件；标签为空或文件列表为空时静默跳过；标签不存在时查询返回空而不是报错。",
+  "analysis": "",
+  "fixRef": "6a5499b",
+  "baseRef": null,
+  "testFiles": [
+    "src/store/feature-index.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": []
+}

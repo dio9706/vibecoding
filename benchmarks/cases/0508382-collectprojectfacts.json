@@ -1,0 +1,16 @@
+{
+  "id": "0508382-collectprojectfacts",
+  "title": "确定性扫描 — collectProjectFacts 识别模块和依赖",
+  "type": "feature",
+  "input": "给工程做一份代码地图的前半程（纯本地扫描，不调用模型）：识别出各个模块（目录）以及模块之间的依赖关系，先把单文件级别的导出符号和导入依赖提出来——export default、class、re-export 都要认，ES import 和 CommonJS require 都算且要去重，内部函数不算导出。",
+  "analysis": "",
+  "fixRef": "0508382",
+  "baseRef": null,
+  "testFiles": [
+    "tests/project-map/collect-facts.logic.test.js"
+  ],
+  "verifyCommand": "",
+  "tags": [
+    "project-map"
+  ]
+}

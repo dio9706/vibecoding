@@ -15,7 +15,8 @@
 - `team-tools/feedback/index.js` — feature「需求/故障收集」（`intents:[bug,feature,material]`）：建 Task、按托管档位/身份分流到评审或直通自动开发；含「坚持修改/算了」评审否定应答（文本 + 卡片两条路径）。`logic.js` 为其纯函数（可挽回任务判定、评审否定卡片构造/解析）。
 - `team-tools/review/index.js` — feedback/bug-patrol 调用的**评审门**（非 feature）：`reviewTask` 只读查证打分，`recordOverride` 记人工覆盖判例。`logic.js` 存判决矩阵 `decideVerdict`、`buildReviewPrompt` 等纯函数。
 - `team-tools/auto-dev/queue.js` — **入队 API 的零重依赖叶子**：`requestAutoDevelop`（置 `queued`，任意进程可调，幂等）+ `isOverrideStart`（纯谓词）。**只允许依赖 `store/tasks.js`**。要入队一律从这里引，**不要从 `index.js` 引**——那会把 git / 编译 / 飞书回发 / Claude 调用整条执行链拖进调用方，并让 `task-notify` 与执行管线成环（2026-09-04 实测检出过两个环，见该文件头）。
-- `team-tools/auto-dev/index.js` — **自动开发管线（执行侧）**：泵 `startAutoDevPump` **仅 web 进程**常驻，在常驻 auto 工作区建任务分支改码、提交、置 done。配套 `git.js`（git 封装，参数拼装抽纯函数）、`logic.js`（分支名/提交信息纯函数）、`compile.js`（DEV 编译二维码适配）。
+- `team-tools/auto-dev/index.js` — **自动开发管线（执行侧）**：泵 `startAutoDevPump` **仅 web 进程**常驻，在常驻 auto 工作区建任务分支改码 → 自检门（`verify.js`）→ 提交、置 done。配套 `git.js`（git 封装，参数拼装抽纯函数）、`logic.js`（分支名/提交信息纯函数）、`compile.js`（DEV 编译二维码适配）。
+- `team-tools/auto-dev/verify.js`（+ `verify.logic.js`）— **自检门**：`developWithVerify`（先解析命令：显式配置 > `capabilities/verifier.js#resolveVerifyCommand` 自动发现 → develop → `runVerify` → 失败带输出重试 1 次 → 再验证）；纯函数层存 prompt 片段（完成标准/失败现场）、卡片行与重试上限。命令只来自 `bot.verifyScript`（owner 配置）或工程 `package.json` test 脚本（发现产物只有 `npm test` 一种形态），**任何模型输出/任务数据不得拼入**——那是绕过审批的任意命令通道。验证失败同样 `commitAll` 留痕，再退回 `analyzed` + 卡片通知。spec：`docs/superpowers/specs/2026-09-30-verify-gate-design.md`。
 - `team-tools/auto-dev/revert.js`（+ `revert.logic.js`）— **放弃已合并改动**：`git revert -m 1 <mergeCommit>` 优先，冲突或无锚点则起 Claude 撤销再 `commitAll`。执行目录走 `git.js#withBranchWorktree`（与合并同一套路径 A/B 分流）。**进 LLM 兜底前有一道 `isClean` 闸**——路径 A 下执行目录就是用户主工作区，脏则停手报错：否则无关的未提交改动会被 `commitAll` 的 `add -A` 卷进撤销提交，且「无改动即失败」的防谎报闸会被脏文件顶开。`revert.logic.js` 存 prompt 与 commit message 纯函数（消息必须过 commitlint）。
 - `team-tools/auto-dev/merge-llm.js`（+ `merge-llm.logic.js`）— **自动合并的 LLM 兜底**，作为 `resolver` 由 `task-actions.js#mergeTaskById` 注入给 `git.js#mergeBranch`（`git.js` 只认回调、不认识模型，否则每个想跑 `git status` 的调用方都被拖上 SDK）。两个出口性质不同、prompt 不可互换：`resolveConflict` 解两个已提交分支的内容冲突（**明令禁止整块选一边**）；`mergeStash` 融合「合并结果 vs 维护者未提交、正在写的代码」（**两边都要保留，半成品原样留着，不许替人补全或删除**）。两个 prompt 共同禁止模型自己 `git add/commit` —— 提交与防谎报闸都在 `git.js` 里。**单测调 `mergeTaskById` 涉及冲突时必须传 `resolver: null`**，否则会起一次真实模型调用（实测 73 秒 + 真改了测试仓库的文件）。
 - `team-tools/task-triage/index.js` — feature「owner 待办分诊」（触发词进入，owner 专属）：交互式逐条呈现已分析任务，决策后入自动开发/后台串行开发队列。`logic.js` 分组/排序/意图解析纯函数。
@@ -28,7 +29,8 @@
 - `team-tools/status-report/index.js` — feature「当前任务清单」（`\10002`，可信提交人专属）：纯本地读盘汇总运行中会话 + 活跃任务 + 待合并。`logic.js` 分组/状态标签/格式化纯函数。
 - `team-tools/create-session/index.js` — feature「新建会话」（`\10003`，可信提交人专属）：跨进程 POST web 路由建会话，回前 8 位 shortId。`logic.js` 触发文案定义。
 - `team-tools/project-qa/index.js` — feature「项目问答」（`intents:[question]`）：只读起 Claude 查代码回答，带同用户串行闸/3 分钟超时/答案截断三道保护。
-- `team-tools/task-ops.js` — **共享领域模块**（非 feature）：`analyze`（只读分析）/`develop`（实际改码）/`attachMaterialToRecentTask`。供 feedback/task-triage/auto-dev/web 入口共用。
+- `team-tools/auto-dev/prompt.logic.js` — **develop 提示词模板**（纯函数，零 IO）：`buildDevelopPrompt({type,detail,analysis,scopeSection,scopeFix,verifyCommand,verifyFeedback})`。`task-ops.js#develop` 与内部 benchmark（`benchmarks/lib/runner.js`）**共用同一份**——「改提示词」在评测里必须可复现，A/B 才成立。
+- `team-tools/task-ops.js` — **共享领域模块**（非 feature）：`analyze`（只读分析）/`develop`（实际改码）/`attachMaterialToRecentTask`。供 feedback/task-triage/auto-dev/web 入口共用。`develop` 支持 `verifyCommand`/`verifyFeedback`（自检门的 prompt 段：完成标准与上次失败现场；模板在 `auto-dev/prompt.logic.js`）。**无人值守策略（T6）**：develop 经 `capabilities/tool-policy.js#buildUnattendedClaudeOpts` 按 `bot.execPolicy` 拼权限选项（默认 bypass=与改动前一致；standard/trusted 走策略门，计次熔断时 abort 本轮）。
 - `team-tools/task-actions.js` — **共享领域模块**：任务分支 `mergeTaskById`/`discardTaskById` 及 `isAwaitingMerge`/`isDiscardable` 谓词。web 路由与飞书任务卡片共用一套编排。**放弃按 `task.merged` 分流**：未合并删分支、已合并走 `auto-dev/revert.js` 撤销（合并已自动化，「删分支」不再等于撤销）；`isDiscardable` 因此**不含 `!merged`**，合并前后都可放弃。
 - `team-tools/task-notify.js`（+ `task-notify.logic.js`）— 任务完成 → 飞书私聊卡片（发给管理员本人），处理「合并/补充/放弃」卡片回调；`.logic.js` 为卡片构造/回调解析纯函数。**合并结果必须上卡片正文**（`mergeLine`）：2026-09-28 实测事故——自动合并失败后卡片只写「✅ 已处理完成」配一个合并按钮，人看不出自动合并已试过并失败，会以为是自己还没点，三条任务因此积压四天。卡片与降级纯文本（`taskDoneFallbackText`）共用 `mergeStatusOf` 这一把尺子，否则两条通道口径会分叉。整条通知受 `uiPrefs.taskNotifyFeishu` 总开关管（面板上的 🔔 chip），**关着就一条都收不到**。
 - `team-tools/material-pool.js` — 材料暂存池（先发文件后发描述的归并），内存态 + TTL 10 分钟 + 单 key 上限。
@@ -89,7 +91,7 @@
    - **轻度托管** → `task-ops.js#analyze`（只读分析）后补一句闭环回复，等 owner 在别处确认。
    - **中度/完全托管** → `runReviewFlow` 调 `review/index.js#reviewTask` 打分 + `logic.js#decideVerdict` 判决：`reject/ask` 发「坚持修改/算了」卡片（`feedback/logic.js` 构造）；`fix`（BUG）或用户坚持 → `requestAutoDevelop`；`plan`（需求）→ `analyze`，完全托管再 `requestAutoDevelop`。
 3. `requestAutoDevelop`（`auto-dev/queue.js`）只把任务置 `queued`（`store/tasks.js`，跨进程锁）。**执行泵 `startAutoDevPump` 仅在 web 进程常驻**（feishu 进程只标状态，从根上避免双进程争同一 git 工作区；状态落盘天然获得崩溃/重启续跑）。
-4. 泵 `tick → runOne`：确保常驻 auto 工作区（`git.js#ensureAutoWorktree`）→ 自愈残留 → `checkout -B <taskBranch>` → `task-ops.js#develop`（在 auto 工作区 bypassPermissions 改码，`deferStatus`）→ `git.js#commitAll` 校验（无改动即失败）→ 置 `done` → **自动合并回基线分支**（`mergeTaskById(id, { auto:true })`，失败则静默降级回待人工合并态）→ `task-notify.js#notifyTaskDone` 发管理员私聊卡片 → `replySource` 回来源会话。
+4. 泵 `tick → runOne`：确保常驻 auto 工作区（`git.js#ensureAutoWorktree`）→ 自愈残留 → `checkout -B <taskBranch>` → `auto-dev/verify.js#developWithVerify`（`task-ops.js#develop` 在 auto 工作区改码，`deferStatus`；权限档按 `bot.execPolicy` 解析——默认 bypassPermissions，standard/trusted 走策略门；自检门：未通过带输出重试一次，再败退回 `analyzed`）→ `git.js#commitAll` 校验（无改动即失败，验证失败同样提交留痕）→ 置 `done` → **自动合并回基线分支**（`mergeTaskById(id, { auto:true })`，失败则静默降级回待人工合并态）→ `task-notify.js#notifyTaskDone` 发管理员私聊卡片 → `replySource` 回来源会话。
 5. 管理员在飞书任务卡片点「合并/放弃」→ `task-notify.js#onTaskCardAction` → `task-actions.js#mergeTaskById/discardTaskById`（与 web 路由同一套编排，谓词 `isAwaitingMerge/isDiscardable` 共用，防两条入口状态机分叉）。
 
 另有两条入口汇入同一后段：`task-triage/index.js`（owner 主动分诊，走 `task-ops`/`auto-dev`）、`bug-patrol/index.js`（多维表格 → 逐条 `reviewTask` → 建 Task → `requestAutoDevelop`）。**它们彼此不互相 import feature；跨 feature 协作一律经共享领域模块（task-ops/task-actions/auto-dev 的导出函数）与 `store`。**
@@ -157,6 +159,7 @@ onInbound（群聊仅 @ 才放行——见下）
 - **要改需求/故障从收集到开发的分流逻辑**（托管档位、直通条件、即时应答、评审否定应答）→ 改 `team-tools/feedback/index.js`。
 - **要改 AI 评审的判决口径 / 阈值** → 改 `team-tools/review/logic.js#decideVerdict`（纯判决矩阵）；改评审提示词或只读闸 → `review/index.js` + `logic.js#buildReviewPrompt`。
 - **要改自动开发的工作区/分支/提交/重启恢复策略** → 改 `team-tools/auto-dev/index.js`（泵与 runOne 流程）；git 参数拼装 → `auto-dev/git.js`；分支命名/提交信息 → `auto-dev/logic.js`。
+- **要改自检门**（重试上限/卡片文案/prompt 片段）→ `team-tools/auto-dev/verify.js` / `verify.logic.js`；命令本体（跑什么）在机器人配置 `verifyScript`（设置页）或工程 `package.json` test 脚本（未配置时自动发现）；通用验证能力（超时/fail-open 边界/命令探测/自动发现/输出截断/摘要）→ `capabilities/verifier.js` / `verifier.logic.js`。
 - **要改自动合并的时机 / 失败降级策略** → 改 `team-tools/auto-dev/index.js#runOne` 里 `status='done'` 之后那次 `mergeTaskById` 调用（**必须在 done 之后**，之前调会被 `isAwaitingMerge` 谓词挡回、自动合并静默失效）；改合并本身的 git 行为 → `auto-dev/git.js`。
 - **要改合并失败的救援策略** → 认准三层逐级升级、各有各的落点：① 提交钩子拦截 → `--no-verify` 重提（`git.js#attemptMerge`）；② 工作区脏 → 自动 `stash` 后重试、合完 `pop` 回来（`git.js#mergeWithStash` / `popStash`）；③ 内容冲突 → 交注入的 resolver（`auto-dev/merge-llm.js`）。改 prompt 只动 `merge-llm.logic.js`，改 git 编排只动 `git.js`。
   - **`popStash` 里每条出口都在保同一样东西：维护者未提交的代码**。`git stash drop` 只允许出现在「融合确认成功」之后，其余分支一律留着条目并把 sha 写进提示——那是改动的最后一份拷贝，没有任何地方能找回。
@@ -164,7 +167,7 @@ onInbound（群聊仅 @ 才放行——见下）
   - 合并成功但留了尾巴走 `task.mergeWarning`（面板琥珀色）而**不是** `mergeError`（面板红色「上次合并失败」）：混用会让人去排查一次根本不存在的失败。
 - **要改「放弃已合并改动」的撤销策略或 AI 兜底提示词** → 改 `team-tools/auto-dev/revert.js` / `revert.logic.js`；**不要**改 `git.js#deleteBranch`（那条是未合并任务的路径）。
 - **要改入队条件 / 幂等判定 / 覆盖判定** → 改 `team-tools/auto-dev/queue.js`；往那里加东西前先读它的文件头纪律（**只许依赖 `store/tasks.js`**，破了纪律 import 环会原样回来）。
-- **要改「只读分析」或「实际改码」的提示词 / 权限模式** → 改 `team-tools/task-ops.js`（`analyze`/`develop`，被多入口共用，一处改全局生效）。
+- **要改「只读分析」或「实际改码」的提示词** → 改 `team-tools/task-ops.js`（`analyze`/`develop`，被多入口共用，一处改全局生效）；改**无人值守执行档位**（bypass/standard/trusted）→ `bot.execPolicy`（设置页机器人表单），规则表与判定在 `capabilities/tool-policy*.js`（T6）。
 - **要改合并/放弃的编排或谓词** → 改 `team-tools/task-actions.js`（web 与飞书卡片共用，勿在任一入口另写一份条件）。
 - **要改可信提交人指令（\10001/\10002/\10003/\10004）的触发文案** → 改对应 feature 的 `logic.js` 里 `*_TRIGGERS`；触发匹配规则本身 → `team-tools/trusted-trigger.js`（严格全等，勿改成模糊/前缀/LLM 识别）。
 - **要改巡检循环的周期 / 12 小时上限 / 汇报文案** → 改 `team-tools/bug-patrol/loop.logic.js`（`STANDBY_MS` / `MAX_LIFETIME_MS` / `QUOTA_HOLD_MS` / `buildRoundReport`）；改状态机流转 → `loop.js`。

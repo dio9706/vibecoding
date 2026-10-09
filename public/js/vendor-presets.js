@@ -1,38 +1,34 @@
 /** 自定义模型（openai-compat）凭证的厂商预设与 baseURL 反查表。
  *  独立成模块的原因：设置页与新用户引导两处都要用；留在 settings-panel.js 里的话
  *  第二个使用方只能复制一份，加厂商就变成改两处、必然漂移。
- *  纯数据、无副作用，node 下可直接 import 单测。 */
+ *  纯数据、无副作用，node 下可直接 import 单测。
+ *  多模型改版（spec 2026-10-08-credential-multi-model）后，预设**不再携带模型列表**——
+ *  选定厂商只带 baseURL，模型由添加后 `GET {base}/models` 自动发现（凭证行/弹层可刷新）。 */
 
 export const VENDOR_PRESETS = {
   openai: {
     label: 'OpenAI',
     baseURL: 'https://api.openai.com/v1',
-    models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1', 'o3-mini'],
   },
   deepseek: {
     label: 'DeepSeek',
     baseURL: 'https://api.deepseek.com/v1',
-    models: ['deepseek-chat', 'deepseek-reasoner'],
   },
   aliyun: {
     label: '阿里云百炼',
     baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    models: ['qwen-max', 'qwen-plus', 'qwen-turbo'],
   },
   moonshot: {
     label: '月之暗面',
     baseURL: 'https://api.moonshot.cn/v1',
-    models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
   },
   zhipu: {
     label: '智谱',
     baseURL: 'https://open.bigmodel.cn/api/paas/v4',
-    models: ['glm-4', 'glm-4-flash'],
   },
   custom: {
     label: '其他（自定义）',
     baseURL: '',
-    models: [],
   },
 };
 

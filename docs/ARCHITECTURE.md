@@ -64,7 +64,8 @@
 │  │                                                     │             │
 │  │  【状态管理层】src/store/                          │             │
 │  │  ├─ runs.js            (task 管理 + 权限队列)    │             │
-│  │  ├─ active-runs.json   (执行中状态)              │             │
+│  │  ├─ submissions.js     (提交幂等: requestId 认领)│             │
+│  │  ├─ run-index.json   (执行中状态)              │             │
 │  │  ├─ pending-resume.json (特性⑥: 额度续跑)       │             │
 │  │  ├─ history.js         (特性②: 会话归档)         │             │
 │  │  ├─ settings.js        (特性③④: token 池)       │             │
@@ -112,15 +113,15 @@
 
 ### 特性① 关闭窗口后继续运行
 
-**关键模块**：`store/runs.js` + `active-runs.json` + `integrations/claude.js` + PM2
+**关键模块**：`store/runs.js` + `run-index.json` + `integrations/claude.js` + PM2
 
-**原理**：任务登记到 `active-runs.json` 落盘，后端进程被 PM2 守护，关窗不影响执行；重开页面通过 `/api/run/pending` 查询进行中的任务并接回流。
+**原理**：任务登记到 `run-index.json` 落盘，后端进程被 PM2 守护，关窗不影响执行；重开页面通过 `/api/run/pending` 查询进行中的任务并接回流。
 
 **流程**：
 ```
 POST /api/run/start {prompt, cwd}
   ↓
-registerRun() → active-runs.json 写入 {id, convId, state: 'running', ...}
+registerRun() → run-index.json 写入 {id, convId, state: 'running', ...}
   ↓
 runClaude() → SDK query() 流式执行
   ↓
@@ -132,7 +133,7 @@ activeRuns.readPending() → 找到 {id, convId, state: 'running'}
   ↓
 前端 openConv(convId) + attachStream(runId) 接流
   ↓
-finishRun() → state 变 'done' + active-runs.json 清除
+finishRun() → state 变 'done' + run-index.json 清除
 ```
 
 **看门狗保护**：
@@ -463,12 +464,11 @@ token 池：
 
 ```javascript
 // 写状态
-store/runs.js writeActiveRuns(runs) → active-runs.json
+store/runs.js → entrypoints/web/run-durability.js mirrorRunStart() → run-index.json
 
 // 读状态（进程重启时）
 server.listen → {
-  loadActiveRuns() // 恢复孤儿任务
-  loadPending()    // 重排续跑定时器
+  recoverPendingAndOrphans() // P5：run-index 对账孤儿（Claude/openai 统一） + 重排续跑定时器
 }
 ```
 
@@ -523,7 +523,7 @@ return candidates[0]
 
 | 现象 | 根因 | 修复 |
 |------|------|------|
-| 关窗后任务消失 | PM2 未守护 或 `active-runs.json` 被删 | `pm2 start ecosystem.config.cjs` 或检查 `store/active-runs.js` 写入逻辑 |
+| 关窗后任务消失 | PM2 未守护 或 `run-index.json` 被删 | `pm2 start ecosystem.config.cjs` 或检查 `store/run-index.js` 写入逻辑 |
 | 重开页面接不回任务 | 前端 `attachStream` 逻辑错 | 检查 `/api/run/pending` 返回 + 前端 `openConv(convId)` 调用 |
 | 飞书凭证改了但长连接没更新 | `fs.watch` 未触发 或 `WSClient.start()` 未调用 | 手动 `pm2 restart principal-feishu` |
 | token 池有号但始终只用第一个 | `pickActive()` 逻辑错 或 status 未更新 | 检查 `onRateLimit` 是否被调用；手动改 `settings.json` 验证 |
@@ -539,7 +539,7 @@ Principal 通过以下设计实现 7 大特性：
 
 | 特性 | 核心技术 | 关键文件 |
 |------|---------|---------|
-| ① 关窗续跑 | 后端进程 + PM2 + 状态落盘 | `store/active-runs.json`, `ecosystem.config.cjs` |
+| ① 关窗续跑 | 后端进程 + PM2 + 状态落盘 | `store/run-index.json`, `ecosystem.config.cjs` |
 | ② 历史检索 | 会话归档 + 侧栏搜索 | `store/history.js`, `/api/history` |
 | ③ 飞书接入 | WSClient 长连接 + 热重载 | `entrypoints/feishu/`, `integrations/lark.js` |
 | ④ 多账号 | token 池 + 自动选号 | `store/settings.js`, `capabilities/token-rotation.js` |

@@ -40,7 +40,7 @@ Principal 把 headless Claude Code（`@anthropic-ai/claude-agent-sdk`）从终�
 | `src/shared/` | 共享基础设施 | `config.js`（env）、`logger.js`、`messages.js`、`load-env.js` |
 | `public/` | 前端 | `app.js` + `js/`（功能模块）+ `css/` + `vendor/`（`sync:vendor` 生成，勿手改） |
 | `src-tauri/` | Tauri 桌面壳 | sidecar 复用根 `server.js`；配置 `tauri.conf.json` |
-| `scripts/` | 动作脚本 + 构建/同步/e2e | 自定义动作脚本、`prepare-sidecar.mjs`、`run-e2e.mjs` |
+| `scripts/` | 动作脚本 + 构建/同步/e2e | 自定义动作脚本、`prepare-sidecar.mjs`、`superpowers-fetch.mjs`（内置技能拉取）、`run-e2e.mjs` |
 | `docs/` | 文档 | 架构与关键约定 `ARCHITECTURE.md`；卡片/动作/构建等专题 |
 
 ## 关键约定（判据与验证命令见 `docs/ARCHITECTURE.md`「关键约定」）

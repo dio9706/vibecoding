@@ -12,7 +12,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDialog, summarizeTool, READONLY_TOOLS } from './tool-summary.js';
+import { parseDialog, summarizeTool } from './tool-summary.js';
+import { decideToolAction } from '../../capabilities/tool-policy.logic.js';
 
 /** 造一条最简 AskUserQuestion payload */
 const askPayload = (over = {}) => ({
@@ -167,7 +168,31 @@ test('Workflow：什么都没有 → 「工作流(未命名)」，不抛', () =>
   assert.equal(summarizeTool({ name: 'Workflow' }), '工作流(未命名)');
 });
 
-test('Workflow 不在只读放行集内（额度安全回归保护）', () => {
-  assert.ok(!READONLY_TOOLS.has('Workflow'), '放行等于让编排绕过审批，一轮能拉起十几个子代理');
-  assert.ok(READONLY_TOOLS.has('Agent'), 'Agent 仍放行：其内部改动类工具会逐个走审批，与 Workflow 的风险性质不同');
+test('Workflow 不在只读放行面内（额度安全回归保护；T6 起由统一策略表承载）', () => {
+  const ws = process.cwd();
+  const wf = decideToolAction({ toolName: 'Workflow', level: 'acceptEdits', workspace: ws });
+  assert.equal(wf.action, 'ask', '放行等于让编排绕过审批，一轮能拉起十几个子代理');
+  const agent = decideToolAction({ toolName: 'Agent', level: 'default', workspace: ws });
+  assert.equal(agent.action, 'allow', 'Agent 仍放行：其内部改动类工具会逐个走审批，与 Workflow 的风险性质不同');
+});
+
+// ---- summarizeTool：委托同事对话（openai-compat 路径） ----
+
+test('summarizeTool：AskColleague 显示问谁+问题，WaitColleagueReply 显示等待', () => {
+  assert.equal(
+    summarizeTool({ name: 'AskColleague', input: { name: '张三', role: 'backend', question: '订单号是哪个字段？' } }),
+    '询问 张三：订单号是哪个字段？',
+  );
+  assert.equal(
+    summarizeTool({ name: 'AskColleague', input: { role: 'backend', question: 'x' } }),
+    '询问 backend：x',
+    '没给姓名时退回职位',
+  );
+  assert.equal(summarizeTool({ name: 'WaitColleagueReply', input: { question_id: 'fq_1' } }), '等待同事答复…');
+});
+
+test('summarizeTool：RepoMap 显示查询词与刷新标记', () => {
+  assert.equal(summarizeTool({ name: 'RepoMap', input: {} }), '查代码地图');
+  assert.equal(summarizeTool({ name: 'RepoMap', input: { query: 'auth token' } }), '查代码地图 “auth token”');
+  assert.equal(summarizeTool({ name: 'RepoMap', input: { query: 'x', refresh: true } }), '查代码地图 “x”（刷新）');
 });

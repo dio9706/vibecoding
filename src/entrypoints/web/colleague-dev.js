@@ -363,7 +363,15 @@ async function doDispatch(req, payload, deps, onCreated) {
     runGit,
   });
   try {
-    start(run, { prompt: payload.prompt, cwd: workDir, addDirs, mode: 'bypassPermissions', convId });
+    // 无人值守策略（T6）：按 bot.execPolicy 解析（默认 bypass = 与改动前一致）
+    start(run, {
+      prompt: payload.prompt,
+      cwd: workDir,
+      addDirs,
+      execPolicy: getActiveBot()?.execPolicy,
+      unattended: true,
+      convId,
+    });
   } catch (e) {
     // startClaudeRun 起跑前会读盘（getUiPrefs），settings.json 损坏时会同步抛。
     // 不收拾的话 busy 一直挂着直到 healStaleBusy 兜底，期间该需求所有系统任务排队等一个死 run。
